@@ -2,10 +2,13 @@
 
 import {
   ensureUiServerRunning,
+  getBridgeStatus,
   getCurrentUiServerUrl,
   getUiServerStatus,
   getUiServerUrl,
   openBrowser,
+  stopBridge,
+  stopUiServer,
 } from './service-manager.js';
 
 async function main(): Promise<void> {
@@ -45,8 +48,30 @@ async function main(): Promise<void> {
       return;
     }
 
+    case 'stop': {
+      const bridge = await stopBridge();
+      const ui = await stopUiServer();
+      process.stdout.write(
+        `Stopped services. UI running=${ui.running ? 'yes' : 'no'}, Bridge running=${bridge.running ? 'yes' : 'no'}\n`
+      );
+      return;
+    }
+
+    case 'status': {
+      const ui = getUiServerStatus();
+      const bridge = getBridgeStatus();
+      const url = getCurrentUiServerUrl();
+      process.stdout.write(
+        [
+          `UI: ${ui.running ? 'running' : 'stopped'}${url ? ` (${url})` : ''}`,
+          `Bridge: ${bridge.running ? 'running' : 'stopped'}`,
+        ].join('\n') + '\n'
+      );
+      return;
+    }
+
     default:
-      process.stdout.write('Usage: codex-to-im [open|url|share-feishu]\n');
+      process.stdout.write('Usage: codex-to-im [open|url|share-feishu|stop|status]\n');
   }
 }
 

@@ -256,6 +256,47 @@ export async function ensureUiServerRunning(): Promise<UiServerStatus> {
   return status;
 }
 
+export async function stopUiServer(): Promise<UiServerStatus> {
+  const status = getUiServerStatus();
+  if (!status.pid || !isProcessAlive(status.pid)) {
+    const next = { ...status, running: false };
+    writeUiServerStatus(next);
+    return next;
+  }
+
+  if (process.platform === 'win32') {
+    await new Promise<void>((resolve) => {
+      const killer = spawn('cmd', ['/c', 'taskkill', '/PID', String(status.pid), '/T', '/F'], {
+        stdio: 'ignore',
+      });
+      killer.on('exit', () => resolve());
+      killer.on('error', () => resolve());
+    });
+  } else {
+    try {
+      process.kill(status.pid, 'SIGTERM');
+    } catch {
+      // ignore
+    }
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 10_000) {
+    const next = getUiServerStatus();
+    if (!next.running) {
+      writeUiServerStatus({ ...next, running: false });
+      return { ...next, running: false };
+    }
+    await sleep(300);
+  }
+
+  const next = getUiServerStatus();
+  if (!next.running) {
+    writeUiServerStatus({ ...next, running: false });
+  }
+  return next;
+}
+
 export function writeUiServerStatus(status: UiServerStatus): void {
   ensureDirs();
   fs.writeFileSync(uiStatusFile, JSON.stringify(status, null, 2), 'utf-8');

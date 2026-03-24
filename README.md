@@ -92,6 +92,18 @@ If you forget the current address, run:
 codex-to-im url
 ```
 
+Check the current local service state:
+
+```bash
+codex-to-im status
+```
+
+Stop the background UI and bridge:
+
+```bash
+codex-to-im stop
+```
+
 ## Main Workflow
 
 1. Open the workbench
@@ -126,6 +138,18 @@ If creating a new session fails with `Not inside a trusted directory`, either:
 
 - change the default working directory to a trusted Git repo, or
 - enable `Allow Codex outside trusted Git repos` in the basic settings and restart the bridge
+
+## Update
+
+On Windows, `npm update -g codex-to-im` can fail with `EBUSY` if the background UI or bridge is still running from the global install directory.
+
+Recommended update flow:
+
+```bash
+codex-to-im stop
+npm update -g codex-to-im
+codex-to-im
+```
 
 ## Optional Codex Integration
 

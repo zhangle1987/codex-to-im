@@ -92,6 +92,18 @@ http://127.0.0.1:4781
 codex-to-im url
 ```
 
+查看当前本地服务状态：
+
+```bash
+codex-to-im status
+```
+
+停止后台 UI 和 bridge：
+
+```bash
+codex-to-im stop
+```
+
 ## 主流程
 
 1. 打开工作台
@@ -126,6 +138,18 @@ codex-to-im url
 
 - 把默认工作目录改成一个你已经信任的 Git 仓库
 - 或在基础配置里打开“允许在未信任 Git 目录运行 Codex”，然后重启 Bridge
+
+## 更新
+
+Windows 上如果后台 UI 或 bridge 仍在运行，`npm update -g codex-to-im` 可能会因为安装目录被占用而报 `EBUSY`。
+
+推荐更新流程：
+
+```bash
+codex-to-im stop
+npm update -g codex-to-im
+codex-to-im
+```
 
 ## 可选 Codex 集成
 

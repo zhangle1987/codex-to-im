@@ -147,6 +147,18 @@ http://127.0.0.1:4781
 codex-to-im url
 ```
 
+查看当前本地服务状态：
+
+```powershell
+codex-to-im status
+```
+
+停止后台 UI 和 bridge：
+
+```powershell
+codex-to-im stop
+```
+
 ## 6. 在目标机上的首次配置
 
 进入本地工作台后，按这个顺序做：
@@ -270,6 +282,23 @@ codex-to-im url
 - 机器重启后，不会自动恢复，需要再次运行 `codex-to-im`
 - 可选 Codex 集成不是主安装路径
 - 当前主路径是“本地工作台 + IM 配置 + Bridge 启动”
+
+## 10.1 Windows 上的更新方式
+
+如果后台 UI 或 bridge 仍在运行，Windows 可能会锁住 `%APPDATA%\\npm\\node_modules\\codex-to-im`，导致：
+
+- `npm update -g codex-to-im`
+- `npm uninstall -g codex-to-im`
+
+出现 `EBUSY` 或 `resource busy or locked`。
+
+推荐更新步骤：
+
+```powershell
+codex-to-im stop
+npm update -g codex-to-im
+codex-to-im
+```
 
 ## 11. 发布方注意事项
 
