@@ -107,6 +107,19 @@ function parseCsv(value: unknown): string[] | undefined {
   return text.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
+function asPositiveInt(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+  return undefined;
+}
+
 function parsePositiveInt(value: string | null, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -124,11 +137,14 @@ function configToPayload(config: Config) {
     defaultWorkDir: config.defaultWorkDir,
     defaultModel: config.defaultModel || '',
     defaultMode: config.defaultMode,
+    historyMessageLimit: config.historyMessageLimit ?? 8,
+    codexSkipGitRepoCheck: config.codexSkipGitRepoCheck === true,
     autoApprove: config.autoApprove === true,
     feishuAppId: config.feishuAppId || '',
     feishuAppSecret: config.feishuAppSecret || '',
     feishuDomain: config.feishuDomain || 'https://open.feishu.cn',
     feishuAllowedUsers: config.feishuAllowedUsers?.join(',') || '',
+    feishuStreamingEnabled: config.feishuStreamingEnabled !== false,
     weixinMediaEnabled: config.weixinMediaEnabled === true,
   };
 }
@@ -146,11 +162,14 @@ function mergeConfig(payload: Record<string, unknown>): Config {
     defaultWorkDir: asString(payload.defaultWorkDir) || current.defaultWorkDir || process.cwd(),
     defaultModel: asString(payload.defaultModel),
     defaultMode: payload.defaultMode === 'plan' || payload.defaultMode === 'ask' ? payload.defaultMode : 'code',
+    historyMessageLimit: asPositiveInt(payload.historyMessageLimit) || current.historyMessageLimit || 8,
+    codexSkipGitRepoCheck: payload.codexSkipGitRepoCheck === true,
     autoApprove: payload.autoApprove === true,
     feishuAppId: asString(payload.feishuAppId),
     feishuAppSecret: asString(payload.feishuAppSecret),
     feishuDomain: asString(payload.feishuDomain) || 'https://open.feishu.cn',
     feishuAllowedUsers: parseCsv(payload.feishuAllowedUsers),
+    feishuStreamingEnabled: payload.feishuStreamingEnabled !== false,
     weixinMediaEnabled: payload.weixinMediaEnabled === true,
   };
 }
@@ -728,6 +747,10 @@ function renderHtml(): string {
                       <option value="ask">ask</option>
                     </select>
                   </label>
+                  <label>
+                    /history 返回条数
+                    <input id="historyMessageLimit" type="number" min="1" max="20" value="8" />
+                  </label>
                 </div>
                 <label>
                   默认工作目录
@@ -742,6 +765,10 @@ function renderHtml(): string {
                   <label class="checkbox"><input id="channelWeixin" type="checkbox" /> 启用微信</label>
                   <label class="checkbox"><input id="autoApprove" type="checkbox" /> 自动批准工具权限</label>
                 </div>
+                <div class="checkbox-row">
+                  <label class="checkbox"><input id="codexSkipGitRepoCheck" type="checkbox" /> 允许在未信任 Git 目录运行 Codex</label>
+                </div>
+                <div class="small">如果新建会话报 “Not inside a trusted directory”，可以打开这个选项。修改后需要重启 Bridge 才会生效。</div>
               </div>
             </section>
 
@@ -799,6 +826,10 @@ function renderHtml(): string {
                     <input id="feishuAllowedUsers" placeholder="多个 user_id 用逗号分隔" />
                   </label>
                 </div>
+                <div class="checkbox-row">
+                  <label class="checkbox"><input id="feishuStreamingEnabled" type="checkbox" checked /> 启用飞书流式响应卡片</label>
+                </div>
+                <div class="small">需要飞书侧已开通可更新卡片的相关能力；如果权限不足，会自动回退为最终结果消息。</div>
                 <div class="actions">
                   <button class="primary" id="saveConfigBtn">保存配置</button>
                   <button id="testFeishuBtn">测试飞书凭据</button>
@@ -887,14 +918,17 @@ function renderHtml(): string {
         return {
           runtime: document.getElementById('runtime').value,
           defaultMode: document.getElementById('defaultMode').value,
+          historyMessageLimit: document.getElementById('historyMessageLimit').value,
           defaultWorkDir: document.getElementById('defaultWorkDir').value,
           defaultModel: document.getElementById('defaultModel').value,
+          codexSkipGitRepoCheck: document.getElementById('codexSkipGitRepoCheck').checked,
           enabledChannels: enabledChannelsFromForm(),
           autoApprove: document.getElementById('autoApprove').checked,
           feishuAppId: document.getElementById('feishuAppId').value,
           feishuAppSecret: document.getElementById('feishuAppSecret').value,
           feishuDomain: document.getElementById('feishuDomain').value,
           feishuAllowedUsers: document.getElementById('feishuAllowedUsers').value,
+          feishuStreamingEnabled: document.getElementById('feishuStreamingEnabled').checked,
           weixinMediaEnabled: document.getElementById('weixinMediaEnabled').checked,
         };
       }
@@ -1008,8 +1042,10 @@ function renderHtml(): string {
         state.config = config;
         document.getElementById('runtime').value = config.runtime || 'codex';
         document.getElementById('defaultMode').value = config.defaultMode || 'code';
+        document.getElementById('historyMessageLimit').value = String(config.historyMessageLimit || 8);
         document.getElementById('defaultWorkDir').value = config.defaultWorkDir || '';
         document.getElementById('defaultModel').value = config.defaultModel || '';
+        document.getElementById('codexSkipGitRepoCheck').checked = config.codexSkipGitRepoCheck === true;
         document.getElementById('channelFeishu').checked = (config.enabledChannels || []).includes('feishu');
         document.getElementById('channelWeixin').checked = (config.enabledChannels || []).includes('weixin');
         document.getElementById('autoApprove').checked = config.autoApprove === true;
@@ -1017,6 +1053,7 @@ function renderHtml(): string {
         document.getElementById('feishuAppSecret').value = config.feishuAppSecret || '';
         document.getElementById('feishuDomain').value = config.feishuDomain || 'https://open.feishu.cn';
         document.getElementById('feishuAllowedUsers').value = config.feishuAllowedUsers || '';
+        document.getElementById('feishuStreamingEnabled').checked = config.feishuStreamingEnabled !== false;
         document.getElementById('weixinMediaEnabled').checked = config.weixinMediaEnabled === true;
       }
 

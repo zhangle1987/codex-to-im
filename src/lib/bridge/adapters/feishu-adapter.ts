@@ -121,6 +121,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   /** In-flight card creation promises per chatId — prevents duplicate creation. */
   private cardCreatePromises = new Map<string, Promise<boolean>>();
 
+  private isStreamingEnabled(): boolean {
+    return getBridgeContext().store.getSetting('bridge_feishu_streaming_enabled') !== 'false';
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -267,7 +271,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const messageId = this.lastIncomingMessageId.get(chatId);
 
     // Create streaming card (fire-and-forget — fallback to traditional if fails)
-    if (messageId) {
+    if (messageId && this.isStreamingEnabled()) {
       this.createStreamingCard(chatId, messageId).catch(() => {});
     }
 
@@ -372,9 +376,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private async _doCreateStreamingCard(chatId: string, replyToMessageId?: string): Promise<boolean> {
     if (!this.restClient) return false;
+    const cardkit = (this.restClient as any).cardkit?.v1;
+    if (!cardkit?.card) {
+      console.warn('[feishu-adapter] CardKit v1 API is unavailable in the current Feishu SDK client');
+      return false;
+    }
 
     try {
-      // Step 1: Create card via CardKit v2
+      // Step 1: Create card via CardKit v1
       const cardBody = {
         schema: '2.0',
         config: {
@@ -393,7 +402,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
       };
 
-      const createResp = await (this.restClient as any).cardkit.v2.card.create({
+      const createResp = await cardkit.card.create({
         data: { type: 'card_json', data: JSON.stringify(cardBody) },
       });
       const cardId = createResp?.data?.card_id;
@@ -487,6 +496,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private flushCardUpdate(chatId: string): void {
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return;
+    const cardkit = (this.restClient as any).cardkit?.v1;
+    if (!cardkit?.cardElement?.content) return;
 
     const content = buildStreamingContent(state.pendingText || '', state.toolCalls);
 
@@ -495,13 +506,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const cardId = state.cardId;
 
     // Fire-and-forget — streaming updates are non-critical
-    (this.restClient as any).cardkit.v2.card.streamContent({
-      path: { card_id: cardId },
+    cardkit.cardElement.content({
+      path: { card_id: cardId, element_id: 'streaming_content' },
       data: { content, sequence: seq },
     }).then(() => {
       state.lastUpdateAt = Date.now();
     }).catch((err: unknown) => {
-      console.warn('[feishu-adapter] streamContent failed:', err instanceof Error ? err.message : err);
+      console.warn('[feishu-adapter] cardElement.content failed:', err instanceof Error ? err.message : err);
     });
   }
 
@@ -532,6 +543,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return false;
+    const cardkit = (this.restClient as any).cardkit?.v1;
+    if (!cardkit?.card?.settings || !cardkit?.card?.update) return false;
 
     // Clear any pending throttle timer
     if (state.throttleTimer) {
@@ -542,9 +555,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
     try {
       // Step 1: Close streaming mode
       state.sequence++;
-      await (this.restClient as any).cardkit.v2.card.settings.streamingMode.set({
+      await cardkit.card.settings({
         path: { card_id: state.cardId },
-        data: { streaming_mode: false, sequence: state.sequence },
+        data: {
+          settings: JSON.stringify({ streaming_mode: false }),
+          sequence: state.sequence,
+        },
       });
 
       // Step 2: Build and apply final card
@@ -562,9 +578,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const finalCardJson = buildFinalCardJson(responseText, state.toolCalls, footer);
 
       state.sequence++;
-      await (this.restClient as any).cardkit.v2.card.update({
+      await cardkit.card.update({
         path: { card_id: state.cardId },
-        data: { type: 'card_json', data: finalCardJson, sequence: state.sequence },
+        data: {
+          card: { type: 'card_json', data: finalCardJson },
+          sequence: state.sequence,
+        },
       });
 
       console.log(`[feishu-adapter] Card finalized: cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
@@ -604,6 +623,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Creates streaming card on first call, then updates content.
    */
   onStreamText(chatId: string, fullText: string): void {
+    if (!this.isStreamingEnabled()) return;
     if (!this.activeCards.has(chatId)) {
       // Card should have been created by onMessageStart, but create lazily if not
       const messageId = this.lastIncomingMessageId.get(chatId);
@@ -616,10 +636,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   onToolEvent(chatId: string, tools: ToolCallInfo[]): void {
+    if (!this.isStreamingEnabled()) return;
     this.updateToolProgress(chatId, tools);
   }
 
   async onStreamEnd(chatId: string, status: 'completed' | 'interrupted' | 'error', responseText: string): Promise<boolean> {
+    if (!this.isStreamingEnabled()) return false;
     return this.finalizeCard(chatId, status, responseText);
   }
 

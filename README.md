@@ -35,6 +35,16 @@ Windows host installation guide: [docs/install-windows.md](D:/codex/Claude-to-IM
 
 ## Install
 
+### Prerequisites
+
+- Node.js 20+
+- If you use the `codex` or `auto` runtime, install Codex CLI first
+
+```bash
+npm install -g @openai/codex
+codex auth login
+```
+
 ### Global install
 
 ```bash
@@ -81,6 +91,31 @@ codex-to-im url
 5. Open the desktop sessions section
 6. Bind a Feishu or Weixin chat to the target thread
 7. Continue the same Codex thread from IM
+
+Useful command:
+
+- `/history` shows the latest N messages of the current session
+- N is configurable in the web workbench under the basic settings panel
+
+If you enable Feishu streaming response cards, the Feishu app must have the required permissions published first, at minimum:
+
+- `cardkit:card:write`
+- `cardkit:card:read`
+- `im:message:update`
+
+If those permissions are missing, the bridge log will usually show `99991672` with `cardkit:card:write`, and the bridge falls back to a final-result message.
+
+Also note that under the current `codex` runtime, the `Codex CLI / SDK` typically emits the assistant text only when the `agent_message` item is completed, not as token-level deltas. In practice that means Feishu "streaming cards" currently behave more like:
+
+- early `Thinking / Tool Progress` updates
+- final response text written into the card at completion
+
+So character-by-character text streaming is not guaranteed in the current implementation.
+
+If creating a new session fails with `Not inside a trusted directory`, either:
+
+- change the default working directory to a trusted Git repo, or
+- enable `Allow Codex outside trusted Git repos` in the basic settings and restart the bridge
 
 ## Optional Codex Integration
 

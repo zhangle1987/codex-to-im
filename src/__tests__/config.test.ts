@@ -82,11 +82,13 @@ describe('configToSettings', () => {
       feishuAppSecret: 'app-secret',
       feishuDomain: 'example.com',
       feishuAllowedUsers: ['fu1'],
+      feishuStreamingEnabled: false,
     });
     assert.equal(m.get('bridge_feishu_app_id'), 'app-id');
     assert.equal(m.get('bridge_feishu_app_secret'), 'app-secret');
     assert.equal(m.get('bridge_feishu_domain'), 'example.com');
     assert.equal(m.get('bridge_feishu_allowed_users'), 'fu1');
+    assert.equal(m.get('bridge_feishu_streaming_enabled'), 'false');
   });
 
   it('sets bridge_qq_enabled based on enabledChannels', () => {
@@ -157,12 +159,23 @@ describe('configToSettings', () => {
     assert.equal(m.has('bridge_default_model'), false);
     assert.equal(m.has('default_model'), false);
     assert.equal(m.get('bridge_default_mode'), 'code');
+    assert.equal(m.get('bridge_history_message_limit'), '8');
   });
 
   it('maps model when explicitly set', () => {
     const m = configToSettings({ ...base, defaultModel: 'gpt-4o' });
     assert.equal(m.get('bridge_default_model'), 'gpt-4o');
     assert.equal(m.get('default_model'), 'gpt-4o');
+  });
+
+  it('maps configured history message limit', () => {
+    const m = configToSettings({ ...base, historyMessageLimit: 12 });
+    assert.equal(m.get('bridge_history_message_limit'), '12');
+  });
+
+  it('maps codex skip git repo check flag', () => {
+    const m = configToSettings({ ...base, codexSkipGitRepoCheck: true });
+    assert.equal(m.get('bridge_codex_skip_git_repo_check'), 'true');
   });
 
   it('maps non-default mode', () => {

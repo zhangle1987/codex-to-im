@@ -21,7 +21,7 @@ import { markdownToTelegramChunks } from './markdown/telegram.js';
 import { markdownToDiscordChunks } from './markdown/discord.js';
 import { getBridgeContext } from './context.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
-import { getDesktopSessionByThreadId, listDesktopSessions } from '../../desktop-sessions.js';
+import { getDesktopSessionByThreadId, listDesktopSessions, readDesktopSessionMessages } from '../../desktop-sessions.js';
 import {
   validateWorkingDirectory,
   validateSessionId,
@@ -111,6 +111,63 @@ function getDisplayedBridgeSessions(currentSessionId?: string): BridgeSession[] 
     if (aShared !== bShared) return bShared - aShared;
     return a.name?.localeCompare(b.name || '') || 0;
   });
+}
+
+function getHistoryMessageLimit(): number {
+  const { store } = getBridgeContext();
+  const configured = Number.parseInt(store.getSetting('bridge_history_message_limit') || '', 10);
+  if (!Number.isFinite(configured) || configured <= 0) return 8;
+  return Math.max(1, Math.min(20, configured));
+}
+
+function stripStoredAttachmentMarker(content: string): string {
+  return content.replace(/\n?<!--files:[\s\S]*?-->$/u, '').trim();
+}
+
+function formatStoredMessageContent(content: string): string {
+  const stripped = stripStoredAttachmentMarker(content);
+  if (!stripped) return '[empty]';
+
+  try {
+    const parsed = JSON.parse(stripped);
+    if (!Array.isArray(parsed)) return stripped;
+
+    const lines: string[] = [];
+    for (const block of parsed) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+        lines.push(block.text.trim());
+        continue;
+      }
+      if (block.type === 'tool_use' && typeof block.name === 'string') {
+        lines.push(`[tool] ${block.name}`);
+        continue;
+      }
+      if (block.type === 'tool_result') {
+        const suffix = block.is_error === true ? ' error' : '';
+        if (typeof block.content === 'string' && block.content.trim()) {
+          lines.push(`[tool_result${suffix}] ${block.content.trim()}`);
+        } else {
+          lines.push(`[tool_result${suffix}]`);
+        }
+      }
+    }
+    return lines.length > 0 ? lines.join('\n') : stripped;
+  } catch {
+    return stripped;
+  }
+}
+
+function truncateHistoryContent(content: string, maxChars = 800): string {
+  const trimmed = content.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, maxChars)}...`;
+}
+
+function formatHistoryRole(role: string): string {
+  if (role === 'user') return 'User';
+  if (role === 'assistant') return 'Codex';
+  return role || 'unknown';
 }
 
 /**
@@ -1122,6 +1179,43 @@ async function handleCommand(
       break;
     }
 
+    case '/history': {
+      if (!currentBinding) {
+        response = '当前聊天还没有绑定会话。先发送消息创建会话，或先用 /thread 1 接管桌面会话。';
+        break;
+      }
+
+      const limit = getHistoryMessageLimit();
+      const desktopMessages = currentBinding.sdkSessionId
+        ? readDesktopSessionMessages(currentBinding.sdkSessionId, limit)
+        : [];
+      const { messages: storedMessages } = store.getMessages(currentBinding.codepilotSessionId, { limit });
+      const messages = desktopMessages.length > 0 ? desktopMessages : storedMessages;
+      if (messages.length === 0) {
+        response = '当前会话还没有历史消息。';
+        break;
+      }
+
+      const lines = [
+        '<b>最近对话</b>',
+        '',
+        `会话: <code>${currentBinding.codepilotSessionId.slice(0, 8)}...</code>`,
+        `Thread: <code>${escapeHtml(currentBinding.sdkSessionId || 'not-shared')}</code>`,
+        `来源: <b>${desktopMessages.length > 0 ? 'desktop thread' : 'bridge cache'}</b>`,
+        `返回条数: <b>${messages.length}</b> / 配置 <b>${limit}</b>`,
+        '',
+      ];
+
+      for (const [index, message] of messages.entries()) {
+        lines.push(`${index + 1}. <b>${formatHistoryRole(message.role)}</b>`);
+        lines.push(escapeHtml(truncateHistoryContent(formatStoredMessageContent(message.content))));
+        lines.push('');
+      }
+
+      response = lines.join('\n').trim();
+      break;
+    }
+
     case '/sessions': {
       const sessions = getDisplayedBridgeSessions(currentBinding?.codepilotSessionId);
       if (sessions.length === 0) {
@@ -1183,6 +1277,7 @@ async function handleCommand(
         '/thread 1 接管第 1 条桌面会话',
         '直接发送文本 继续当前已绑定会话',
         '/status 查看当前聊天绑定到了哪条会话',
+        '/history 查看当前会话最近 N 条消息',
         '',
         '<b>切换与绑定</b>',
         '/threads 列出最近桌面会话',
@@ -1195,6 +1290,7 @@ async function handleCommand(
         '/new [绝对路径] 新建会话',
         '/cwd /path/to/project 修改当前工作目录',
         '/mode plan|code|ask 修改模式',
+        '/history 查看当前会话最近 N 条消息',
         '/stop 停止当前任务',
         '',
         '<b>权限</b>',

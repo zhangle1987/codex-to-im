@@ -35,6 +35,16 @@ Windows 主机安装说明见：[docs/install-windows.md](D:/codex/Claude-to-IM-
 
 ## 安装
 
+### 依赖
+
+- Node.js 20+
+- 如果使用 `codex` 或 `auto` 运行时：先安装 Codex CLI
+
+```bash
+npm install -g @openai/codex
+codex auth login
+```
+
 ### 全局安装
 
 ```bash
@@ -81,6 +91,31 @@ codex-to-im url
 5. 打开“最近桌面会话”
 6. 把飞书或微信聊天绑定到目标 thread
 7. 在 IM 中继续同一条 Codex 会话
+
+常用命令补充：
+
+- `/history` 查看当前会话最近 N 条消息
+- N 可在 Web 工作台的“基础配置”里调整
+
+如果你启用了飞书流式响应卡片，需要先在飞书应用侧开通并发布相关权限，至少包括：
+
+- `cardkit:card:write`
+- `cardkit:card:read`
+- `im:message:update`
+
+如果缺少这些权限，Bridge 日志里通常会看到 `99991672` 和 `cardkit:card:write`，系统会自动退回到最终结果消息。
+
+另外要注意：当前 `codex` runtime 下，`Codex CLI / SDK` 实际返回的正文文本事件通常只在 `item.completed` 时出现，不是 token 级逐字输出。所以“飞书流式响应卡片”在当前版本里更准确的含义是：
+
+- 可以先显示 `Thinking / Tool Progress`
+- 正文通常会在回答完成时一次性落到卡片里
+
+也就是说，飞书侧当前不保证像聊天模型网页那样逐字冒字。
+
+如果新建会话时报 `Not inside a trusted directory`，可以：
+
+- 把默认工作目录改成一个你已经信任的 Git 仓库
+- 或在基础配置里打开“允许在未信任 Git 目录运行 Codex”，然后重启 Bridge
 
 ## 可选 Codex 集成
 

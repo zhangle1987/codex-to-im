@@ -8,6 +8,8 @@ export interface Config {
   defaultWorkDir: string;
   defaultModel?: string;
   defaultMode: string;
+  historyMessageLimit?: number;
+  codexSkipGitRepoCheck?: boolean;
   // Telegram
   tgBotToken?: string;
   tgChatId?: string;
@@ -17,6 +19,7 @@ export interface Config {
   feishuAppSecret?: string;
   feishuDomain?: string;
   feishuAllowedUsers?: string[];
+  feishuStreamingEnabled?: boolean;
   // Discord
   discordBotToken?: string;
   discordAllowedUsers?: string[];
@@ -85,6 +88,13 @@ function splitCsv(value: string | undefined): string[] | undefined {
     .filter(Boolean);
 }
 
+function parsePositiveInt(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.floor(parsed);
+}
+
 export function loadConfig(): Config {
   const env = loadRawConfigEnv();
 
@@ -97,6 +107,10 @@ export function loadConfig(): Config {
     defaultWorkDir: env.get("CTI_DEFAULT_WORKDIR") || process.cwd(),
     defaultModel: env.get("CTI_DEFAULT_MODEL") || undefined,
     defaultMode: env.get("CTI_DEFAULT_MODE") || "code",
+    historyMessageLimit: parsePositiveInt(env.get("CTI_HISTORY_MESSAGE_LIMIT")) ?? 8,
+    codexSkipGitRepoCheck: env.has("CTI_CODEX_SKIP_GIT_REPO_CHECK")
+      ? env.get("CTI_CODEX_SKIP_GIT_REPO_CHECK") === "true"
+      : undefined,
     tgBotToken: env.get("CTI_TG_BOT_TOKEN") || undefined,
     tgChatId: env.get("CTI_TG_CHAT_ID") || undefined,
     tgAllowedUsers: splitCsv(env.get("CTI_TG_ALLOWED_USERS")),
@@ -104,6 +118,9 @@ export function loadConfig(): Config {
     feishuAppSecret: env.get("CTI_FEISHU_APP_SECRET") || undefined,
     feishuDomain: env.get("CTI_FEISHU_DOMAIN") || undefined,
     feishuAllowedUsers: splitCsv(env.get("CTI_FEISHU_ALLOWED_USERS")),
+    feishuStreamingEnabled: env.has("CTI_FEISHU_STREAMING_ENABLED")
+      ? env.get("CTI_FEISHU_STREAMING_ENABLED") === "true"
+      : true,
     discordBotToken: env.get("CTI_DISCORD_BOT_TOKEN") || undefined,
     discordAllowedUsers: splitCsv(env.get("CTI_DISCORD_ALLOWED_USERS")),
     discordAllowedChannels: splitCsv(
@@ -143,6 +160,10 @@ export function saveConfig(config: Config): void {
   out += formatEnvLine("CTI_DEFAULT_WORKDIR", config.defaultWorkDir);
   if (config.defaultModel) out += formatEnvLine("CTI_DEFAULT_MODEL", config.defaultModel);
   out += formatEnvLine("CTI_DEFAULT_MODE", config.defaultMode);
+  if (config.historyMessageLimit !== undefined)
+    out += formatEnvLine("CTI_HISTORY_MESSAGE_LIMIT", String(config.historyMessageLimit));
+  if (config.codexSkipGitRepoCheck !== undefined)
+    out += formatEnvLine("CTI_CODEX_SKIP_GIT_REPO_CHECK", String(config.codexSkipGitRepoCheck));
   out += formatEnvLine("CTI_TG_BOT_TOKEN", config.tgBotToken);
   out += formatEnvLine("CTI_TG_CHAT_ID", config.tgChatId);
   out += formatEnvLine(
@@ -156,6 +177,11 @@ export function saveConfig(config: Config): void {
     "CTI_FEISHU_ALLOWED_USERS",
     config.feishuAllowedUsers?.join(",")
   );
+  if (config.feishuStreamingEnabled !== undefined)
+    out += formatEnvLine(
+      "CTI_FEISHU_STREAMING_ENABLED",
+      String(config.feishuStreamingEnabled)
+    );
   out += formatEnvLine("CTI_DISCORD_BOT_TOKEN", config.discordBotToken);
   out += formatEnvLine(
     "CTI_DISCORD_ALLOWED_USERS",
@@ -247,6 +273,10 @@ export function configToSettings(config: Config): Map<string, string> {
   if (config.feishuDomain) m.set("bridge_feishu_domain", config.feishuDomain);
   if (config.feishuAllowedUsers)
     m.set("bridge_feishu_allowed_users", config.feishuAllowedUsers.join(","));
+  m.set(
+    "bridge_feishu_streaming_enabled",
+    config.feishuStreamingEnabled === false ? "false" : "true"
+  );
 
   // ── QQ ──
   // Upstream keys: bridge_qq_enabled, bridge_qq_app_id, bridge_qq_app_secret,
@@ -286,6 +316,14 @@ export function configToSettings(config: Config): Map<string, string> {
     m.set("default_model", config.defaultModel);
   }
   m.set("bridge_default_mode", config.defaultMode);
+  m.set(
+    "bridge_history_message_limit",
+    String(config.historyMessageLimit && config.historyMessageLimit > 0 ? config.historyMessageLimit : 8)
+  );
+  m.set(
+    "bridge_codex_skip_git_repo_check",
+    config.codexSkipGitRepoCheck === true ? "true" : "false"
+  );
 
   return m;
 }

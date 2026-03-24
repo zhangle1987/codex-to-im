@@ -13,7 +13,7 @@
 
 - 分发物：`codex-to-im` npm 包
 - 启动入口：全局命令 `codex-to-im`
-- 本地界面：`http://127.0.0.1:4781`
+- 本地界面：优先 `http://127.0.0.1:4781`，被占用时自动切换到可用端口
 - 后台进程：
   - `dist/ui-server.mjs` 负责本地工作台
   - `dist/daemon.mjs` 负责 bridge
@@ -66,7 +66,13 @@ npm -v
 - 已安装并使用过 Codex Windows App
 - 已安装 Codex CLI 并完成认证
 
-如果使用 CLI，可执行：
+建议显式安装 Codex CLI：
+
+```powershell
+npm install -g @openai/codex
+```
+
+然后完成登录：
 
 ```powershell
 codex auth login
@@ -141,21 +147,36 @@ codex-to-im url
 1. 选择 `Runtime`
    - 推荐：`codex`
 2. 设置默认工作目录
-3. 勾选要启用的通道
+3. 设置 `/history` 默认返回条数（可选）
+4. 如果目标目录不是 Codex 已信任的 Git 仓库，可勾选“允许在未信任 Git 目录运行 Codex”
+5. 勾选要启用的通道
    - 飞书：勾选 `启用飞书`
    - 微信：勾选 `启用微信`
-4. 飞书场景下填写：
+6. 飞书场景下填写：
    - `App ID`
    - `App Secret`
    - `Domain`
    - `Allowed Users` 可选
-5. 微信场景下点击：
+   - `启用飞书流式响应卡片` 可选
+7. 微信场景下点击：
    - `开始微信扫码`
-6. 点击测试
+8. 点击测试
    - 飞书：`测试飞书凭据`
    - Codex：`测试 Codex`
-7. 点击：
-   - `启动 Bridge`
+9. 点击：
+    - `启动 Bridge`
+
+说明：
+
+- 飞书流式响应卡片依赖飞书应用侧具备可更新卡片 / CardKit 相关能力。
+- 当前至少需要并发布这些权限：
+  - `cardkit:card:write`
+  - `cardkit:card:read`
+  - `im:message:update`
+- 如果这些权限没有开通，桥接仍然可以工作，但会回退到最终结果消息。
+- 缺权限时，`logs\\bridge.log` 里通常会出现 `99991672` 和 `cardkit:card:write`。
+- 另外，当前 `codex` runtime 下正文通常不是逐字流式输出；更常见的效果是先显示 `Thinking / Tool Progress`，正文在回答完成时一次性落到卡片里。
+- IM 里发送 `/history` 可以查看当前会话最近 N 条消息，N 由“基础配置”中的返回条数控制。
 
 ## 7. 目标机上的目录说明
 

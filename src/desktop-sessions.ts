@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { BridgeMessage } from './lib/bridge/host.js';
 
 export interface DesktopSessionSummary {
   threadId: string;
@@ -25,6 +26,19 @@ interface SessionMetaLine {
     originator?: string;
     cli_version?: string;
     source?: string;
+  };
+}
+
+interface SessionMessageLine {
+  type?: string;
+  payload?: {
+    type?: string;
+    role?: string;
+    phase?: string;
+    content?: Array<{
+      type?: string;
+      text?: string;
+    }>;
   };
 }
 
@@ -152,4 +166,52 @@ export function listDesktopSessions(limit = 12): DesktopSessionSummary[] {
 export function getDesktopSessionByThreadId(threadId: string): DesktopSessionSummary | null {
   const sessions = listDesktopSessions(200);
   return sessions.find((session) => session.threadId === threadId) || null;
+}
+
+function extractDesktopMessageText(line: SessionMessageLine): string {
+  const parts = line.payload?.content
+    ?.map((item) => (item && typeof item.text === 'string' ? item.text : ''))
+    .filter(Boolean) || [];
+  const text = parts.join('\n').trim();
+  if (!text) return '';
+  if (line.payload?.phase === 'commentary') {
+    return `[commentary]\n${text}`;
+  }
+  return text;
+}
+
+export function readDesktopSessionMessages(threadId: string, limit = 8): BridgeMessage[] {
+  const session = getDesktopSessionByThreadId(threadId);
+  if (!session) return [];
+
+  let content = '';
+  try {
+    content = fs.readFileSync(session.filePath, 'utf-8');
+  } catch {
+    return [];
+  }
+
+  const messages: BridgeMessage[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let parsed: SessionMessageLine;
+    try {
+      parsed = JSON.parse(line) as SessionMessageLine;
+    } catch {
+      continue;
+    }
+    if (parsed.type !== 'response_item') continue;
+    if (parsed.payload?.type !== 'message') continue;
+    if (parsed.payload.role !== 'user' && parsed.payload.role !== 'assistant') continue;
+
+    const text = extractDesktopMessageText(parsed);
+    if (!text) continue;
+    messages.push({
+      role: parsed.payload.role,
+      content: text,
+    });
+  }
+
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 8;
+  return messages.slice(-safeLimit);
 }

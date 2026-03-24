@@ -30,6 +30,26 @@
 5. For Feishu: confirm the app has been approved and event subscriptions are configured
 6. Check recent logs for incoming message events under `~/.codex-to-im/logs/`
 
+## Feishu streaming cards not working
+
+**Symptoms**: Feishu responds only with a final message, or the streaming card never appears even though `Enable Feishu streaming response cards` is checked.
+
+**Steps**:
+
+1. Check `~/.codex-to-im/logs/bridge.log` or `~/.claude-to-im/logs/bridge.log`
+2. Look for Feishu error `99991672`
+3. If the error mentions `cardkit:card:write`, add and publish the missing Feishu permissions:
+   - `cardkit:card:write`
+   - `cardkit:card:read`
+   - `im:message:update`
+4. Restart the bridge after the Feishu app version is approved
+
+**Important behavior note**:
+
+- If card creation is denied, the bridge falls back to a normal final-result message
+- Even after the Feishu permissions are fixed, the current `codex` runtime usually delivers assistant text when the turn completes, not token-by-token
+- That means Feishu streaming cards currently work best for `Thinking` / tool-progress updates, while the final response text may still appear all at once
+
 ## Permission timeout
 
 **Symptoms**: Claude Code session starts but times out waiting for tool approval.

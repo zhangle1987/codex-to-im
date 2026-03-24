@@ -2,7 +2,20 @@
   "name": "codex-to-im",
   "version": "0.1.0",
   "description": "Installable Codex-to-IM bridge with local setup UI and background service",
+  "license": "MIT",
   "type": "module",
+  "files": [
+    "dist/",
+    "docs/",
+    "references/",
+    "scripts/",
+    "LICENSE",
+    "README.md",
+    "README_CN.md",
+    "SECURITY.md",
+    "SKILL.md",
+    "config.env.example"
+  ],
   "bin": {
     "codex-to-im": "dist/cli.mjs"
   },
@@ -13,7 +26,8 @@
     "dev:ui": "tsx src/ui-server.ts",
     "open": "node dist/cli.mjs open",
     "weixin:login": "node --import tsx src/weixin-login.ts",
-    "test": "CTI_HOME=$(mktemp -d) node --test --test-concurrency=1 --import tsx --test-timeout=15000 src/__tests__/*.test.ts"
+    "test": "node scripts/run-tests.js",
+    "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",

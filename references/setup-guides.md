@@ -142,6 +142,8 @@ Enter comma-separated IDs. Leave empty to allow all servers the bot is in.
 
 If the batch import UI is not available, add each scope manually via the search box.
 
+> **Important:** If `cardkit:card:write` is missing, enabling Feishu streaming in the local workbench will not work. The bridge will log Feishu error `99991672` and fall back to a normal final-result message.
+
 **Step B — Enable the bot**
 
 1. Go to **"Add Features"** → enable **"Bot"**
@@ -194,6 +196,17 @@ If you already have a Feishu app configured, you need to:
 4. **Add callback**: Go to Events & Callbacks, add `card.action.trigger` callback (card interaction for permission buttons). This step requires the bridge to be running — Feishu validates the WebSocket connection when saving.
 5. **Publish again** — The new callback requires another version publish + admin approval
 6. **Restart the bridge** — Stop and start it again from the local `codex-to-im` workbench to pick up the new capabilities
+
+### Current Feishu streaming behavior with Codex runtime
+
+Even after the Feishu permissions are correct, the current `codex` runtime does **not** guarantee token-by-token text streaming into the Feishu card.
+
+As of **2026-03-24**, the `Codex CLI / SDK` event stream typically emits assistant text when the `agent_message` item completes, rather than as token deltas. In practice, Feishu streaming cards are best understood as:
+
+- early `Thinking` / tool progress updates
+- final response text written into the card at completion
+
+So if you see the final answer appear all at once after the card was created successfully, that is currently expected behavior with `codex`.
 
 ### Domain (optional)
 
