@@ -1,6 +1,6 @@
 {
   "name": "codex-to-im",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Installable Codex-to-IM bridge with local setup UI and background service",
   "license": "MIT",
   "type": "module",
