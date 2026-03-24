@@ -1,0 +1,266 @@
+# Codex-to-IM Windows 安装说明
+
+## 1. 当前部署方案
+
+`codex-to-im` 当前采用的是 **单 npm 包 + 本地 Web 工作台 + 本地后台 bridge** 的部署方案。
+
+补充说明：当前版本不是从零开始的新工程，而是在以下两个已有项目基础上整理和改造而来：
+
+- `Claude-to-IM`
+- `Claude-to-IM-skill`
+
+核心形态如下：
+
+- 分发物：`codex-to-im` npm 包
+- 启动入口：全局命令 `codex-to-im`
+- 本地界面：`http://127.0.0.1:4781`
+- 后台进程：
+  - `dist/ui-server.mjs` 负责本地工作台
+  - `dist/daemon.mjs` 负责 bridge
+- 运行方式：本地 Node.js detached 子进程，不依赖当前命令窗口常驻
+- 配置目录：`%USERPROFILE%\\.codex-to-im\\`
+- 兼容目录：如果机器上已有旧数据，会回落到 `%USERPROFILE%\\.claude-to-im\\`
+- 可选增强：可安装一层轻量 Codex 集成到 `%USERPROFILE%\\.codex\\skills\\codex-to-im`
+
+这意味着当前推荐的部署方式不是“clone 仓库后让用户手动跑脚本”，而是：
+
+1. 发布一个已经构建好的 npm 包
+2. 在目标 Windows 主机全局安装
+3. 运行 `codex-to-im`
+4. 在浏览器里完成配置、测试和启动
+
+## 2. 适用前提
+
+下面这份说明按 **Windows 主机** 写。
+
+默认假设：
+
+- 目标机是 Windows 10 / 11
+- 目标机已经安装 Node.js 20+
+- 目标机使用同一个 Windows 用户来运行 Codex 和 `codex-to-im`
+- 飞书应用、微信账号等平台侧信息已经准备好
+
+## 3. 安装前准备
+
+目标机至少需要这些前置条件：
+
+### 3.1 安装 Node.js
+
+要求：
+
+- Node.js >= 20
+
+建议安装完成后检查：
+
+```powershell
+node -v
+npm -v
+```
+
+### 3.2 安装并登录 Codex
+
+如果你希望 bridge 接管和继续 Codex 会话，目标机必须在 **同一个 Windows 用户** 下完成 Codex 登录。
+
+建议至少满足以下之一：
+
+- 已安装并使用过 Codex Windows App
+- 已安装 Codex CLI 并完成认证
+
+如果使用 CLI，可执行：
+
+```powershell
+codex auth login
+```
+
+## 4. 目标机安装方式
+
+### 4.1 推荐：从 npm 全局安装
+
+如果包已经发布到 npm：
+
+```powershell
+npm install -g codex-to-im
+```
+
+安装完成后，直接启动：
+
+```powershell
+codex-to-im
+```
+
+### 4.2 备用：从源码安装
+
+如果还没有正式发布 npm 包，可以在目标机直接用源码：
+
+```powershell
+git clone <your-repo-url> D:\codex\codex-to-im
+cd D:\codex\codex-to-im
+npm install
+npm run build
+node dist\cli.mjs open
+```
+
+如果希望源码安装后也能直接使用 `codex-to-im` 命令，可以再执行：
+
+```powershell
+npm link
+```
+
+## 5. 首次启动
+
+首次启动命令：
+
+```powershell
+codex-to-im
+```
+
+当前行为是：
+
+1. 拉起本地 UI 服务
+2. 在后台运行 `ui-server`
+3. 自动打开浏览器到本地工作台
+
+默认地址：
+
+```text
+http://127.0.0.1:4781
+```
+
+如果 `4781` 已被占用，程序会自动查找一个可用端口，并在启动时把实际地址打印到命令行。
+
+如果之后忘记了当前 Web 地址，可以执行：
+
+```powershell
+codex-to-im url
+```
+
+## 6. 在目标机上的首次配置
+
+进入本地工作台后，按这个顺序做：
+
+1. 选择 `Runtime`
+   - 推荐：`codex`
+2. 设置默认工作目录
+3. 勾选要启用的通道
+   - 飞书：勾选 `启用飞书`
+   - 微信：勾选 `启用微信`
+4. 飞书场景下填写：
+   - `App ID`
+   - `App Secret`
+   - `Domain`
+   - `Allowed Users` 可选
+5. 微信场景下点击：
+   - `开始微信扫码`
+6. 点击测试
+   - 飞书：`测试飞书凭据`
+   - Codex：`测试 Codex`
+7. 点击：
+   - `启动 Bridge`
+
+## 7. 目标机上的目录说明
+
+当前版本主要使用这些目录：
+
+### 7.1 新目录
+
+```text
+%USERPROFILE%\.codex-to-im\
+```
+
+其中主要文件有：
+
+- `config.env`
+- `logs\bridge.log`
+- `logs\ui-server.out.log`
+- `runtime\status.json`
+- `runtime\ui-server.json`
+
+### 7.2 旧目录兼容
+
+如果目标机上已经存在旧安装数据，程序会自动回落到：
+
+```text
+%USERPROFILE%\.claude-to-im\
+```
+
+所以安装或排查时，需要先确认当前实际使用的是哪一个 home 目录。
+
+## 8. 可选 Codex 集成
+
+这一步不是必须的。
+
+只有在你希望：
+
+- 从 Codex 里直接打开 `codex-to-im`
+- 或保留“共享当前会话到飞书”的轻入口
+
+时，才需要安装。
+
+当前可以通过本地工作台里的按钮安装到：
+
+```text
+%USERPROFILE%\.codex\skills\codex-to-im
+```
+
+安装后，它只保留两个动作：
+
+- `open codex-to-im`
+- `share current session to Feishu`
+
+## 9. 安装给别的主机时的建议
+
+### 9.1 飞书
+
+如果是同一个飞书应用，只需要在目标机重新填写：
+
+- App ID
+- App Secret
+- Domain
+- Allowed Users（如需）
+
+不需要复制源码里的任何配置文件。
+
+### 9.2 微信
+
+微信建议在 **目标机重新扫码**，不要直接复制旧机器上的登录状态文件。
+
+### 9.3 多台机器
+
+如果你要给多台 Windows 机器部署，推荐流程是：
+
+1. 在发布机完成 `npm run build`
+2. 发布 npm 包
+3. 每台目标机执行 `npm install -g codex-to-im`
+4. 每台机器各自完成本地登录、配置和通道测试
+
+## 10. 当前限制
+
+当前版本有几个需要提前说明的点：
+
+- 默认不是 Windows Service，而是本地 detached 进程
+- 机器重启后，不会自动恢复，需要再次运行 `codex-to-im`
+- 可选 Codex 集成不是主安装路径
+- 当前主路径是“本地工作台 + IM 配置 + Bridge 启动”
+
+## 11. 发布方注意事项
+
+如果你要把这个包发布到 npm，当前实现要求：
+
+1. 先在发布前执行：
+
+```powershell
+npm run build
+```
+
+2. 确保发布包中包含：
+
+- `dist/cli.mjs`
+- `dist/ui-server.mjs`
+- `dist/daemon.mjs`
+
+原因是当前包没有 `postinstall` 或 `prepare` 来在目标机自动构建。
+
+也就是说：
+
+- **发布到 npm 时应发布预构建产物**
+- **目标机安装时不应依赖本地构建**

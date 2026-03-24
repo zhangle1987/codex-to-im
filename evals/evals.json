@@ -1,0 +1,17 @@
+{
+  "skill_name": "codex-to-im",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "打开 codex-to-im",
+      "expected_output": "Should trigger the optional integration, identify the 'open' action, and run codex-to-im open or the local dist/cli.mjs open fallback.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "把当前会话共享到飞书",
+      "expected_output": "Should trigger the optional integration, identify the 'share-feishu' action, and run codex-to-im share-feishu or the local dist/cli.mjs share-feishu fallback.",
+      "files": []
+    }
+  ]
+}
