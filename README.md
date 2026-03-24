@@ -86,6 +86,15 @@ http://127.0.0.1:4781
 
 If that port is already occupied, the app automatically finds an available local port and prints the actual address to the terminal when starting.
 
+By default, the web workbench only accepts local access.
+
+If you want to open it from your phone or another device on the same LAN, enable `允许局域网访问 Web 控制台` in the `配置` page. When enabled:
+
+- the workbench shows detected LAN URLs
+- the workbench displays an access token
+- LAN devices see a login page before they can view or modify settings
+- you can also copy a ready-to-use login link that includes `?token=...`
+
 If you forget the current address, run:
 
 ```bash
@@ -113,6 +122,8 @@ codex-to-im stop
 5. Open the desktop sessions section
 6. Bind a Feishu or Weixin chat to the target thread
 7. Continue the same Codex thread from IM
+
+If LAN access is enabled, the easiest path is to copy the LAN login link from the local workbench and open it on your phone or another device on the same network.
 
 Useful command:
 

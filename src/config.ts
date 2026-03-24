@@ -10,6 +10,8 @@ export interface Config {
   defaultMode: string;
   historyMessageLimit?: number;
   codexSkipGitRepoCheck?: boolean;
+  uiAllowLan?: boolean;
+  uiAccessToken?: string;
   // Telegram
   tgBotToken?: string;
   tgChatId?: string;
@@ -111,6 +113,8 @@ export function loadConfig(): Config {
     codexSkipGitRepoCheck: env.has("CTI_CODEX_SKIP_GIT_REPO_CHECK")
       ? env.get("CTI_CODEX_SKIP_GIT_REPO_CHECK") === "true"
       : true,
+    uiAllowLan: env.get("CTI_UI_ALLOW_LAN") === "true",
+    uiAccessToken: env.get("CTI_UI_ACCESS_TOKEN") || undefined,
     tgBotToken: env.get("CTI_TG_BOT_TOKEN") || undefined,
     tgChatId: env.get("CTI_TG_CHAT_ID") || undefined,
     tgAllowedUsers: splitCsv(env.get("CTI_TG_ALLOWED_USERS")),
@@ -164,6 +168,8 @@ export function saveConfig(config: Config): void {
     out += formatEnvLine("CTI_HISTORY_MESSAGE_LIMIT", String(config.historyMessageLimit));
   if (config.codexSkipGitRepoCheck !== undefined)
     out += formatEnvLine("CTI_CODEX_SKIP_GIT_REPO_CHECK", String(config.codexSkipGitRepoCheck));
+  out += formatEnvLine("CTI_UI_ALLOW_LAN", String(config.uiAllowLan === true));
+  out += formatEnvLine("CTI_UI_ACCESS_TOKEN", config.uiAccessToken);
   out += formatEnvLine("CTI_TG_BOT_TOKEN", config.tgBotToken);
   out += formatEnvLine("CTI_TG_CHAT_ID", config.tgChatId);
   out += formatEnvLine(
@@ -209,6 +215,7 @@ export function saveConfig(config: Config): void {
   out += formatEnvLine("CTI_WEIXIN_CDN_BASE_URL", config.weixinCdnBaseUrl);
   if (config.weixinMediaEnabled !== undefined)
     out += formatEnvLine("CTI_WEIXIN_MEDIA_ENABLED", String(config.weixinMediaEnabled));
+  out += formatEnvLine("CTI_AUTO_APPROVE", String(config.autoApprove === true));
 
   fs.mkdirSync(CTI_HOME, { recursive: true });
   const tmpPath = CONFIG_PATH + ".tmp";

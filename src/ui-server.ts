@@ -1,5 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
+import crypto from 'node:crypto';
 import net from 'node:net';
+import os from 'node:os';
 
 import { CTI_HOME, configToSettings, loadConfig, saveConfig, type Config } from './config.js';
 import { PendingPermissions } from './permission-gateway.js';
@@ -31,6 +33,7 @@ import { listWeixinAccounts } from './weixin-store.js';
 let port = 4781;
 const serverStartTime = new Date().toISOString();
 const supportedChannels = ['feishu', 'weixin'] as const;
+const AUTH_COOKIE_NAME = 'cti_ui_auth';
 
 function parsePreferredPort(): number {
   const raw = Number(process.env.CTI_UI_PORT || '4781');
@@ -43,7 +46,7 @@ async function canListen(portToCheck: number): Promise<boolean> {
     const probe = net.createServer();
     probe.unref();
     probe.once('error', () => resolve(false));
-    probe.listen(portToCheck, '127.0.0.1', () => {
+    probe.listen(portToCheck, '0.0.0.0', () => {
       probe.close(() => resolve(true));
     });
   });
@@ -59,7 +62,7 @@ async function resolveUiPort(preferredPort: number): Promise<number> {
     const probe = net.createServer();
     probe.unref();
     probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
+    probe.listen(0, '0.0.0.0', () => {
       const address = probe.address();
       const dynamicPort = typeof address === 'object' && address ? address.port : preferredPort;
       probe.close((error) => {
@@ -132,6 +135,97 @@ function createUiStore(): JsonFileStore {
   return new JsonFileStore(configToSettings(loadConfig()));
 }
 
+function generateAccessToken(): string {
+  return crypto.randomBytes(18).toString('base64url');
+}
+
+function timingSafeMatch(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false;
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function parseCookies(request: IncomingMessage): Map<string, string> {
+  const header = request.headers.cookie;
+  if (!header) return new Map();
+
+  return new Map(
+    header
+      .split(';')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const separator = part.indexOf('=');
+        if (separator === -1) return [part, ''];
+        return [part.slice(0, separator), decodeURIComponent(part.slice(separator + 1))];
+      }),
+  );
+}
+
+function makeAuthCookie(token: string): string {
+  return `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`;
+}
+
+function clearAuthCookie(): string {
+  return `${AUTH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+function redirect(response: ServerResponse, location: string, cookie?: string): void {
+  const headers: Record<string, string | string[]> = { Location: location };
+  if (cookie) headers['Set-Cookie'] = cookie;
+  response.writeHead(302, headers);
+  response.end();
+}
+
+function getRemoteAddress(request: IncomingMessage): string {
+  return request.socket.remoteAddress || '';
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return (
+    address === '127.0.0.1' ||
+    address === '::1' ||
+    address === '::ffff:127.0.0.1'
+  );
+}
+
+function isLocalRequest(request: IncomingMessage): boolean {
+  return isLoopbackAddress(getRemoteAddress(request));
+}
+
+function getLanUrls(currentPort: number): string[] {
+  const interfaces = os.networkInterfaces();
+  const urls = new Set<string>();
+
+  for (const records of Object.values(interfaces)) {
+    for (const record of records || []) {
+      if (!record || record.internal || record.family !== 'IPv4') continue;
+      urls.add(`http://${record.address}:${currentPort}`);
+    }
+  }
+
+  return Array.from(urls).sort();
+}
+
+function buildUiAccessInfo(currentPort: number, config: Config, request?: IncomingMessage) {
+  return {
+    allowLan: config.uiAllowLan === true,
+    localUrl: getUiServerUrl(currentPort),
+    lanUrls: getLanUrls(currentPort),
+    accessToken: config.uiAccessToken || '',
+    requestIsLocal: request ? isLocalRequest(request) : true,
+    authenticated: request ? isRemoteAuthenticated(request, config) : true,
+  };
+}
+
+function isRemoteAuthenticated(request: IncomingMessage, config: Config): boolean {
+  if (isLocalRequest(request)) return true;
+  if (config.uiAllowLan !== true) return false;
+  return timingSafeMatch(parseCookies(request).get(AUTH_COOKIE_NAME), config.uiAccessToken);
+}
+
 function configToPayload(config: Config) {
   return {
     runtime: config.runtime,
@@ -141,6 +235,8 @@ function configToPayload(config: Config) {
     defaultMode: config.defaultMode,
     historyMessageLimit: config.historyMessageLimit ?? 8,
     codexSkipGitRepoCheck: config.codexSkipGitRepoCheck === true,
+    uiAllowLan: config.uiAllowLan === true,
+    uiAccessToken: config.uiAccessToken || '',
     autoApprove: config.autoApprove === true,
     feishuAppId: config.feishuAppId || '',
     feishuAppSecret: config.feishuAppSecret || '',
@@ -156,6 +252,11 @@ function mergeConfig(payload: Record<string, unknown>): Config {
   const requestedChannels = Array.isArray(payload.enabledChannels)
     ? payload.enabledChannels.filter((value): value is string => typeof value === 'string')
     : current.enabledChannels;
+  const uiAllowLan = payload.uiAllowLan === true;
+  const requestedUiAccessToken = asString(payload.uiAccessToken);
+  const uiAccessToken = requestedUiAccessToken
+    || current.uiAccessToken
+    || (uiAllowLan ? generateAccessToken() : undefined);
 
   return {
     ...current,
@@ -166,6 +267,8 @@ function mergeConfig(payload: Record<string, unknown>): Config {
     defaultMode: payload.defaultMode === 'plan' || payload.defaultMode === 'ask' ? payload.defaultMode : 'code',
     historyMessageLimit: asPositiveInt(payload.historyMessageLimit) || current.historyMessageLimit || 8,
     codexSkipGitRepoCheck: payload.codexSkipGitRepoCheck === true,
+    uiAllowLan,
+    uiAccessToken,
     autoApprove: payload.autoApprove === true,
     feishuAppId: asString(payload.feishuAppId),
     feishuAppSecret: asString(payload.feishuAppSecret),
@@ -263,6 +366,184 @@ async function testCodexConnection(config: Config): Promise<{ ok: boolean; messa
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function renderLoginHtml(): string {
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex to IM 登录</title>
+    <style>
+      :root {
+        --bg: #f5f7fa;
+        --surface: #ffffff;
+        --border: #e5e7eb;
+        --border-strong: #d0d7e2;
+        --text: #111827;
+        --muted: #667085;
+        --primary: #1677ff;
+        --primary-strong: #0958d9;
+        --danger: #dc2626;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      }
+      .auth-card {
+        width: min(420px, 100%);
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 24px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+        line-height: 1.2;
+      }
+      p {
+        margin: 0 0 18px;
+        color: var(--muted);
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      input {
+        width: 100%;
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font: inherit;
+      }
+      input:focus {
+        outline: 2px solid rgba(22, 119, 255, 0.14);
+        border-color: var(--primary);
+      }
+      button {
+        margin-top: 16px;
+        width: 100%;
+        border: 1px solid var(--primary);
+        background: var(--primary);
+        color: #ffffff;
+        border-radius: 8px;
+        padding: 10px 14px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        background: var(--primary-strong);
+        border-color: var(--primary-strong);
+      }
+      .message {
+        display: none;
+        margin-top: 14px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: rgba(220, 38, 38, 0.08);
+        color: var(--danger);
+      }
+      .message.show { display: block; }
+    </style>
+  </head>
+  <body>
+    <section class="auth-card">
+      <h1>访问 Codex to IM</h1>
+      <p>当前工作台已开启局域网访问。请输入访问 token，验证通过后才能查看和修改配置。</p>
+      <form id="loginForm">
+        <label>
+          访问 token
+          <input id="token" name="token" autocomplete="off" spellcheck="false" />
+        </label>
+        <button type="submit">登录</button>
+      </form>
+      <div class="message" id="message"></div>
+    </section>
+    <script>
+      const form = document.getElementById('loginForm');
+      const message = document.getElementById('message');
+      const tokenInput = document.getElementById('token');
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        message.className = 'message';
+        message.textContent = '';
+
+        try {
+          const response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: tokenInput.value }),
+          });
+          const text = await response.text();
+          const data = text ? JSON.parse(text) : {};
+          if (!response.ok) {
+            throw new Error(data.error || '登录失败');
+          }
+          window.location.href = '/';
+        } catch (error) {
+          message.className = 'message show';
+          message.textContent = error instanceof Error ? error.message : String(error);
+        }
+      });
+    </script>
+  </body>
+</html>`;
+}
+
+function renderAccessDeniedHtml(): string {
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex to IM</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: #f5f7fa;
+        color: #111827;
+        font: 14px/1.5 "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      }
+      .card {
+        width: min(420px, 100%);
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: 24px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+        line-height: 1.2;
+      }
+      p {
+        margin: 0;
+        color: #667085;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="card">
+      <h1>当前未开放局域网访问</h1>
+      <p>这个 Web 工作台目前只允许本机访问。请先在本机配置页中勾选“允许局域网访问 Web 控制台”。</p>
+    </section>
+  </body>
+</html>`;
 }
 
 function renderHtml(): string {
@@ -1228,6 +1509,28 @@ function renderHtml(): string {
                 <label class="checkbox"><input id="codexSkipGitRepoCheck" type="checkbox" checked /> 允许在未信任 Git 目录运行 Codex</label>
               </div>
               <div class="small">如果新建会话报 “Not inside a trusted directory”，可以打开这个选项。修改后需要重启 Bridge 才会生效。</div>
+              <div class="checkbox-row" style="margin-top: 12px;">
+                <label class="checkbox"><input id="uiAllowLan" type="checkbox" /> 允许局域网访问 Web 控制台</label>
+              </div>
+              <div class="notice" id="uiAccessSummary">默认仅允许本机访问当前工作台。</div>
+              <div id="uiLanDetails" hidden>
+                <div class="field-row" style="margin-top: 16px;">
+                  <label>
+                    访问 token
+                    <input id="uiAccessToken" readonly />
+                  </label>
+                  <div style="display: grid; gap: 10px; align-content: end;">
+                    <div class="toolbar">
+                      <button type="button" id="copyUiTokenBtn">复制 token</button>
+                      <button type="button" id="regenerateUiTokenBtn">重新生成 token</button>
+                    </div>
+                    <div class="toolbar">
+                      <button type="button" id="copyUiLanLinkBtn">复制局域网登录链接</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="info-list" id="uiAccessUrls" style="margin-top: 16px;"></div>
+              </div>
             </div>
 
             <div class="message" id="configMessage"></div>
@@ -1425,6 +1728,7 @@ function renderHtml(): string {
     <script>
       const state = {
         config: null,
+        uiAccess: null,
         bridgeStatus: null,
         desktopSessions: [],
         bindings: [],
@@ -1516,6 +1820,8 @@ function renderHtml(): string {
           defaultWorkDir: document.getElementById('defaultWorkDir').value,
           defaultModel: document.getElementById('defaultModel').value,
           codexSkipGitRepoCheck: document.getElementById('codexSkipGitRepoCheck').checked,
+          uiAllowLan: document.getElementById('uiAllowLan').checked,
+          uiAccessToken: document.getElementById('uiAccessToken').value,
           enabledChannels: enabledChannelsFromForm(),
           autoApprove: document.getElementById('autoApprove').checked,
           feishuAppId: document.getElementById('feishuAppId').value,
@@ -1915,6 +2221,50 @@ function renderHtml(): string {
         rerenderDesktopSessions();
       }
 
+      function renderUiAccess() {
+        const config = state.config || {};
+        const uiAccess = state.uiAccess || {};
+        const allowLan = config.uiAllowLan === true;
+        const token = config.uiAccessToken || '';
+        const lanUrls = Array.isArray(uiAccess.lanUrls) ? uiAccess.lanUrls : [];
+        const localUrl = uiAccess.localUrl || window.location.origin;
+        const summary = document.getElementById('uiAccessSummary');
+        const details = document.getElementById('uiLanDetails');
+        const tokenInput = document.getElementById('uiAccessToken');
+        const urlList = document.getElementById('uiAccessUrls');
+        const copyTokenBtn = document.getElementById('copyUiTokenBtn');
+        const copyLanLinkBtn = document.getElementById('copyUiLanLinkBtn');
+
+        document.getElementById('uiAllowLan').checked = allowLan;
+        tokenInput.value = token;
+        details.hidden = !allowLan;
+        copyTokenBtn.disabled = !allowLan || !token;
+        copyLanLinkBtn.disabled = !allowLan || !token || lanUrls.length === 0;
+
+        if (!allowLan) {
+          summary.textContent = '默认仅允许本机访问当前工作台。开启后，局域网设备需要先输入访问 token。';
+          urlList.innerHTML = '';
+          return;
+        }
+
+        summary.textContent = '局域网访问已开启。非本机设备访问时需要先输入 token；本机访问仍然不受影响。';
+        const items = [
+          '<div class="info-item"><strong>本机地址</strong><div class="mono">' + escapeHtml(localUrl) + '</div></div>',
+        ];
+
+        if (lanUrls.length === 0) {
+          items.push('<div class="info-item"><strong>局域网地址</strong><div>未检测到可用的 IPv4 地址，请检查网络连接。</div></div>');
+        } else {
+          for (const lanUrl of lanUrls) {
+            items.push(
+              '<div class="info-item"><strong>局域网地址</strong><div class="mono">' + escapeHtml(lanUrl) + '</div><div class="small">登录链接：' + escapeHtml(lanUrl + '/?token=' + token) + '</div></div>'
+            );
+          }
+        }
+
+        urlList.innerHTML = items.join('');
+      }
+
       function fillForm(config) {
         state.config = config;
         document.getElementById('runtime').value = config.runtime || 'codex';
@@ -1923,6 +2273,8 @@ function renderHtml(): string {
         document.getElementById('defaultWorkDir').value = config.defaultWorkDir || '';
         document.getElementById('defaultModel').value = config.defaultModel || '';
         document.getElementById('codexSkipGitRepoCheck').checked = config.codexSkipGitRepoCheck === true;
+        document.getElementById('uiAllowLan').checked = config.uiAllowLan === true;
+        document.getElementById('uiAccessToken').value = config.uiAccessToken || '';
         document.getElementById('channelFeishu').checked = (config.enabledChannels || []).includes('feishu');
         document.getElementById('channelWeixin').checked = (config.enabledChannels || []).includes('weixin');
         document.getElementById('autoApprove').checked = config.autoApprove === true;
@@ -1932,6 +2284,7 @@ function renderHtml(): string {
         document.getElementById('feishuAllowedUsers').value = config.feishuAllowedUsers || '';
         document.getElementById('feishuStreamingEnabled').checked = config.feishuStreamingEnabled !== false;
         document.getElementById('weixinMediaEnabled').checked = config.weixinMediaEnabled === true;
+        renderUiAccess();
         rerenderDesktopSessions();
       }
 
@@ -1950,6 +2303,7 @@ function renderHtml(): string {
       async function loadStatus() {
         const status = await api('/api/status');
         const config = await api('/api/config');
+        state.uiAccess = status.uiAccess || null;
         state.bridgeStatus = status.bridge || null;
         state.weixinAccounts = status.weixin && Array.isArray(status.weixin.linkedAccounts) ? status.weixin.linkedAccounts : [];
         fillForm(config);
@@ -2014,6 +2368,38 @@ function renderHtml(): string {
       });
 
       window.addEventListener('hashchange', syncPageFromHash);
+
+      document.getElementById('copyUiTokenBtn').addEventListener('click', async () => {
+        try {
+          await copyText(document.getElementById('uiAccessToken').value, '访问 token 已复制。');
+        } catch (error) {
+          showMessage('configMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('copyUiLanLinkBtn').addEventListener('click', async () => {
+        try {
+          const urls = state.uiAccess && Array.isArray(state.uiAccess.lanUrls) ? state.uiAccess.lanUrls : [];
+          const token = document.getElementById('uiAccessToken').value;
+          if (!urls.length || !token) {
+            throw new Error('当前还没有可复制的局域网登录链接。');
+          }
+          await copyText(urls[0] + '/?token=' + token, '局域网登录链接已复制。');
+        } catch (error) {
+          showMessage('configMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('regenerateUiTokenBtn').addEventListener('click', () => {
+        if (!window.crypto || typeof window.crypto.randomUUID !== 'function') {
+          showMessage('configMessage', 'error', '当前浏览器不支持生成 token。');
+          return;
+        }
+        document.getElementById('uiAccessToken').value =
+          window.crypto.randomUUID().replaceAll('-', '') + window.crypto.randomUUID().replaceAll('-', '');
+        renderUiAccess();
+        showMessage('configMessage', 'success', '已生成新的访问 token，点击“保存配置”后生效。');
+      });
 
       document.getElementById('saveConfigBtn').addEventListener('click', async () => {
         try {
@@ -2282,8 +2668,73 @@ function renderHtml(): string {
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url || '/', getUiServerUrl(port));
+    const config = loadConfig();
+    const localRequest = isLocalRequest(request);
+    const queryToken = asString(url.searchParams.get('token'));
+
+    if (
+      request.method === 'GET'
+      && !localRequest
+      && config.uiAllowLan === true
+      && timingSafeMatch(queryToken, config.uiAccessToken)
+    ) {
+      const redirectUrl = new URL(url.pathname || '/', getUiServerUrl(port));
+      redirect(response, `${redirectUrl.pathname}${redirectUrl.search}`, makeAuthCookie(config.uiAccessToken || ''));
+      return;
+    }
+
+    if (request.method === 'GET' && url.pathname === '/login') {
+      if (localRequest || isRemoteAuthenticated(request, config)) {
+        redirect(response, '/');
+        return;
+      }
+      if (config.uiAllowLan !== true) {
+        html(response, renderAccessDeniedHtml());
+        return;
+      }
+      html(response, renderLoginHtml());
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/auth/login') {
+      if (config.uiAllowLan !== true) {
+        json(response, 403, { error: '当前未开启局域网访问。' });
+        return;
+      }
+      const payload = await readJsonBody<Record<string, unknown>>(request);
+      const token = asString(payload.token);
+      if (!timingSafeMatch(token, config.uiAccessToken)) {
+        json(response, 401, { error: '访问 token 不正确。' });
+        return;
+      }
+      response.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Set-Cookie': makeAuthCookie(config.uiAccessToken || ''),
+      });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/auth/logout') {
+      response.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Set-Cookie': clearAuthCookie(),
+      });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
 
     if (request.method === 'GET' && url.pathname === '/') {
+      if (!localRequest) {
+        if (config.uiAllowLan !== true) {
+          html(response, renderAccessDeniedHtml());
+          return;
+        }
+        if (!isRemoteAuthenticated(request, config)) {
+          html(response, renderLoginHtml());
+          return;
+        }
+      }
       html(response, renderHtml());
       return;
     }
@@ -2293,10 +2744,22 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (!localRequest) {
+      if (config.uiAllowLan !== true) {
+        json(response, 403, { error: '当前未开启局域网访问。' });
+        return;
+      }
+      if (!isRemoteAuthenticated(request, config)) {
+        json(response, 401, { error: '需要先登录并提供访问 token。' });
+        return;
+      }
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/status') {
       json(response, 200, {
         bridge: getBridgeStatus(),
         ui: getUiServerStatus(),
+        uiAccess: buildUiAccessInfo(port, config, request),
         home: CTI_HOME,
         packageRoot: getPackageRoot(),
         codexIntegrationInstalled: isCodexIntegrationInstalled(),
@@ -2309,7 +2772,7 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && url.pathname === '/api/config') {
-      json(response, 200, configToPayload(loadConfig()));
+      json(response, 200, configToPayload(config));
       return;
     }
 
@@ -2432,7 +2895,7 @@ async function startServer(): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, '0.0.0.0', () => {
       server.removeListener('error', reject);
       resolve();
     });
