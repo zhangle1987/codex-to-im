@@ -57,16 +57,23 @@ node -v
 npm -v
 ```
 
-### 3.2 安装并登录 Codex
+### 3.2 准备 Codex 认证
 
 如果你希望 bridge 接管和继续 Codex 会话，目标机必须在 **同一个 Windows 用户** 下完成 Codex 登录。
 
 建议至少满足以下之一：
 
 - 已安装并使用过 Codex Windows App
-- 已安装 Codex CLI 并完成认证
+- 已有可用的 Codex CLI 登录态
+- 已配置可用的 API Key（`CTI_CODEX_API_KEY`、`CODEX_API_KEY` 或 `OPENAI_API_KEY`）
 
-建议显式安装 Codex CLI：
+说明：
+
+- `codex-to-im` 现在已经随包带上运行 bridge 所需的 `@openai/codex-sdk` / Codex CLI 平台依赖
+- 这意味着目标机为了运行 bridge，本身不再强制要求额外全局安装一份 Codex CLI
+- 但如果这台机器还没有任何 Codex 登录态，最直接的补齐方式仍然是装一次全局 CLI 完成登录
+
+如果目标机还没有 Codex 登录态，建议执行：
 
 ```powershell
 npm install -g @openai/codex
@@ -177,6 +184,7 @@ codex-to-im url
 - 缺权限时，`logs\\bridge.log` 里通常会出现 `99991672` 和 `cardkit:card:write`。
 - 另外，当前 `codex` runtime 下正文通常不是逐字流式输出；更常见的效果是先显示 `Thinking / Tool Progress`，正文在回答完成时一次性落到卡片里。
 - IM 里发送 `/history` 可以查看当前会话最近 N 条消息，N 由“基础配置”中的返回条数控制。
+- 如果 `测试 Codex` 失败，优先检查当前 Windows 用户下是否已经存在可用的 Codex 登录态或 API Key。
 
 ## 7. 目标机上的目录说明
 

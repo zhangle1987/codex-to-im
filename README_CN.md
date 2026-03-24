@@ -38,7 +38,17 @@ Windows 主机安装说明见：[docs/install-windows.md](D:/codex/Claude-to-IM-
 ### 依赖
 
 - Node.js 20+
-- 如果使用 `codex` 或 `auto` 运行时：先安装 Codex CLI
+- 如果使用 `codex` 或 `auto` 运行时：需要在同一 Windows 用户下完成 Codex 认证
+
+`codex-to-im` 当前已经随包带上运行所需的 `@openai/codex-sdk` / Codex CLI 平台依赖，正常使用 bridge 时不要求你额外再全局安装一份 Codex CLI。
+
+但你仍然需要让 Codex 在当前用户下可用。推荐满足以下任一条件：
+
+- 已安装并登录过 Codex Windows App
+- 已经有可用的 Codex CLI 登录态
+- 已配置 `CTI_CODEX_API_KEY`、`CODEX_API_KEY` 或 `OPENAI_API_KEY`
+
+如果你机器上还没有任何 Codex 登录态，最直接的做法仍然是临时安装一次全局 Codex CLI 并登录：
 
 ```bash
 npm install -g @openai/codex

@@ -38,7 +38,17 @@ Windows host installation guide: [docs/install-windows.md](D:/codex/Claude-to-IM
 ### Prerequisites
 
 - Node.js 20+
-- If you use the `codex` or `auto` runtime, install Codex CLI first
+- If you use the `codex` or `auto` runtime, complete Codex authentication under the same Windows user
+
+`codex-to-im` now ships with the required `@openai/codex-sdk` / Codex CLI platform dependency, so you do not need to install a separate global Codex CLI just to run the bridge.
+
+You still need Codex credentials to be available for the current user. Any of these is sufficient:
+
+- a logged-in Codex Windows App
+- an existing Codex CLI login state
+- `CTI_CODEX_API_KEY`, `CODEX_API_KEY`, or `OPENAI_API_KEY`
+
+If the machine does not have any Codex login state yet, the simplest path is still to install the global CLI once and log in:
 
 ```bash
 npm install -g @openai/codex
