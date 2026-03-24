@@ -11,6 +11,7 @@ import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewSta
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import type { BridgeSession } from './host.js';
+import path from 'node:path';
 // Side-effect import: triggers self-registration of all adapter factories
 import './adapters/index.js';
 import * as router from './channel-router.js';
@@ -111,6 +112,56 @@ function getDisplayedBridgeSessions(currentSessionId?: string): BridgeSession[] 
     if (aShared !== bShared) return bShared - aShared;
     return a.name?.localeCompare(b.name || '') || 0;
   });
+}
+
+function getSessionDisplayName(session: BridgeSession | null | undefined, fallbackDirectory?: string): string {
+  if (session?.name?.trim()) return session.name.trim();
+  const cwd = session?.working_directory || fallbackDirectory || '';
+  if (cwd) return path.basename(cwd) || cwd;
+  if (session?.id) return session.id.slice(0, 8);
+  return '未命名会话';
+}
+
+function getDesktopThreadTitle(threadId: string | undefined | null): string | null {
+  if (!threadId) return null;
+  return getDesktopSessionByThreadId(threadId)?.title || null;
+}
+
+function formatCommandMessageId(id: string | undefined | null): string {
+  if (!id) return '未共享';
+  return id;
+}
+
+function formatCommandPath(cwd: string | undefined | null): string {
+  return cwd?.trim() || '~';
+}
+
+function buildDesktopSessionLines(session: ReturnType<typeof getDisplayedDesktopThreads>[number], index: number): string[] {
+  return [
+    `${index + 1}. ${session.title || '未命名线程'}`,
+    `   Thread: ${session.threadId}`,
+    `   目录: ${formatCommandPath(session.cwd)}`,
+    `   来源: ${session.originator || 'Codex Desktop'}`,
+  ];
+}
+
+function buildBridgeSessionLines(
+  session: BridgeSession,
+  index: number,
+  isCurrent: boolean,
+): string[] {
+  const title = getSessionDisplayName(session, session.working_directory);
+  const currentSuffix = isCurrent ? ' [当前]' : '';
+  const lines = [
+    `${index + 1}. ${title}${currentSuffix}`,
+    `   Session: ${session.id}`,
+    `   目录: ${formatCommandPath(session.working_directory)}`,
+  ];
+  if (session.sdk_session_id) {
+    const threadTitle = getDesktopThreadTitle(session.sdk_session_id);
+    lines.push(`   Thread: ${session.sdk_session_id}${threadTitle ? ` · ${threadTitle}` : ''}`);
+  }
+  return lines;
 }
 
 function getHistoryMessageLimit(): number {
@@ -925,11 +976,11 @@ async function handleCommand(
   switch (command) {
     case '/start':
       response = [
-        '<b>Codex To IM</b>',
+        'Codex to IM',
         '',
         '直接发送文本，就会继续当前聊天绑定的会话。',
         '',
-        '<b>常用流程</b>',
+        '常用流程',
         '1. /threads 查看最近桌面会话',
         '2. /thread 1 接管第 1 条桌面会话',
         '3. 之后直接发消息即可继续这条会话',
@@ -958,13 +1009,20 @@ async function handleCommand(
         workDir = validated;
       }
       const binding = router.createBinding(msg.address, workDir);
-      response = `New session created.\nSession: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>\nCWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`;
+      const session = store.getSession(binding.codepilotSessionId);
+      response = [
+        '已新建会话',
+        '',
+        `标题: ${getSessionDisplayName(session, binding.workingDirectory)}`,
+        `Session: ${binding.codepilotSessionId}`,
+        `目录: ${formatCommandPath(binding.workingDirectory)}`,
+      ].join('\n');
       break;
     }
 
     case '/bind': {
       if (!args) {
-        response = '用法：/bind &lt;session-id | thread-id | 序号&gt;';
+        response = '用法：/bind <session-id | thread-id | 序号>';
         break;
       }
 
@@ -977,12 +1035,14 @@ async function handleCommand(
             workingDirectory: threadPick.match.cwd,
             displayName: threadPick.match.title,
           });
+          const session = store.getSession(importedBinding.codepilotSessionId);
           response = [
-            '<b>已绑定桌面会话</b>',
+            '已绑定桌面会话',
             '',
-            `Thread: <code>${escapeHtml(threadPick.match.threadId)}</code>`,
-            `会话: <code>${importedBinding.codepilotSessionId.slice(0, 8)}...</code>`,
-            `目录: <code>${escapeHtml(importedBinding.workingDirectory || '~')}</code>`,
+            `标题: ${threadPick.match.title || getSessionDisplayName(session, importedBinding.workingDirectory)}`,
+            `Thread: ${threadPick.match.threadId}`,
+            `Session: ${importedBinding.codepilotSessionId}`,
+            `目录: ${formatCommandPath(importedBinding.workingDirectory)}`,
             '',
             '接下来直接发消息即可继续这条会话。',
           ].join('\n');
@@ -999,12 +1059,14 @@ async function handleCommand(
       if (sessionPick.match) {
         const binding = router.bindToSession(msg.address, sessionPick.match.id);
         if (binding) {
+          const threadTitle = getDesktopThreadTitle(binding.sdkSessionId);
           response = [
-            '<b>已绑定内部会话</b>',
+            '已绑定内部会话',
             '',
-            `会话: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
-            `Thread: <code>${escapeHtml(binding.sdkSessionId || 'not-shared')}</code>`,
-            `目录: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
+            `标题: ${getSessionDisplayName(sessionPick.match, binding.workingDirectory)}`,
+            `Session: ${binding.codepilotSessionId}`,
+            `Thread: ${formatCommandMessageId(binding.sdkSessionId)}${threadTitle ? ` · ${threadTitle}` : ''}`,
+            `目录: ${formatCommandPath(binding.workingDirectory)}`,
           ].join('\n');
           break;
         }
@@ -1024,12 +1086,14 @@ async function handleCommand(
         workingDirectory: threadPick.match.cwd,
         displayName: threadPick.match.title,
       });
+      const importedSession = store.getSession(importedBinding.codepilotSessionId);
       response = [
-        '<b>已绑定桌面会话</b>',
+        '已绑定桌面会话',
         '',
-        `Thread: <code>${escapeHtml(threadPick.match.threadId)}</code>`,
-        `会话: <code>${importedBinding.codepilotSessionId.slice(0, 8)}...</code>`,
-        `目录: <code>${escapeHtml(importedBinding.workingDirectory || '~')}</code>`,
+        `标题: ${threadPick.match.title || getSessionDisplayName(importedSession, importedBinding.workingDirectory)}`,
+        `Thread: ${threadPick.match.threadId}`,
+        `Session: ${importedBinding.codepilotSessionId}`,
+        `目录: ${formatCommandPath(importedBinding.workingDirectory)}`,
         '',
         '接下来直接发消息即可继续这条会话。',
       ].join('\n');
@@ -1038,7 +1102,7 @@ async function handleCommand(
 
     case '/thread': {
       if (!args) {
-        response = '用法：/thread &lt;thread-id | 序号&gt;';
+        response = '用法：/thread <thread-id | 序号>';
         break;
       }
       const displayedThreads = getDisplayedDesktopThreads(10);
@@ -1054,12 +1118,14 @@ async function handleCommand(
             workingDirectory: desktop.cwd,
             displayName: desktop.title,
           } : undefined);
+          const session = store.getSession(binding.codepilotSessionId);
           response = [
-            '<b>已绑定 Thread</b>',
+            '已绑定 Thread',
             '',
-            `Thread: <code>${escapeHtml(args)}</code>`,
-            `会话: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
-            `目录: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
+            `标题: ${desktop?.title || getSessionDisplayName(session, binding.workingDirectory)}`,
+            `Thread: ${args}`,
+            `Session: ${binding.codepilotSessionId}`,
+            `目录: ${formatCommandPath(binding.workingDirectory)}`,
             '',
             '接下来直接发消息即可继续这条会话。',
           ].join('\n');
@@ -1073,11 +1139,12 @@ async function handleCommand(
         displayName: threadPick.match.title,
       });
       response = [
-        '<b>已绑定 Thread</b>',
+        '已绑定 Thread',
         '',
-        `Thread: <code>${escapeHtml(threadPick.match.threadId)}</code>`,
-        `Session: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
-        `CWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
+        `标题: ${threadPick.match.title || '未命名线程'}`,
+        `Thread: ${threadPick.match.threadId}`,
+        `Session: ${binding.codepilotSessionId}`,
+        `目录: ${formatCommandPath(binding.workingDirectory)}`,
         '',
         '接下来直接发消息即可继续这条会话。',
       ].join('\n');
@@ -1090,23 +1157,19 @@ async function handleCommand(
         response = '没有找到最近桌面会话。先在 Codex Windows App 中打开一个会话，再回来试一次。';
         break;
       }
-      const lines = ['<b>最近桌面会话</b>', ''];
+      const lines = ['最近桌面会话', ''];
       for (const [index, session] of desktopSessions.entries()) {
-        const activity = session.activeEstimate ? 'recent' : 'history';
-        lines.push(
-          `${index + 1}. <code>${escapeHtml(session.threadId.slice(0, 8))}...</code> [${activity}] ${escapeHtml(session.cwd || session.title)}`,
-        );
+        lines.push(...buildDesktopSessionLines(session, index), '');
       }
-      lines.push('');
-      lines.push('发送 <code>/thread 1</code> 可接管第 1 条桌面会话。');
-      lines.push('也支持完整 thread id 或唯一前缀，例如 <code>/thread 019d1da4</code>。');
-      response = lines.join('\n');
+      lines.push('发送 /thread 1 可接管第 1 条桌面会话。');
+      lines.push('也支持完整 thread id 或唯一前缀，例如 /thread 019d1da4。');
+      response = lines.join('\n').trim();
       break;
     }
 
     case '/use': {
       if (!args) {
-        response = '用法：/use &lt;session-id | 序号&gt;';
+        response = '用法：/use <session-id | 序号>';
         break;
       }
       const displayedSessions = getDisplayedBridgeSessions(currentBinding?.codepilotSessionId);
@@ -1124,53 +1187,58 @@ async function handleCommand(
         response = '切换失败，该会话不存在。';
         break;
       }
+      const threadTitle = getDesktopThreadTitle(binding.sdkSessionId);
       response = [
-        '<b>已切换会话</b>',
+        '已切换会话',
         '',
-        `会话: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
-        `Thread: <code>${escapeHtml(binding.sdkSessionId || 'not-shared')}</code>`,
-        `目录: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
+        `标题: ${getSessionDisplayName(sessionPick.match, binding.workingDirectory)}`,
+        `Session: ${binding.codepilotSessionId}`,
+        `Thread: ${formatCommandMessageId(binding.sdkSessionId)}${threadTitle ? ` · ${threadTitle}` : ''}`,
+        `目录: ${formatCommandPath(binding.workingDirectory)}`,
       ].join('\n');
       break;
     }
 
     case '/cwd': {
       if (!args) {
-        response = 'Usage: /cwd /path/to/directory';
+        response = '用法：/cwd /path/to/directory';
         break;
       }
       const validatedPath = validateWorkingDirectory(args);
       if (!validatedPath) {
-        response = 'Invalid path. Must be an absolute path without traversal sequences or special characters.';
+        response = '路径无效。必须是绝对路径，且不能包含目录穿越或特殊字符。';
         break;
       }
       const binding = router.resolve(msg.address);
       router.updateBinding(binding.id, { workingDirectory: validatedPath });
-      response = `Working directory set to <code>${escapeHtml(validatedPath)}</code>`;
+      response = `已更新工作目录：${validatedPath}`;
       break;
     }
 
     case '/mode': {
       if (!validateMode(args)) {
-        response = 'Usage: /mode plan|code|ask';
+        response = '用法：/mode plan|code|ask';
         break;
       }
       const binding = router.resolve(msg.address);
       router.updateBinding(binding.id, { mode: args });
-      response = `Mode set to <b>${args}</b>`;
+      response = `已切换模式：${args}`;
       break;
     }
 
     case '/status': {
       const binding = router.resolve(msg.address);
+      const session = store.getSession(binding.codepilotSessionId);
+      const threadTitle = getDesktopThreadTitle(binding.sdkSessionId);
       response = [
-        '<b>当前会话</b>',
+        '当前会话',
         '',
-        `会话: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
-        `Thread: <code>${escapeHtml(binding.sdkSessionId || 'not-shared')}</code>`,
-        `目录: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
-        `模式: <b>${binding.mode}</b>`,
-        `模型: <code>${binding.model || 'default'}</code>`,
+        `标题: ${threadTitle || getSessionDisplayName(session, binding.workingDirectory)}`,
+        `Session: ${binding.codepilotSessionId}`,
+        `Thread: ${formatCommandMessageId(binding.sdkSessionId)}${threadTitle ? ` · ${threadTitle}` : ''}`,
+        `目录: ${formatCommandPath(binding.workingDirectory)}`,
+        `模式: ${binding.mode}`,
+        `模型: ${binding.model || 'default'}`,
         '',
         binding.sdkSessionId
           ? '当前聊天已绑定到一条共享 thread，直接发送消息即可继续。'
@@ -1195,20 +1263,23 @@ async function handleCommand(
         response = '当前会话还没有历史消息。';
         break;
       }
+      const threadTitle = getDesktopThreadTitle(currentBinding.sdkSessionId);
+      const session = store.getSession(currentBinding.codepilotSessionId);
 
       const lines = [
-        '<b>最近对话</b>',
+        '最近对话',
         '',
-        `会话: <code>${currentBinding.codepilotSessionId.slice(0, 8)}...</code>`,
-        `Thread: <code>${escapeHtml(currentBinding.sdkSessionId || 'not-shared')}</code>`,
-        `来源: <b>${desktopMessages.length > 0 ? 'desktop thread' : 'bridge cache'}</b>`,
-        `返回条数: <b>${messages.length}</b> / 配置 <b>${limit}</b>`,
+        `标题: ${threadTitle || getSessionDisplayName(session, currentBinding.workingDirectory)}`,
+        `Session: ${currentBinding.codepilotSessionId}`,
+        `Thread: ${formatCommandMessageId(currentBinding.sdkSessionId)}${threadTitle ? ` · ${threadTitle}` : ''}`,
+        `来源: ${desktopMessages.length > 0 ? 'desktop thread' : 'bridge cache'}`,
+        `返回条数: ${messages.length} / 配置 ${limit}`,
         '',
       ];
 
       for (const [index, message] of messages.entries()) {
-        lines.push(`${index + 1}. <b>${formatHistoryRole(message.role)}</b>`);
-        lines.push(escapeHtml(truncateHistoryContent(formatStoredMessageContent(message.content))));
+        lines.push(`${index + 1}. ${formatHistoryRole(message.role)}`);
+        lines.push(truncateHistoryContent(formatStoredMessageContent(message.content)));
         lines.push('');
       }
 
@@ -1221,15 +1292,12 @@ async function handleCommand(
       if (sessions.length === 0) {
         response = '当前没有内部会话。先发送一条消息，或先用 /thread 1 接管桌面会话。';
       } else {
-        const lines = ['<b>可切换的内部会话</b>', ''];
+        const lines = ['可切换的内部会话', ''];
         for (const [index, session] of sessions.slice(0, 10).entries()) {
-          const current = session.id === currentBinding?.codepilotSessionId ? ' [current]' : '';
-          const threadSuffix = session.sdk_session_id ? ` -> <code>${escapeHtml(session.sdk_session_id.slice(0, 8))}...</code>` : '';
-          lines.push(`${index + 1}. <code>${session.id.slice(0, 8)}...</code>${current} ${escapeHtml(session.working_directory || '~')}${threadSuffix}`);
+          lines.push(...buildBridgeSessionLines(session, index, session.id === currentBinding?.codepilotSessionId), '');
         }
-        lines.push('');
-        lines.push('发送 <code>/use 2</code> 可切换到第 2 条内部会话。');
-        response = lines.join('\n');
+        lines.push('发送 /use 2 可切换到第 2 条内部会话。');
+        response = lines.join('\n').trim();
       }
       break;
     }
@@ -1255,62 +1323,62 @@ async function handleCommand(
       const permAction = permParts[0];
       const permId = permParts.slice(1).join(' ');
       if (!permAction || !permId || !['allow', 'allow_session', 'deny'].includes(permAction)) {
-        response = 'Usage: /perm allow|allow_session|deny &lt;permission_id&gt;';
+        response = '用法：/perm allow|allow_session|deny <permission_id>';
         break;
       }
       const callbackData = `perm:${permAction}:${permId}`;
       const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId);
       if (handled) {
-        response = `Permission ${permAction}: recorded.`;
+        response = `已记录权限操作：${permAction}`;
       } else {
-        response = `Permission not found or already resolved.`;
+        response = '没有找到对应权限，或该权限已处理。';
       }
       break;
     }
 
     case '/help':
       response = [
-        '<b>Codex To IM 命令说明</b>',
+        'Codex to IM 命令说明',
         '',
-        '<b>最常用</b>',
+        '最常用',
         '/threads 查看最近桌面会话',
         '/thread 1 接管第 1 条桌面会话',
         '直接发送文本 继续当前已绑定会话',
         '/status 查看当前聊天绑定到了哪条会话',
         '/history 查看当前会话最近 N 条消息',
         '',
-        '<b>切换与绑定</b>',
+        '切换与绑定',
         '/threads 列出最近桌面会话',
-        '/thread &lt;thread-id | 序号&gt; 绑定桌面 thread',
+        '/thread <thread-id | 序号> 绑定桌面 thread',
         '/sessions 列出内部会话',
-        '/use &lt;session-id | 序号&gt; 切换到内部会话',
-        '/bind &lt;session-id | thread-id | 序号&gt; 智能绑定，兼容旧用法',
+        '/use <session-id | 序号> 切换到内部会话',
+        '/bind <session-id | thread-id | 序号> 智能绑定，兼容旧用法',
         '',
-        '<b>会话设置</b>',
+        '会话设置',
         '/new [绝对路径] 新建会话',
         '/cwd /path/to/project 修改当前工作目录',
         '/mode plan|code|ask 修改模式',
         '/history 查看当前会话最近 N 条消息',
         '/stop 停止当前任务',
         '',
-        '<b>权限</b>',
-        '/perm allow|allow_session|deny &lt;id&gt;',
+        '权限',
+        '/perm allow|allow_session|deny <id>',
         '1/2/3 快速处理单个待批准权限',
         '',
-        '<b>提示</b>',
+        '提示',
         'thread / session 都支持完整 id、唯一前缀，或列表里的序号。',
       ].join('\n');
       break;
 
     default:
-      response = `Unknown command: ${escapeHtml(command)}\nType /help for available commands.`;
+      response = `未知命令：${command}\n发送 /help 查看可用命令。`;
   }
 
   if (response) {
     await deliver(adapter, {
       address: msg.address,
       text: response,
-      parseMode: 'HTML',
+      parseMode: 'plain',
       replyToMessageId: msg.messageId,
     });
   }

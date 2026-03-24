@@ -212,6 +212,11 @@ export async function stopBridge(): Promise<BridgeStatus> {
   return getBridgeStatus();
 }
 
+export async function restartBridge(): Promise<BridgeStatus> {
+  await stopBridge();
+  return await startBridge();
+}
+
 export function getBridgeLogs(lines = 200): string {
   ensureDirs();
   const filePath = path.join(logsDir, 'bridge.log');

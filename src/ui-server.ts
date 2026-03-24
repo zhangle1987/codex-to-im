@@ -19,12 +19,14 @@ import {
   getUiServerUrl,
   installCodexIntegration,
   isCodexIntegrationInstalled,
+  restartBridge,
   startBridge,
   stopBridge,
   writeUiServerStatus,
 } from './service-manager.js';
 import { JsonFileStore } from './store.js';
 import { runWeixinLogin } from './weixin-login.js';
+import { listWeixinAccounts } from './weixin-store.js';
 
 let port = 4781;
 const serverStartTime = new Date().toISOString();
@@ -174,6 +176,19 @@ function mergeConfig(payload: Record<string, unknown>): Config {
   };
 }
 
+function getWeixinAccountsPayload() {
+  return listWeixinAccounts().map((account) => ({
+    accountId: account.accountId,
+    name: account.name,
+    userId: account.userId,
+    enabled: account.enabled,
+    baseUrl: account.baseUrl,
+    cdnBaseUrl: account.cdnBaseUrl,
+    lastLoginAt: account.lastLoginAt,
+    updatedAt: account.updatedAt,
+  }));
+}
+
 async function validateFeishuCredentials(config: Config): Promise<{ ok: boolean; message: string }> {
   if (!config.feishuAppId || !config.feishuAppSecret) {
     return { ok: false, message: 'Feishu App ID / App Secret 不能为空。' };
@@ -259,155 +274,253 @@ function renderHtml(): string {
     <title>Codex to IM</title>
     <style>
       :root {
-        --bg: #faf8f5;
+        --bg: #f5f7fa;
         --surface: #ffffff;
-        --panel: #f2ece5;
-        --border: #d7cec3;
-        --text: #2f2419;
-        --muted: #6d5d4a;
-        --primary: #9a3412;
-        --primary-strong: #7c2d12;
-        --success: #166534;
-        --danger: #b91c1c;
-        --sidebar: #efe7dd;
+        --surface-soft: #fafafa;
+        --border: #e5e7eb;
+        --border-strong: #d0d7e2;
+        --text: #111827;
+        --muted: #667085;
+        --primary: #1677ff;
+        --primary-strong: #0958d9;
+        --success: #15803d;
+        --danger: #dc2626;
+        --sidebar: #001529;
+        --sidebar-border: #0f2b46;
+        --sidebar-text: #c7d2e0;
+        --sidebar-active: #1677ff;
+        --code-bg: #0f172a;
       }
 
       * { box-sizing: border-box; }
       html, body { height: 100%; }
       body {
         margin: 0;
-        font: 14px/1.5 "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+        font: 14px/1.5 "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
         color: var(--text);
         background: var(--bg);
+      }
+
+      button, input, select, textarea {
+        font: inherit;
       }
 
       .shell {
         min-height: 100vh;
         display: grid;
-        grid-template-columns: 248px minmax(0, 1fr);
+        grid-template-columns: 232px minmax(0, 1fr);
       }
 
       .sidebar {
         background: var(--sidebar);
-        border-right: 1px solid var(--border);
-        padding: 28px 20px;
+        color: var(--sidebar-text);
+        padding: 20px 16px;
+        border-right: 1px solid var(--sidebar-border);
       }
 
-      .sidebar-title {
-        font-size: 17px;
+      .brand {
+        padding: 10px 12px 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        margin-bottom: 18px;
+      }
+
+      .brand-title {
+        margin: 0;
+        color: #ffffff;
+        font-size: 16px;
         font-weight: 700;
-        margin: 0 0 6px;
       }
 
-      .sidebar-copy {
-        margin: 0 0 24px;
-        color: var(--muted);
+      .brand-copy {
+        margin: 6px 0 0;
+        color: var(--sidebar-text);
+        font-size: 13px;
       }
 
       .nav {
         display: grid;
-        gap: 8px;
+        gap: 4px;
       }
 
-      .nav a {
-        color: var(--text);
-        text-decoration: none;
-        padding: 8px 10px;
+      .nav-link {
+        width: 100%;
+        border: 0;
+        background: transparent;
+        color: var(--sidebar-text);
+        text-align: left;
+        padding: 10px 12px;
         border-radius: 8px;
+        cursor: pointer;
       }
 
-      .nav a:hover {
-        background: rgba(255, 255, 255, 0.55);
+      .nav-link:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #ffffff;
+      }
+
+      .nav-link.active {
+        background: var(--sidebar-active);
+        color: #ffffff;
       }
 
       .main {
-        padding: 28px 32px 40px;
+        padding: 28px 32px 36px;
       }
 
-      .topbar {
+      .page {
+        display: none;
+      }
+
+      .page.active {
+        display: block;
+      }
+
+      .page-header {
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
-        gap: 20px;
-        margin-bottom: 24px;
+        gap: 16px;
+        margin-bottom: 20px;
       }
 
-      .topbar h1 {
-        margin: 0 0 4px;
+      .page-title {
+        margin: 0;
         font-size: 28px;
         line-height: 1.2;
       }
 
-      .topbar p {
-        margin: 0;
+      .page-copy {
+        margin: 6px 0 0;
         color: var(--muted);
       }
 
       .status-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-        gap: 12px;
-        margin-bottom: 24px;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 16px;
+        margin-bottom: 20px;
       }
 
-      .status-card, .panel {
+      .status-card,
+      .panel {
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
       }
 
       .status-card {
-        padding: 14px 16px;
+        padding: 16px 18px;
       }
 
       .status-card strong {
         display: block;
         font-size: 12px;
         color: var(--muted);
-        margin-bottom: 8px;
         font-weight: 600;
+        margin-bottom: 8px;
       }
 
       .status-value {
-        font-size: 20px;
+        font-size: 22px;
+        line-height: 1.2;
         font-weight: 700;
+        word-break: break-word;
       }
 
-      .stack {
-        display: grid;
-        gap: 20px;
+      .panel {
+        padding: 20px;
       }
 
       .section-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 18px;
+        gap: 20px;
       }
 
-      .channel-grid {
+      .overview-grid {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 18px;
+        grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.9fr);
+        gap: 20px;
       }
 
-      .panel {
-        padding: 18px;
+      .panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        margin-bottom: 16px;
       }
 
-      .panel h2 {
-        margin: 0 0 16px;
+      .panel-header h2,
+      .panel-header h3 {
+        margin: 0;
         font-size: 18px;
+      }
+
+      .panel-header p {
+        margin: 6px 0 0;
+        color: var(--muted);
+      }
+
+      .toolbar,
+      .actions,
+      .session-actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: 1px solid var(--border-strong);
+        background: #ffffff;
+        color: var(--text);
+        border-radius: 8px;
+        padding: 9px 14px;
+        cursor: pointer;
+      }
+
+      button:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+      }
+
+      button.primary {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: #ffffff;
+      }
+
+      button.primary:hover {
+        background: var(--primary-strong);
+        border-color: var(--primary-strong);
+        color: #ffffff;
+      }
+
+      button[disabled] {
+        border-color: var(--border);
+        color: #9ca3af;
+        background: #f3f4f6;
+        cursor: not-allowed;
+      }
+
+      button[disabled]:hover {
+        border-color: var(--border);
+        color: #9ca3af;
       }
 
       .fields {
         display: grid;
-        gap: 14px;
+        gap: 16px;
       }
 
       .field-row {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 14px;
+        gap: 16px;
+      }
+
+      .field-row.triple {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
       }
 
       label {
@@ -419,16 +532,15 @@ function renderHtml(): string {
 
       input, select, textarea {
         width: 100%;
-        border: 1px solid var(--border);
-        background: #fff;
+        border: 1px solid var(--border-strong);
+        background: #ffffff;
         color: var(--text);
         border-radius: 8px;
         padding: 10px 12px;
-        font: inherit;
       }
 
       input:focus, select:focus, textarea:focus {
-        outline: 2px solid rgba(154, 52, 18, 0.16);
+        outline: 2px solid rgba(22, 119, 255, 0.14);
         border-color: var(--primary);
       }
 
@@ -439,7 +551,7 @@ function renderHtml(): string {
 
       .checkbox-row {
         display: flex;
-        gap: 18px;
+        gap: 16px;
         flex-wrap: wrap;
       }
 
@@ -448,7 +560,6 @@ function renderHtml(): string {
         align-items: center;
         gap: 8px;
         color: var(--text);
-        font-weight: 500;
       }
 
       .checkbox input {
@@ -457,129 +568,217 @@ function renderHtml(): string {
         margin: 0;
       }
 
-      .actions {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-
-      button {
-        border: 1px solid var(--border);
-        background: #fff;
-        color: var(--text);
-        border-radius: 8px;
-        padding: 10px 14px;
-        font: inherit;
-        cursor: pointer;
-      }
-
-      button.primary {
-        background: var(--primary);
-        border-color: var(--primary);
-        color: #fff;
-      }
-
-      button.primary:hover {
-        background: var(--primary-strong);
-      }
-
-      button:hover {
-        border-color: var(--primary);
-      }
-
       .notice {
         padding: 12px 14px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
         border-radius: 8px;
-        background: var(--panel);
         color: var(--muted);
       }
 
-      .notice strong {
-        color: var(--text);
-      }
-
-      .logs {
-        white-space: pre-wrap;
-        word-break: break-word;
-        background: #231b14;
-        color: #f3eee7;
-        border-radius: 10px;
-        padding: 14px;
-        min-height: 260px;
-        overflow: auto;
-      }
-
       .message {
-        margin-top: 12px;
+        display: none;
+        margin-top: 14px;
         padding: 10px 12px;
         border-radius: 8px;
-        display: none;
       }
 
       .message.show { display: block; }
-      .message.success { background: rgba(22, 101, 52, 0.1); color: var(--success); }
-      .message.error { background: rgba(185, 28, 28, 0.1); color: var(--danger); }
+      .message.success { background: rgba(21, 128, 61, 0.10); color: var(--success); }
+      .message.error { background: rgba(220, 38, 38, 0.10); color: var(--danger); }
+
+      .global-message-host {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: grid;
+        gap: 10px;
+        z-index: 2000;
+        pointer-events: none;
+      }
+
+      .global-message {
+        min-width: 240px;
+        max-width: min(560px, calc(100vw - 32px));
+        padding: 10px 14px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+        color: var(--text);
+      }
+
+      .global-message.success {
+        border-color: rgba(21, 128, 61, 0.16);
+      }
+
+      .global-message.error {
+        border-color: rgba(220, 38, 38, 0.16);
+      }
+
+      .info-list {
+        display: grid;
+        gap: 12px;
+      }
+
+      .info-item {
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-soft);
+      }
+
+      .info-item strong {
+        display: block;
+        margin-bottom: 4px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .mono,
+      .project-group-path,
+      .session-path,
+      .binding-detail code {
+        font-family: "Cascadia Code", Consolas, "SF Mono", monospace;
+      }
 
       .session-list {
         display: grid;
-        gap: 10px;
+        gap: 16px;
+      }
+
+      .project-group {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+        padding: 16px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .project-group-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+      }
+
+      .project-group-title {
+        font-size: 16px;
+        font-weight: 700;
+      }
+
+      .project-group-path {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 4px;
+        word-break: break-all;
+      }
+
+      .project-group-count {
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .project-session-list {
+        display: grid;
+        gap: 12px;
       }
 
       .session-card {
         border: 1px solid var(--border);
         border-radius: 10px;
-        padding: 12px 14px;
-        background: #fcfbf9;
+        padding: 14px;
+        background: var(--surface-soft);
+      }
+
+      .session-card.current-thread {
+        border-color: rgba(22, 119, 255, 0.32);
+        background: rgba(22, 119, 255, 0.03);
       }
 
       .session-head {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
+        display: grid;
+        grid-template-columns: minmax(0, 1.9fr) 150px minmax(220px, 1fr) auto;
+        gap: 16px;
         align-items: center;
-        margin-bottom: 6px;
+      }
+
+      .session-main {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
       }
 
       .session-title {
         font-weight: 700;
       }
 
-      .session-meta {
+      .session-title-row {
         display: flex;
+        align-items: center;
         gap: 8px;
         flex-wrap: wrap;
-        margin: 8px 0;
       }
 
-      .session-pill {
+      .session-mark {
         display: inline-flex;
         align-items: center;
-        padding: 3px 8px;
+        padding: 1px 8px;
         border-radius: 999px;
-        border: 1px solid var(--border);
+        background: rgba(22, 119, 255, 0.10);
+        color: var(--primary);
+        font-size: 12px;
+        border: 1px solid rgba(22, 119, 255, 0.16);
+      }
+
+      .session-thread {
         color: var(--muted);
-        background: #fff;
         font-size: 12px;
       }
 
-      .session-pill.active {
-        color: var(--success);
-        border-color: rgba(22, 101, 52, 0.26);
-        background: rgba(22, 101, 52, 0.08);
+      .session-thread code {
+        word-break: break-all;
       }
 
+      .session-inline-action {
+        border: 0;
+        background: transparent;
+        color: var(--primary);
+        padding: 0;
+        margin-left: 8px;
+        font-size: 12px;
+      }
+
+      .session-inline-action:hover {
+        color: var(--primary-strong);
+        text-decoration: underline;
+      }
+
+      .session-cell {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+      }
+
+      .session-label {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .session-value,
       .session-path {
-        font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
-        font-size: 12px;
         color: var(--muted);
+        font-size: 12px;
         word-break: break-all;
       }
 
       .session-actions {
-        display: flex;
-        gap: 8px;
+        justify-content: flex-end;
+        align-items: center;
         flex-wrap: wrap;
-        margin-top: 10px;
       }
 
       .panel-block {
@@ -594,6 +793,86 @@ function renderHtml(): string {
         font-weight: 700;
       }
 
+      .channel-shell {
+        padding: 0;
+        overflow: hidden;
+      }
+
+      .channel-tabs {
+        display: flex;
+        align-items: flex-end;
+        gap: 0;
+        padding: 0 20px;
+        border-bottom: 1px solid var(--border);
+        background: #ffffff;
+      }
+
+      .command-sections {
+        display: grid;
+        gap: 14px;
+      }
+
+      .command-section {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-soft);
+        overflow: hidden;
+      }
+
+      .command-section-title {
+        margin: 0;
+        padding: 10px 14px;
+        font-size: 14px;
+        font-weight: 700;
+        border-bottom: 1px solid var(--border);
+        background: #ffffff;
+      }
+
+      .command-list {
+        display: grid;
+      }
+
+      .command-item {
+        display: grid;
+        grid-template-columns: 280px minmax(0, 1fr);
+        gap: 16px;
+        padding: 10px 14px;
+        border-top: 1px solid var(--border);
+      }
+
+      .command-item:first-child {
+        border-top: 0;
+      }
+
+      .command-item code {
+        word-break: break-all;
+      }
+
+      .channel-tab {
+        border: 0;
+        border-bottom: 2px solid transparent;
+        border-radius: 0;
+        padding: 14px 18px 12px;
+        background: transparent;
+        color: var(--muted);
+        margin-bottom: -1px;
+      }
+
+      .channel-tab.active {
+        color: var(--primary);
+        border-bottom-color: var(--primary);
+        background: transparent;
+      }
+
+      .channel-view {
+        display: none;
+        padding: 20px;
+      }
+
+      .channel-view.active {
+        display: block;
+      }
+
       .binding-list {
         display: grid;
         gap: 10px;
@@ -602,7 +881,7 @@ function renderHtml(): string {
       .binding-item {
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: #fcfbf9;
+        background: var(--surface-soft);
         padding: 12px 14px;
       }
 
@@ -632,179 +911,417 @@ function renderHtml(): string {
         margin-top: 12px;
       }
 
+      .binding-table-wrap {
+        margin-top: 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #ffffff;
+        overflow: hidden;
+      }
+
+      .binding-table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      .binding-table th,
+      .binding-table td {
+        padding: 10px 12px;
+        border-top: 1px solid var(--border);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .binding-table thead th {
+        border-top: 0;
+        background: #f8fafc;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .binding-table tbody tr.current {
+        background: rgba(22, 119, 255, 0.04);
+      }
+
+      .binding-table-title {
+        font-weight: 700;
+        word-break: break-word;
+      }
+
+      .binding-table-thread,
+      .binding-table-path {
+        font-size: 12px;
+        color: var(--muted);
+        word-break: break-all;
+      }
+
+      .binding-table-mark {
+        display: inline-flex;
+        align-items: center;
+        margin-left: 8px;
+        padding: 1px 8px;
+        border-radius: 999px;
+        background: rgba(22, 119, 255, 0.10);
+        color: var(--primary);
+        font-size: 12px;
+      }
+
+      .binding-target-btn {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: #ffffff;
+        white-space: nowrap;
+      }
+
+      .binding-target-btn.current {
+        border-color: rgba(22, 119, 255, 0.30);
+        background: rgba(22, 119, 255, 0.08);
+        color: var(--primary);
+      }
+
       .binding-empty {
         padding: 12px 14px;
-        border: 1px dashed var(--border);
+        border: 1px dashed var(--border-strong);
+        border-radius: 8px;
+        color: var(--muted);
+        background: var(--surface-soft);
+      }
+
+      .logs {
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: var(--code-bg);
+        color: #e2e8f0;
         border-radius: 10px;
-        color: var(--muted);
-        background: #fcfbf9;
+        padding: 16px;
+        min-height: 420px;
+        overflow: auto;
       }
 
-      .ghost {
-        color: var(--muted);
-      }
-
+      .ghost,
       .small {
         color: var(--muted);
         font-size: 12px;
       }
 
-      @media (max-width: 1080px) {
+      @media (max-width: 1180px) {
+        .overview-grid,
+        .section-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 980px) {
         .shell { grid-template-columns: 1fr; }
-        .sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
-        .section-grid { grid-template-columns: 1fr; }
-        .channel-grid { grid-template-columns: 1fr; }
-        .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .sidebar { border-right: 0; border-bottom: 1px solid var(--sidebar-border); }
+        .nav { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+        .main { padding: 20px 20px 28px; }
+        .field-row,
+        .field-row.triple,
+        .command-item,
         .binding-controls { grid-template-columns: 1fr; }
+        .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+
+      @media (max-width: 720px) {
+        .nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .status-grid { grid-template-columns: 1fr; }
+        .page-header,
+        .panel-header,
+        .project-group-head,
+        .binding-head { flex-direction: column; align-items: stretch; }
+        .session-head { grid-template-columns: 1fr; }
+        .session-actions { justify-content: flex-start; }
       }
     </style>
   </head>
   <body>
     <div class="shell">
       <aside class="sidebar">
-        <p class="sidebar-title">Codex to IM</p>
-        <p class="sidebar-copy">本地安装、配置、测试和后台控制都在这里。</p>
+        <div class="brand">
+          <p class="brand-title">Codex to IM</p>
+          <p class="brand-copy">本地后台、会话共享、通道绑定和调试都走这里。</p>
+        </div>
         <nav class="nav">
-          <a href="#overview">概览</a>
-          <a href="#config">配置</a>
-          <a href="#feishu">飞书</a>
-          <a href="#wechat">微信</a>
-          <a href="#desktop">桌面会话</a>
-          <a href="#ops">运行控制</a>
-          <a href="#logs">日志</a>
+          <button type="button" class="nav-link active" data-page="overview">概览</button>
+          <button type="button" class="nav-link" data-page="sessions">会话</button>
+          <button type="button" class="nav-link" data-page="config">配置</button>
+          <button type="button" class="nav-link" data-page="channels">通道</button>
+          <button type="button" class="nav-link" data-page="logs">日志</button>
+          <button type="button" class="nav-link" data-page="commands">命令说明</button>
         </nav>
       </aside>
       <main class="main">
-        <section class="topbar" id="overview">
-          <div>
-            <h1>本地桥接工作台</h1>
-            <p>后台服务、通道配置、桌面会话共享和通道测试都走这一页。</p>
+        <section class="page active" data-page="overview">
+          <div class="page-header">
+            <div>
+              <h1 class="page-title">概览</h1>
+              <p class="page-copy">运行状态、后台控制和当前环境集中在这一页。</p>
+            </div>
           </div>
-        </section>
 
-        <section class="status-grid">
-          <div class="status-card">
-            <strong>Bridge</strong>
-            <div class="status-value" id="bridgeStatus">-</div>
-          </div>
-          <div class="status-card">
-            <strong>Codex 集成</strong>
-            <div class="status-value" id="integrationStatus">-</div>
-          </div>
-          <div class="status-card">
-            <strong>Runtime</strong>
-            <div class="status-value" id="runtimeStatus">-</div>
-          </div>
-          <div class="status-card">
-            <strong>Desktop Sessions</strong>
-            <div class="status-value" id="desktopSessionCount">-</div>
-          </div>
-          <div class="status-card">
-            <strong>IM Bindings</strong>
-            <div class="status-value" id="bindingCount">-</div>
-          </div>
-          <div class="status-card">
-            <strong>Config Home</strong>
-            <div class="status-value" id="homeStatus" style="font-size:14px;">-</div>
-          </div>
-        </section>
-
-        <div class="stack">
-          <section class="panel" id="desktop">
-            <h2>最近桌面会话</h2>
-            <div class="notice">
-              这里列出最近在 <code>Codex Windows App</code> 中活跃过的本地会话，作为接管到飞书或微信的候选入口。
+          <section class="status-grid">
+            <div class="status-card">
+              <strong>Bridge</strong>
+              <div class="status-value" id="bridgeStatus">-</div>
             </div>
-            <div class="notice" style="margin-top: 12px;">
-              最短路径：在这里找到目标 thread，然后把 <code>/thread 019d1da4</code> 这样的命令发给飞书机器人，或在下面的绑定列表里直接切换。
+            <div class="status-card">
+              <strong>Codex 集成</strong>
+              <div class="status-value" id="integrationStatus">-</div>
             </div>
-            <div class="session-actions">
-              <button id="refreshDesktopBtn">刷新桌面会话</button>
+            <div class="status-card">
+              <strong>Runtime</strong>
+              <div class="status-value" id="runtimeStatus">-</div>
             </div>
-            <div class="small" id="desktopSessionMeta" style="margin: 12px 0 14px;">正在加载…</div>
-            <div class="session-list" id="desktopSessionsList"></div>
-            <div class="message" id="desktopMessage"></div>
+            <div class="status-card">
+              <strong>Desktop Sessions</strong>
+              <div class="status-value" id="desktopSessionCount">-</div>
+            </div>
+            <div class="status-card">
+              <strong>IM Bindings</strong>
+              <div class="status-value" id="bindingCount">-</div>
+            </div>
+            <div class="status-card">
+              <strong>Config Home</strong>
+              <div class="status-value" id="homeStatus" style="font-size: 14px;">-</div>
+            </div>
           </section>
 
-          <div class="section-grid">
-            <section class="panel" id="config">
-              <h2>基础配置</h2>
-              <div class="fields">
-                <div class="field-row">
-                  <label>
-                    Runtime
-                    <select id="runtime">
-                      <option value="codex">codex</option>
-                      <option value="auto">auto</option>
-                      <option value="claude">claude</option>
-                    </select>
-                  </label>
-                  <label>
-                    默认模式
-                    <select id="defaultMode">
-                      <option value="code">code</option>
-                      <option value="plan">plan</option>
-                      <option value="ask">ask</option>
-                    </select>
-                  </label>
-                  <label>
-                    /history 返回条数
-                    <input id="historyMessageLimit" type="number" min="1" max="20" value="8" />
-                  </label>
+          <div class="overview-grid">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>运行控制</h2>
+                  <p>保存配置后，可以直接在这里启停 bridge、测试 Codex 或刷新整体状态。</p>
                 </div>
-                <label>
-                  默认工作目录
-                  <input id="defaultWorkDir" placeholder="D:\\workspace\\project" />
-                </label>
-                <label>
-                  默认模型
-                  <input id="defaultModel" placeholder="留空则使用 runtime 默认模型" />
-                </label>
-                <div class="checkbox-row">
-                  <label class="checkbox"><input id="channelFeishu" type="checkbox" /> 启用飞书</label>
-                  <label class="checkbox"><input id="channelWeixin" type="checkbox" /> 启用微信</label>
-                  <label class="checkbox"><input id="autoApprove" type="checkbox" /> 自动批准工具权限</label>
-                </div>
-                <div class="checkbox-row">
-                  <label class="checkbox"><input id="codexSkipGitRepoCheck" type="checkbox" /> 允许在未信任 Git 目录运行 Codex</label>
-                </div>
-                <div class="small">如果新建会话报 “Not inside a trusted directory”，可以打开这个选项。修改后需要重启 Bridge 才会生效。</div>
               </div>
-            </section>
-
-            <section class="panel" id="ops">
-              <h2>运行控制</h2>
               <div class="actions">
                 <button class="primary" id="startBridgeBtn">启动 Bridge</button>
                 <button id="stopBridgeBtn">停止 Bridge</button>
+                <button id="restartBridgeBtn">重启 Bridge</button>
                 <button id="testCodexBtn">测试 Codex</button>
                 <button id="refreshBtn">刷新状态</button>
               </div>
+
               <div class="panel-block">
                 <p class="panel-subtitle">当前能力</p>
-                <div class="notice">
-                  已接通：保存配置、后台启停、飞书凭据测试、微信扫码、Codex 连接测试、桌面会话发现、IM 绑定查看与网页侧切换。
-                </div>
+                <div class="notice">已接通：保存配置、后台启停、飞书凭据测试、微信扫码、Codex 连接测试、桌面会话发现、IM 绑定查看与网页侧切换。</div>
               </div>
+
               <div class="panel-block">
                 <p class="panel-subtitle">可选 Codex 集成</p>
-                <div class="notice">
-                  主流程不依赖这层集成。只有当你想在 Codex 里直接打开 <code>codex-to-im</code>，或者保留一个“共享当前会话到飞书”的轻入口时，才需要安装它。
-                </div>
+                <div class="notice">主流程不依赖这层集成。只有当你想在 Codex 里直接打开 codex-to-im，或者保留一个“共享当前会话到飞书”的轻入口时，才需要安装它。</div>
                 <div class="actions" style="margin-top: 12px;">
                   <button id="installIntegrationBtn">安装可选 Codex 集成</button>
                 </div>
               </div>
-              <div class="small" style="margin-top: 12px;">
-                包根目录：<span id="packageRoot">-</span>
-              </div>
+
               <div class="message" id="opsMessage"></div>
             </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>当前环境</h2>
+                  <p>这里显示本机运行时和关键目录，便于排查部署问题。</p>
+                </div>
+              </div>
+              <div class="info-list">
+                <div class="info-item">
+                  <strong>包根目录</strong>
+                  <div class="mono" id="packageRoot">-</div>
+                </div>
+                <div class="info-item">
+                  <strong>配置目录</strong>
+                  <div class="mono" id="overviewHomeStatus">-</div>
+                </div>
+                <div class="info-item">
+                  <strong>桌面会话根目录</strong>
+                  <div class="mono" id="desktopRootStatus">-</div>
+                </div>
+                <div class="info-item">
+                  <strong>界面说明</strong>
+                  <div>左侧切换页面；“会话”管理桌面 thread；“通道”里查看飞书/微信当前绑定并直接切换。</div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" data-page="sessions">
+          <div class="page-header">
+            <div>
+              <h1 class="page-title">会话</h1>
+              <p class="page-copy">按工程目录查看最近桌面会话，并复制 thread 或接管命令。</p>
+            </div>
+            <div class="toolbar">
+              <button id="refreshDesktopBtn">刷新桌面会话</button>
+            </div>
           </div>
 
-          <div class="channel-grid">
-            <section class="panel" id="feishu">
-              <h2>飞书 / Lark</h2>
+          <section class="panel" id="desktop">
+            <div class="notice">这里只展示在 Codex 桌面索引里有名字的线程，和 Windows App 左侧列表保持一致。</div>
+            <div class="notice" style="margin-top: 12px;">最短路径：找到目标 thread，然后把 <code>/thread 019d1da4</code> 这样的命令发给飞书机器人，或直接到“通道”页切换绑定。</div>
+            <div class="small" id="desktopSessionMeta" style="margin: 14px 0 16px;">正在加载…</div>
+            <div class="session-list" id="desktopSessionsList"></div>
+            <div class="message" id="desktopMessage"></div>
+          </section>
+        </section>
+
+        <section class="page" data-page="config">
+          <div class="page-header">
+            <div>
+              <h1 class="page-title">配置</h1>
+              <p class="page-copy">这里维护本地默认工作目录、运行模式和全局行为开关。</p>
+            </div>
+          </div>
+
+          <section class="panel" id="config">
+            <div class="panel-header">
+              <div>
+                <h2>基础配置</h2>
+                <p>保存后会写入本地配置目录；涉及运行时的选项通常需要重启 Bridge 才生效。</p>
+              </div>
+              <div class="toolbar">
+                <button class="primary" id="saveConfigBtn">保存配置</button>
+              </div>
+            </div>
+
+            <div class="fields">
+              <div class="field-row triple">
+                <label>
+                  Runtime
+                  <select id="runtime">
+                    <option value="codex" selected>codex</option>
+                    <option value="auto">auto</option>
+                    <option value="claude">claude</option>
+                  </select>
+                </label>
+                <label>
+                  默认模式
+                  <select id="defaultMode">
+                    <option value="code">code</option>
+                    <option value="plan">plan</option>
+                    <option value="ask">ask</option>
+                  </select>
+                </label>
+                <label>
+                  /history 返回条数
+                  <input id="historyMessageLimit" type="number" min="1" max="20" value="8" />
+                </label>
+              </div>
+              <label>
+                默认工作目录
+                <input id="defaultWorkDir" placeholder="D:\\workspace\\project" />
+              </label>
+              <label>
+                默认模型
+                <input id="defaultModel" placeholder="留空则使用 runtime 默认模型" />
+              </label>
+              <div class="checkbox-row">
+                <label class="checkbox"><input id="channelFeishu" type="checkbox" checked /> 启用飞书</label>
+                <label class="checkbox"><input id="channelWeixin" type="checkbox" /> 启用微信</label>
+                <label class="checkbox"><input id="autoApprove" type="checkbox" /> 自动批准工具权限</label>
+              </div>
+              <div class="checkbox-row">
+                <label class="checkbox"><input id="codexSkipGitRepoCheck" type="checkbox" checked /> 允许在未信任 Git 目录运行 Codex</label>
+              </div>
+              <div class="small">如果新建会话报 “Not inside a trusted directory”，可以打开这个选项。修改后需要重启 Bridge 才会生效。</div>
+            </div>
+
+            <div class="message" id="configMessage"></div>
+          </section>
+        </section>
+
+        <section class="page" data-page="commands">
+          <div class="page-header">
+            <div>
+              <h1 class="page-title">命令说明</h1>
+              <p class="page-copy">这里列出当前桥接聊天里可用的命令，飞书和微信共用同一套语义。</p>
+            </div>
+          </div>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>命令使用说明</h2>
+                <p>下面这些命令适用于当前桥接到的聊天通道，飞书和微信共用同一套命令语义。</p>
+              </div>
+            </div>
+
+            <div class="notice" style="margin-bottom: 16px;">最短使用路径：先发 <code>/threads</code> 查看最近桌面会话，再发 <code>/thread 1</code> 接管；之后直接发送文本即可继续当前会话。</div>
+
+            <div class="command-sections">
+              <section class="command-section">
+                <h3 class="command-section-title">最常用</h3>
+                <div class="command-list">
+                  <div class="command-item"><code>/help</code><div>查看完整命令说明。</div></div>
+                  <div class="command-item"><code>/threads</code><div>列出最近桌面会话。</div></div>
+                  <div class="command-item"><code>/thread &lt;thread-id | 序号&gt;</code><div>绑定桌面 thread，接管桌面会话。</div></div>
+                  <div class="command-item"><code>直接发送文本</code><div>继续当前已绑定会话。</div></div>
+                  <div class="command-item"><code>/status</code><div>查看当前聊天绑定到了哪条会话、thread、目录和模式。</div></div>
+                  <div class="command-item"><code>/history</code><div>查看当前会话最近 N 条消息。</div></div>
+                </div>
+              </section>
+
+              <section class="command-section">
+                <h3 class="command-section-title">切换与绑定</h3>
+                <div class="command-list">
+                  <div class="command-item"><code>/sessions</code><div>列出内部会话。</div></div>
+                  <div class="command-item"><code>/use &lt;session-id | 序号&gt;</code><div>切换到已有内部会话。</div></div>
+                  <div class="command-item"><code>/bind &lt;session-id | thread-id | 序号&gt;</code><div>智能绑定，兼容旧用法；可绑定内部会话或桌面 thread。</div></div>
+                </div>
+              </section>
+
+              <section class="command-section">
+                <h3 class="command-section-title">会话设置</h3>
+                <div class="command-list">
+                  <div class="command-item"><code>/new [绝对路径]</code><div>新建会话；可选地指定工作目录。</div></div>
+                  <div class="command-item"><code>/cwd /path/to/project</code><div>修改当前会话工作目录。</div></div>
+                  <div class="command-item"><code>/mode plan|code|ask</code><div>修改当前会话模式。</div></div>
+                  <div class="command-item"><code>/stop</code><div>停止当前任务。</div></div>
+                </div>
+              </section>
+
+              <section class="command-section">
+                <h3 class="command-section-title">权限</h3>
+                <div class="command-list">
+                  <div class="command-item"><code>/perm allow|allow_session|deny &lt;id&gt;</code><div>文本方式处理一个待批准权限。</div></div>
+                  <div class="command-item"><code>1 / 2 / 3</code><div>快速处理单个待批准权限。</div></div>
+                </div>
+              </section>
+            </div>
+          </section>
+        </section>
+
+        <section class="page" data-page="channels">
+          <div class="page-header">
+            <div>
+              <h1 class="page-title">通道</h1>
+              <p class="page-copy">每个通道都显示当前绑定的会话，并支持在网页里直接改绑。</p>
+            </div>
+          </div>
+
+          <section class="panel channel-shell">
+            <div class="channel-tabs" role="tablist" aria-label="通道配置">
+              <button type="button" class="channel-tab active" data-channel="feishu" role="tab" aria-selected="true">飞书</button>
+              <button type="button" class="channel-tab" data-channel="weixin" role="tab" aria-selected="false">微信</button>
+            </div>
+
+            <div class="channel-view active" data-channel="feishu" role="tabpanel">
+              <section id="feishu">
+              <div class="panel-header">
+                <div>
+                  <h2>飞书 / Lark</h2>
+                  <p>填写凭据、测试可用性，并查看当前飞书聊天绑定到哪条会话。</p>
+                </div>
+                <div class="toolbar">
+                  <button id="saveFeishuChannelBtn">保存通道配置</button>
+                  <button id="testFeishuBtn">测试飞书凭据</button>
+                </div>
+              </div>
+
               <div class="fields">
                 <div class="field-row">
                   <label>
@@ -830,28 +1347,48 @@ function renderHtml(): string {
                   <label class="checkbox"><input id="feishuStreamingEnabled" type="checkbox" checked /> 启用飞书流式响应卡片</label>
                 </div>
                 <div class="small">需要飞书侧已开通可更新卡片的相关能力；如果权限不足，会自动回退为最终结果消息。</div>
-                <div class="actions">
-                  <button class="primary" id="saveConfigBtn">保存配置</button>
-                  <button id="testFeishuBtn">测试飞书凭据</button>
-                </div>
+              </div>
+
+              <div class="panel-block">
+                <p class="panel-subtitle">通道状态</p>
+                <div class="small" id="feishuRuntimeMeta">正在加载…</div>
               </div>
               <div class="panel-block">
                 <p class="panel-subtitle">当前飞书绑定</p>
                 <div class="small" id="feishuBindingMeta">正在加载…</div>
                 <div class="binding-list" id="feishuBindings" style="margin-top: 12px;"></div>
               </div>
-              <div class="message" id="feishuMessage"></div>
-            </section>
 
-            <section class="panel" id="wechat">
-              <h2>微信</h2>
+              <div class="message" id="feishuMessage"></div>
+              </section>
+            </div>
+
+            <div class="channel-view" data-channel="weixin" role="tabpanel">
+              <section id="wechat">
+              <div class="panel-header">
+                <div>
+                  <h2>微信</h2>
+                  <p>扫码登录微信并查看当前聊天绑定的会话。</p>
+                </div>
+                <div class="toolbar">
+                  <button id="saveWeixinChannelBtn">保存通道配置</button>
+                  <button id="weixinLoginBtn">开始微信扫码</button>
+                </div>
+              </div>
+
               <div class="fields">
                 <div class="checkbox-row">
                   <label class="checkbox"><input id="weixinMediaEnabled" type="checkbox" /> 启用图片 / 文件 / 视频入站下载</label>
                 </div>
-                <div class="actions">
-                  <button id="weixinLoginBtn">开始微信扫码</button>
-                </div>
+              </div>
+              <div class="panel-block">
+                <p class="panel-subtitle">通道状态</p>
+                <div class="small" id="weixinRuntimeMeta">正在加载…</div>
+              </div>
+              <div class="panel-block">
+                <p class="panel-subtitle">已登录微信账号</p>
+                <div class="small" id="weixinAccountMeta">正在加载…</div>
+                <div class="binding-list" id="weixinAccounts" style="margin-top: 12px;"></div>
               </div>
               <div class="panel-block">
                 <p class="panel-subtitle">当前微信绑定</p>
@@ -859,23 +1396,41 @@ function renderHtml(): string {
                 <div class="binding-list" id="weixinBindings" style="margin-top: 12px;"></div>
               </div>
               <div class="message" id="weixinMessage"></div>
-            </section>
+              </section>
+            </div>
+          </section>
+        </section>
+
+        <section class="page" data-page="logs">
+          <div class="page-header">
+            <div>
+              <h1 class="page-title">日志</h1>
+              <p class="page-copy">日志页只负责查看 bridge 日志，便于排查运行和通道问题。</p>
+            </div>
+            <div class="toolbar">
+              <button id="refreshLogsBtn">刷新日志</button>
+            </div>
           </div>
 
           <section class="panel" id="logs">
-            <h2>日志</h2>
             <div class="logs" id="logsOutput">等待加载日志…</div>
           </section>
-        </div>
+        </section>
       </main>
     </div>
+    <div id="globalMessageHost" class="global-message-host" aria-live="polite"></div>
 
     <script>
       const state = {
         config: null,
+        bridgeStatus: null,
         desktopSessions: [],
         bindings: [],
         bindingOptions: [],
+        weixinAccounts: [],
+        desktopRoot: '',
+        activePage: 'overview',
+        activeChannel: 'feishu',
       };
 
       function escapeHtml(value) {
@@ -896,6 +1451,16 @@ function renderHtml(): string {
         return '/thread ' + value.slice(0, 12);
       }
 
+      function pathSegments(value) {
+        const normalized = String(value || '').split('/').join('\\\\');
+        return normalized.split('\\\\').filter(Boolean);
+      }
+
+      function baseName(value) {
+        const segments = pathSegments(value);
+        return segments[segments.length - 1] || value || '(no cwd)';
+      }
+
       function formatTime(value) {
         if (!value) return '-';
         const date = new Date(value);
@@ -905,6 +1470,33 @@ function renderHtml(): string {
 
       function optionLabel(option) {
         return option.label + ' · ' + option.description;
+      }
+
+      function renderBindingTable(binding) {
+        const sessions = state.desktopSessions || [];
+        if (!sessions.length) {
+          return '<div class="binding-empty">当前还没有和会话页一致的命名桌面线程。</div>';
+        }
+
+        return ''
+          + '<div class="binding-table-wrap">'
+          +   '<table class="binding-table">'
+          +     '<thead><tr><th>标题</th><th>Thread</th><th>目录</th><th>操作</th></tr></thead>'
+          +     '<tbody>'
+          +       sessions.map((session) => {
+            const targetKey = 'desktop:' + session.threadId;
+            const active = targetKey === binding.currentTargetKey;
+            return ''
+              + '<tr class="' + (active ? 'current' : '') + '">'
+              +   '<td><div class="binding-table-title">' + escapeHtml(session.title || 'Untitled Session') + (active ? '<span class="binding-table-mark">当前</span>' : '') + '</div></td>'
+              +   '<td><div class="binding-table-thread"><code>' + escapeHtml(session.threadId) + '</code></div></td>'
+              +   '<td><div class="binding-table-path">' + escapeHtml(session.cwd || '(no cwd)') + '</div></td>'
+              +   '<td><button type="button" class="binding-target-btn' + (active ? ' current' : '') + '" data-action="switch-binding-target" data-binding-id="' + escapeHtml(binding.id) + '" data-target-key="' + escapeHtml(targetKey) + '"' + (active ? ' disabled' : '') + '>' + (active ? '当前会话' : '切换到当前会话') + '</button></td>'
+              + '</tr>';
+          }).join('')
+          +     '</tbody>'
+          +   '</table>'
+          + '</div>';
       }
 
       function enabledChannelsFromForm() {
@@ -935,8 +1527,90 @@ function renderHtml(): string {
 
       function showMessage(id, type, message) {
         const node = document.getElementById(id);
+        if (!node) return;
         node.className = 'message show ' + type;
         node.textContent = message;
+      }
+
+      function showGlobalMessage(type, message) {
+        const host = document.getElementById('globalMessageHost');
+        if (!host) return;
+
+        const item = document.createElement('div');
+        item.className = 'global-message ' + (type || 'success');
+        item.textContent = message;
+        host.appendChild(item);
+
+        window.setTimeout(() => {
+          item.remove();
+        }, 2200);
+      }
+
+      function setActivePage(page, syncHash) {
+        const nextPage = ['overview', 'sessions', 'config', 'commands', 'channels', 'logs'].includes(page) ? page : 'overview';
+        state.activePage = nextPage;
+
+        document.querySelectorAll('.nav-link').forEach((element) => {
+          const node = element;
+          node.classList.toggle('active', node.dataset.page === nextPage);
+        });
+
+        document.querySelectorAll('.page').forEach((element) => {
+          const node = element;
+          node.classList.toggle('active', node.dataset.page === nextPage);
+        });
+
+        if (syncHash !== false) {
+          const hash = nextPage === 'channels'
+            ? '#channels/' + state.activeChannel
+            : '#' + nextPage;
+          if (window.location.hash !== hash) {
+            history.replaceState(null, '', hash);
+          }
+        }
+      }
+
+      function setActiveChannel(channel, syncHash) {
+        const nextChannel = channel === 'weixin' ? 'weixin' : 'feishu';
+        state.activeChannel = nextChannel;
+
+        document.querySelectorAll('.channel-tab').forEach((element) => {
+          const node = element;
+          const active = node.dataset.channel === nextChannel;
+          node.classList.toggle('active', active);
+          node.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+
+        document.querySelectorAll('.channel-view').forEach((element) => {
+          const node = element;
+          const active = node.dataset.channel === nextChannel;
+          node.classList.toggle('active', active);
+          node.hidden = !active;
+        });
+
+        if (syncHash !== false && state.activePage === 'channels') {
+          const hash = '#channels/' + nextChannel;
+          if (window.location.hash !== hash) {
+            history.replaceState(null, '', hash);
+          }
+        }
+      }
+
+      function syncPageFromHash() {
+        const raw = String(window.location.hash || '').replace(/^#/, '');
+        if (!raw) {
+          setActivePage('overview', false);
+          setActiveChannel('feishu', false);
+          return;
+        }
+
+        if (raw.startsWith('channels/')) {
+          setActivePage('channels', false);
+          setActiveChannel(raw.split('/')[1] || 'feishu', false);
+          return;
+        }
+
+        setActivePage(raw, false);
       }
 
       async function copyText(value, successMessage) {
@@ -944,44 +1618,225 @@ function renderHtml(): string {
           throw new Error('当前浏览器不支持复制，或没有可复制的内容。');
         }
         await navigator.clipboard.writeText(value);
-        showMessage('desktopMessage', 'success', successMessage);
+        showGlobalMessage('success', successMessage);
+      }
+
+      function groupDesktopSessions(sessions) {
+        const groups = new Map();
+        for (const session of sessions || []) {
+          const key = session.cwd || '(no cwd)';
+          if (!groups.has(key)) {
+            groups.set(key, {
+              key,
+              name: baseName(key),
+              cwd: key,
+              latest: session.lastEventAt || '',
+              sessions: [],
+            });
+          }
+          const group = groups.get(key);
+          group.sessions.push(session);
+          if ((session.lastEventAt || '') > group.latest) {
+            group.latest = session.lastEventAt || '';
+          }
+        }
+
+        return Array.from(groups.values())
+          .map((group) => ({
+            ...group,
+            sessions: group.sessions.sort((left, right) => (right.lastEventAt || '').localeCompare(left.lastEventAt || '')),
+          }))
+          .sort((left, right) => {
+            const timeOrder = (right.latest || '').localeCompare(left.latest || '');
+            if (timeOrder !== 0) return timeOrder;
+            return left.name.localeCompare(right.name, 'zh-CN');
+          });
+      }
+
+      function isChannelEnabled(channelType) {
+        return Boolean(state.config && (state.config.enabledChannels || []).includes(channelType));
+      }
+
+      function runningChannels() {
+        return state.bridgeStatus && Array.isArray(state.bridgeStatus.channels) ? state.bridgeStatus.channels : [];
+      }
+
+      function isChannelRunning(channelType) {
+        return Boolean(state.bridgeStatus && state.bridgeStatus.running && runningChannels().includes(channelType));
+      }
+
+      function bridgeNeedsRestart() {
+        if (!state.config || !state.bridgeStatus || !state.bridgeStatus.running) return false;
+        const configured = (state.config.enabledChannels || []).slice().sort().join(',');
+        const running = runningChannels().slice().sort().join(',');
+        return configured !== running;
+      }
+
+      function channelLabel(channelType) {
+        return channelType === 'weixin' ? '微信' : '飞书';
+      }
+
+      function channelRuntimeText(channelType) {
+        const label = channelLabel(channelType);
+        if (!isChannelEnabled(channelType)) {
+          return label + '在配置中未启用。';
+        }
+        if (!state.bridgeStatus || !state.bridgeStatus.running) {
+          return label + '已启用，但 Bridge 还没启动。启动 Bridge 后才会真正接通。';
+        }
+        if (!isChannelRunning(channelType)) {
+          return label + '已写入配置，但当前运行中的 Bridge 还没加载这个通道。点击“重启 Bridge”后生效。';
+        }
+        return label + '已接通到当前运行中的 Bridge。';
+      }
+
+      function emptyBindingText(channelType) {
+        const label = channelLabel(channelType);
+        if (!isChannelEnabled(channelType)) {
+          return label + '未启用。先在“配置”里勾选后保存。';
+        }
+        if (!state.bridgeStatus || !state.bridgeStatus.running) {
+          return label + '已启用，但 Bridge 还没启动。启动后才会创建绑定。';
+        }
+        if (!isChannelRunning(channelType)) {
+          return label + '已启用，但当前运行中的 Bridge 还没加载这个通道。点击“重启 Bridge”后生效。';
+        }
+        return label + '当前还没有聊天接入。先从' + label + '发一条消息，bridge 才会创建绑定。';
+      }
+
+      function quickSwitchState(channelType) {
+        const label = channelLabel(channelType);
+        if (!isChannelEnabled(channelType)) {
+          return { disabled: true, title: label + '未启用。' };
+        }
+        if (!state.bridgeStatus || !state.bridgeStatus.running) {
+          return { disabled: true, title: 'Bridge 还没启动。启动后再切换' + label + '会话。' };
+        }
+        if (!isChannelRunning(channelType)) {
+          return { disabled: true, title: label + '已写入配置，但当前运行中的 Bridge 还没加载。请先重启 Bridge。' };
+        }
+
+        const bindings = state.bindings.filter((item) => item.channelType === channelType);
+        if (bindings.length === 0) {
+          return { disabled: true, title: '当前还没有' + label + '聊天绑定。先让' + label + '发来一条消息。' };
+        }
+        if (bindings.length > 1) {
+          return { disabled: true, title: label + '有多个绑定，请到通道页切换。' };
+        }
+
+        return {
+          disabled: false,
+          title: '切换' + label + '到当前会话',
+          bindingId: bindings[0].id,
+        };
+      }
+
+      function currentThreadMarks(threadId) {
+        const marks = [];
+        const currentTargetKey = 'desktop:' + threadId;
+        const counts = new Map();
+
+        for (const binding of state.bindings || []) {
+          const matchesThread = binding.currentThreadId === threadId || binding.currentTargetKey === currentTargetKey;
+          if (!matchesThread) continue;
+          counts.set(binding.channelType, (counts.get(binding.channelType) || 0) + 1);
+        }
+
+        for (const [channelType, count] of counts.entries()) {
+          const label = channelType === 'weixin' ? '微信当前' : '飞书当前';
+          marks.push(count > 1 ? label + ' x' + count : label);
+        }
+
+        return marks;
+      }
+
+      function renderDesktopSessionCard(session) {
+        const feishuSwitch = quickSwitchState('feishu');
+        const weixinSwitch = quickSwitchState('weixin');
+        const targetKey = 'desktop:' + session.threadId;
+        const originator = session.originator || 'Codex Desktop';
+        const marks = currentThreadMarks(session.threadId);
+        const markHtml = marks.map((mark) => '<span class="session-mark">' + escapeHtml(mark) + '</span>').join('');
+
+        return ''
+          + '<article class="session-card' + (marks.length ? ' current-thread' : '') + '">'
+          +   '<div class="session-head">'
+          +     '<div class="session-main">'
+          +       '<div class="session-title-row"><div class="session-title">' + escapeHtml(session.title || 'Untitled Session') + '</div>' + markHtml + '</div>'
+          +       '<div class="session-thread">Thread: <code>' + escapeHtml(session.threadId) + '</code><button type="button" class="session-inline-action" data-action="copy-thread" data-thread-id="' + escapeHtml(session.threadId) + '">复制</button></div>'
+          +     '</div>'
+          +     '<div class="session-cell">'
+          +       '<div class="session-label">来源</div>'
+          +       '<div class="session-value">' + escapeHtml(originator) + '</div>'
+          +     '</div>'
+          +     '<div class="session-cell">'
+          +       '<div class="session-label">目录</div>'
+          +       '<div class="session-path">' + escapeHtml(session.cwd || '(no cwd)') + '</div>'
+          +     '</div>'
+          +     '<div class="session-actions">'
+          +       '<button type="button" data-action="bind-channel" data-channel="feishu" data-binding-id="' + escapeHtml(feishuSwitch.bindingId || '') + '" data-target-key="' + escapeHtml(targetKey) + '" title="' + escapeHtml(feishuSwitch.title) + '"' + (feishuSwitch.disabled ? ' disabled' : '') + '>飞书切到此会话</button>'
+          +       '<button type="button" data-action="bind-channel" data-channel="weixin" data-binding-id="' + escapeHtml(weixinSwitch.bindingId || '') + '" data-target-key="' + escapeHtml(targetKey) + '" title="' + escapeHtml(weixinSwitch.title) + '"' + (weixinSwitch.disabled ? ' disabled' : '') + '>微信切到此会话</button>'
+          +       '<button type="button" data-action="copy-bind-command" data-thread-id="' + escapeHtml(session.threadId) + '">复制命令</button>'
+          +   '</div>'
+          + '</div>'
+          + '</article>';
       }
 
       function renderDesktopSessions(result) {
         state.desktopSessions = result.sessions || [];
+        state.desktopRoot = result.root || '-';
+        const groups = groupDesktopSessions(state.desktopSessions);
         document.getElementById('desktopSessionCount').textContent = String(state.desktopSessions.length);
         document.getElementById('desktopSessionMeta').textContent =
-          '扫描目录：' + (result.root || '-') + ' · 最近 ' + state.desktopSessions.length + ' 条桌面会话';
+          '扫描目录：' + state.desktopRoot + ' · ' + groups.length + ' 个工程 · ' + state.desktopSessions.length + ' 条桌面会话';
+        document.getElementById('desktopRootStatus').textContent = state.desktopRoot;
 
         const list = document.getElementById('desktopSessionsList');
         if (state.desktopSessions.length === 0) {
           list.innerHTML = '<div class="notice ghost">当前没有发现桌面端会话。先在 Codex Windows App 中打开或运行一个会话，再回到这里刷新。</div>';
+          rerenderBindingPanels();
           return;
         }
 
-        list.innerHTML = state.desktopSessions.map((session) => {
-          const tags = [
-            '<span class="session-pill ' + (session.activeEstimate ? 'active' : '') + '">' + (session.activeEstimate ? '最近活跃' : '历史会话') + '</span>',
-            '<span class="session-pill">' + escapeHtml(session.originator || 'Codex Desktop') + '</span>',
-            session.source ? '<span class="session-pill">' + escapeHtml(session.source) + '</span>' : '',
-          ].filter(Boolean).join('');
+        list.innerHTML = groups.map((group) => ''
+          + '<section class="project-group">'
+          +   '<div class="project-group-head">'
+          +     '<div>'
+          +       '<div class="project-group-title">' + escapeHtml(group.name) + '</div>'
+          +       '<div class="project-group-path">' + escapeHtml(group.cwd || '(no cwd)') + '</div>'
+          +     '</div>'
+          +     '<div class="project-group-count">' + group.sessions.length + ' 个线程</div>'
+          +   '</div>'
+          +   '<div class="project-session-list">'
+          +     group.sessions.map((session) => renderDesktopSessionCard(session)).join('')
+          +   '</div>'
+          + '</section>'
+        ).join('');
 
-          return ''
-            + '<article class="session-card">'
-            +   '<div class="session-head">'
-            +     '<div class="session-title">' + escapeHtml(session.title || 'Untitled Session') + '</div>'
-            +     '<div class="small">' + escapeHtml(formatTime(session.lastEventAt)) + '</div>'
-            +   '</div>'
-            +   '<div class="small">Thread: <code>' + escapeHtml(shortId(session.threadId)) + '</code></div>'
-            +   '<div class="session-meta">' + tags + '</div>'
-            +   '<div class="session-path">' + escapeHtml(session.cwd || '(no cwd)') + '</div>'
-            +   '<div class="session-actions">'
-            +     '<button type="button" data-action="copy-thread" data-thread-id="' + escapeHtml(session.threadId) + '">复制 Thread ID</button>'
-            +     '<button type="button" data-action="copy-bind-command" data-thread-id="' + escapeHtml(session.threadId) + '">复制飞书接管命令</button>'
-            +     '<button type="button" data-action="copy-cwd" data-cwd="' + escapeHtml(session.cwd || '') + '">复制工作目录</button>'
-            +   '</div>'
-            + '</article>';
-        }).join('');
+        rerenderBindingPanels();
+      }
+
+      function rerenderDesktopSessions() {
+        if (!state.desktopSessions.length && !state.desktopRoot) return;
+        renderDesktopSessions({
+          root: state.desktopRoot,
+          sessions: state.desktopSessions,
+        });
+      }
+
+      function rerenderBindingPanels() {
+        renderChannelBindings(
+          'feishu',
+          'feishuBindings',
+          'feishuBindingMeta',
+          emptyBindingText('feishu')
+        );
+        renderChannelBindings(
+          'weixin',
+          'weixinBindings',
+          'weixinBindingMeta',
+          emptyBindingText('weixin')
+        );
       }
 
       function renderChannelBindings(channelType, listId, metaId, emptyText) {
@@ -989,7 +1844,7 @@ function renderHtml(): string {
         const list = document.getElementById(listId);
         const meta = document.getElementById(metaId);
         meta.textContent = bindings.length > 0
-          ? '当前已发现 ' + bindings.length + ' 个聊天绑定，可以直接在网页切换目标会话。'
+          ? '当前已发现 ' + bindings.length + ' 个聊天绑定。这里只显示和会话页一致的命名桌面线程。'
           : emptyText;
 
         if (bindings.length === 0) {
@@ -998,11 +1853,6 @@ function renderHtml(): string {
         }
 
         list.innerHTML = bindings.map((binding) => {
-          const options = state.bindingOptions.map((option) => {
-            const selected = option.key === binding.currentTargetKey ? ' selected' : '';
-            return '<option value="' + escapeHtml(option.key) + '"' + selected + '>' + escapeHtml(optionLabel(option)) + '</option>';
-          }).join('');
-
           return ''
             + '<article class="binding-item" data-binding-id="' + escapeHtml(binding.id) + '">'
             +   '<div class="binding-head">'
@@ -1010,14 +1860,38 @@ function renderHtml(): string {
             +     '<div class="small">' + escapeHtml(binding.mode) + '</div>'
             +   '</div>'
             +   '<div class="binding-detail">当前会话：<code>' + escapeHtml(binding.currentSessionId.slice(0, 8)) + '...</code> · ' + escapeHtml(binding.currentSessionName) + '</div>'
+            +   '<div class="binding-detail">当前目标：' + escapeHtml(binding.currentTargetLabel || '未绑定') + '</div>'
             +   '<div class="binding-detail">当前 thread：<code>' + escapeHtml(binding.currentThreadId || 'not-shared') + '</code></div>'
             +   '<div class="binding-detail">目录：' + escapeHtml(binding.workingDirectory || '~') + '</div>'
-            +   '<div class="binding-controls">'
-            +     '<select data-role="target">' + options + '</select>'
-            +     '<button type="button" data-action="save-binding">切换绑定</button>'
-            +   '</div>'
+            +   renderBindingTable(binding)
             + '</article>';
         }).join('');
+      }
+
+      function renderWeixinAccounts() {
+        const meta = document.getElementById('weixinAccountMeta');
+        const list = document.getElementById('weixinAccounts');
+        const accounts = state.weixinAccounts || [];
+
+        if (accounts.length === 0) {
+          meta.textContent = '当前还没有已保存的微信账号。先点击“开始微信扫码”，然后在手机上确认。';
+          list.innerHTML = '<div class="binding-empty">扫码成功后，这里会显示当前已保存的微信账号。</div>';
+          return;
+        }
+
+        meta.textContent = '当前已保存 ' + accounts.length + ' 个微信账号。微信桥接是单账号模式，最新启用的账号会生效。';
+        list.innerHTML = accounts.map((account) => ''
+          + '<article class="binding-item">'
+          +   '<div class="binding-head">'
+          +     '<div class="binding-title">' + escapeHtml(account.name || account.accountId) + '</div>'
+          +     '<div class="small">' + (account.enabled ? '已启用' : '已停用') + '</div>'
+          +   '</div>'
+          +   '<div class="binding-detail">账号 ID：<code>' + escapeHtml(account.accountId) + '</code></div>'
+          +   '<div class="binding-detail">用户 ID：<code>' + escapeHtml(account.userId || '-') + '</code></div>'
+          +   '<div class="binding-detail">Base URL：' + escapeHtml(account.baseUrl || '-') + '</div>'
+          +   '<div class="binding-detail">最近登录：' + escapeHtml(formatTime(account.lastLoginAt || account.updatedAt)) + '</div>'
+          + '</article>'
+        ).join('');
       }
 
       function renderBindings(result) {
@@ -1028,14 +1902,15 @@ function renderHtml(): string {
           'feishu',
           'feishuBindings',
           'feishuBindingMeta',
-          '当前还没有飞书聊天接入。先在飞书机器人里发一条消息，bridge 才会创建绑定。'
+          emptyBindingText('feishu')
         );
         renderChannelBindings(
           'weixin',
           'weixinBindings',
           'weixinBindingMeta',
-          '当前还没有微信聊天接入。先让微信账号发一条消息，bridge 才会创建绑定。'
+          emptyBindingText('weixin')
         );
+        rerenderDesktopSessions();
       }
 
       function fillForm(config) {
@@ -1055,6 +1930,7 @@ function renderHtml(): string {
         document.getElementById('feishuAllowedUsers').value = config.feishuAllowedUsers || '';
         document.getElementById('feishuStreamingEnabled').checked = config.feishuStreamingEnabled !== false;
         document.getElementById('weixinMediaEnabled').checked = config.weixinMediaEnabled === true;
+        rerenderDesktopSessions();
       }
 
       async function api(path, options) {
@@ -1072,12 +1948,23 @@ function renderHtml(): string {
       async function loadStatus() {
         const status = await api('/api/status');
         const config = await api('/api/config');
+        state.bridgeStatus = status.bridge || null;
+        state.weixinAccounts = status.weixin && Array.isArray(status.weixin.linkedAccounts) ? status.weixin.linkedAccounts : [];
         fillForm(config);
-        document.getElementById('bridgeStatus').textContent = status.bridge.running ? 'Running' : 'Stopped';
+        const runningChannelText = runningChannels().length ? ' · ' + runningChannels().join(', ') : '';
+        document.getElementById('bridgeStatus').textContent = status.bridge.running ? 'Running' + runningChannelText : 'Stopped';
         document.getElementById('integrationStatus').textContent = status.codexIntegrationInstalled ? '已安装' : '未安装';
         document.getElementById('runtimeStatus').textContent = config.runtime || 'codex';
         document.getElementById('homeStatus').textContent = status.home;
+        document.getElementById('overviewHomeStatus').textContent = status.home;
         document.getElementById('packageRoot').textContent = status.packageRoot;
+        document.getElementById('feishuRuntimeMeta').textContent = channelRuntimeText('feishu');
+        document.getElementById('weixinRuntimeMeta').textContent = channelRuntimeText('weixin');
+        renderWeixinAccounts();
+        renderBindings({
+          bindings: state.bindings,
+          options: state.bindingOptions,
+        });
       }
 
       async function loadLogs() {
@@ -1086,7 +1973,7 @@ function renderHtml(): string {
       }
 
       async function loadDesktopSessions() {
-        const result = await api('/api/desktop-sessions?limit=10');
+        const result = await api('/api/desktop-sessions?limit=36');
         renderDesktopSessions(result);
       }
 
@@ -1101,14 +1988,53 @@ function renderHtml(): string {
           body: JSON.stringify(formPayload()),
         });
         fillForm(saved.config);
-        showMessage('feishuMessage', 'success', '配置已保存。');
+        showMessage(
+          'configMessage',
+          'success',
+          bridgeNeedsRestart()
+            ? '配置已保存。当前 Bridge 还在使用旧通道配置，点击“重启 Bridge”后生效。'
+            : '配置已保存。'
+        );
         return saved;
       }
+
+      document.querySelectorAll('.nav-link').forEach((element) => {
+        element.addEventListener('click', () => {
+          setActivePage(element.dataset.page || 'overview', true);
+        });
+      });
+
+      document.querySelectorAll('.channel-tab').forEach((element) => {
+        element.addEventListener('click', () => {
+          setActivePage('channels', false);
+          setActiveChannel(element.dataset.channel || 'feishu', true);
+        });
+      });
+
+      window.addEventListener('hashchange', syncPageFromHash);
 
       document.getElementById('saveConfigBtn').addEventListener('click', async () => {
         try {
           await saveConfig();
           await loadStatus();
+          await loadBindings();
+        } catch (error) {
+          showMessage('configMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('saveFeishuChannelBtn').addEventListener('click', async () => {
+        try {
+          await saveConfig();
+          await loadStatus();
+          await loadBindings();
+          showMessage(
+            'feishuMessage',
+            'success',
+            bridgeNeedsRestart()
+              ? '飞书配置已保存。当前 Bridge 还在使用旧通道配置，点击“重启 Bridge”后生效。'
+              : '飞书配置已保存。'
+          );
         } catch (error) {
           showMessage('feishuMessage', 'error', error.message);
         }
@@ -1117,10 +2043,29 @@ function renderHtml(): string {
       document.getElementById('testFeishuBtn').addEventListener('click', async () => {
         try {
           await saveConfig();
+          await loadStatus();
+          await loadBindings();
           const result = await api('/api/test/feishu', { method: 'POST' });
           showMessage('feishuMessage', result.ok ? 'success' : 'error', result.message);
         } catch (error) {
           showMessage('feishuMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('saveWeixinChannelBtn').addEventListener('click', async () => {
+        try {
+          await saveConfig();
+          await loadStatus();
+          await loadBindings();
+          showMessage(
+            'weixinMessage',
+            'success',
+            bridgeNeedsRestart()
+              ? '微信配置已保存。当前 Bridge 还在使用旧通道配置，点击“重启 Bridge”后生效。'
+              : '微信配置已保存。'
+          );
+        } catch (error) {
+          showMessage('weixinMessage', 'error', error.message);
         }
       });
 
@@ -1129,7 +2074,12 @@ function renderHtml(): string {
           await saveConfig();
           showMessage('weixinMessage', 'success', '微信扫码流程已启动，浏览器会打开二维码页面。');
           const result = await api('/api/test/weixin', { method: 'POST' });
-          showMessage('weixinMessage', result.ok ? 'success' : 'error', result.message);
+          await loadStatus();
+          await loadBindings();
+          const followup = isChannelRunning('weixin')
+            ? '微信账号已保存。当前 Bridge 已加载微信通道，几秒后会自动接入新账号。'
+            : '微信账号已保存。当前运行中的 Bridge 还没加载微信通道，点击“重启 Bridge”后生效。';
+          showMessage('weixinMessage', result.ok ? 'success' : 'error', followup);
         } catch (error) {
           showMessage('weixinMessage', 'error', error.message);
         }
@@ -1157,6 +2107,20 @@ function renderHtml(): string {
           await loadBindings();
         } catch (error) {
           showMessage('opsMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('restartBridgeBtn').addEventListener('click', async () => {
+        try {
+          await saveConfig();
+          const result = await api('/api/bridge/restart', { method: 'POST' });
+          showMessage('opsMessage', 'success', 'Bridge 已重启。PID: ' + (result.status.pid || '-'));
+          await loadStatus();
+          await loadBindings();
+          await loadLogs();
+        } catch (error) {
+          showMessage('opsMessage', 'error', error.message);
+          await loadLogs();
         }
       });
 
@@ -1192,12 +2156,20 @@ function renderHtml(): string {
         }
       });
 
+      document.getElementById('refreshLogsBtn').addEventListener('click', async () => {
+        try {
+          await loadLogs();
+        } catch (error) {
+          showMessage('opsMessage', 'error', error.message);
+        }
+      });
+
       document.getElementById('refreshDesktopBtn').addEventListener('click', async () => {
         try {
           await loadDesktopSessions();
           showMessage('desktopMessage', 'success', '桌面会话列表已刷新。');
         } catch (error) {
-          showMessage('desktopMessage', 'error', error.message);
+          showGlobalMessage('error', error.message);
         }
       });
 
@@ -1207,6 +2179,28 @@ function renderHtml(): string {
         if (!target) return;
 
         try {
+          if (target.dataset.action === 'bind-channel') {
+            const bindingId = target.dataset.bindingId || '';
+            const targetKey = target.dataset.targetKey || '';
+            const channelType = target.dataset.channel || '';
+            if (!bindingId || !targetKey) {
+              throw new Error('当前通道没有可切换的绑定，请先在通道页完成接入。');
+            }
+            const result = await api('/api/bindings/update', {
+              method: 'POST',
+              body: JSON.stringify({
+                bindingId,
+                targetKey,
+              }),
+            });
+            renderBindings(result);
+            showMessage(
+              'desktopMessage',
+              'success',
+              (channelType === 'weixin' ? '微信' : '飞书') + '已切换到当前会话。'
+            );
+            return;
+          }
           if (target.dataset.action === 'copy-thread') {
             await copyText(target.dataset.threadId || '', 'Thread ID 已复制。');
             return;
@@ -1225,20 +2219,15 @@ function renderHtml(): string {
 
       async function handleBindingAction(event, channelType, messageId) {
         const source = event.target instanceof Element ? event.target : null;
-        const target = source ? source.closest('button[data-action="save-binding"]') : null;
+        const target = source ? source.closest('button[data-action="switch-binding-target"]') : null;
         if (!target) return;
-
-        const item = target.closest('[data-binding-id]');
-        if (!item) return;
-        const select = item.querySelector('select[data-role="target"]');
-        if (!select) return;
 
         try {
           const result = await api('/api/bindings/update', {
             method: 'POST',
             body: JSON.stringify({
-              bindingId: item.dataset.bindingId,
-              targetKey: select.value,
+              bindingId: target.dataset.bindingId,
+              targetKey: target.dataset.targetKey,
             }),
           });
           renderBindings(result);
@@ -1255,6 +2244,8 @@ function renderHtml(): string {
       document.getElementById('weixinBindings').addEventListener('click', (event) => {
         handleBindingAction(event, 'weixin', 'weixinMessage');
       });
+
+      syncPageFromHash();
 
       Promise.all([loadStatus(), loadBindings(), loadDesktopSessions(), loadLogs()]).catch((error) => {
         showMessage('opsMessage', 'error', error.message);
@@ -1285,6 +2276,9 @@ const server = http.createServer(async (request, response) => {
         home: CTI_HOME,
         packageRoot: getPackageRoot(),
         codexIntegrationInstalled: isCodexIntegrationInstalled(),
+        weixin: {
+          linkedAccounts: getWeixinAccountsPayload(),
+        },
         startedAt: serverStartTime,
       });
       return;
@@ -1355,6 +2349,12 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === 'POST' && url.pathname === '/api/bridge/stop') {
       const status = await stopBridge();
+      json(response, 200, { ok: true, status });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/bridge/restart') {
+      const status = await restartBridge();
       json(response, 200, { ok: true, status });
       return;
     }

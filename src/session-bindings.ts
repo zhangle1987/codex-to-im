@@ -2,14 +2,21 @@ import path from 'node:path';
 
 import type { BridgeSession, BridgeStore } from './lib/bridge/host.js';
 import type { ChannelBinding } from './lib/bridge/types.js';
-import { getDesktopSessionByThreadId, listDesktopSessions, type DesktopSessionSummary } from './desktop-sessions.js';
+import {
+  getDesktopSessionByThreadId,
+  isArchivedDesktopThread,
+  listDesktopSessions,
+  type DesktopSessionSummary,
+} from './desktop-sessions.js';
 
 export interface BindingTargetOption {
   key: string;
-  kind: 'desktop' | 'session';
+  kind: 'desktop';
   id: string;
   label: string;
   description: string;
+  cwd: string;
+  threadId: string;
 }
 
 export interface BindingSummary {
@@ -30,10 +37,6 @@ function getSessionName(session: BridgeSession): string {
   if (session.name?.trim()) return session.name.trim();
   if (session.working_directory) return path.basename(session.working_directory);
   return session.id.slice(0, 8);
-}
-
-function getSessionDescription(session: BridgeSession): string {
-  return session.working_directory || '(no working directory)';
 }
 
 export function bindStoreToSession(
@@ -102,36 +105,34 @@ export function bindStoreToSdkSession(
 }
 
 export function listBindingTargetOptions(
-  store: BridgeStore,
+  _store: BridgeStore,
   desktopLimit = 12,
 ): BindingTargetOption[] {
-  const desktopOptions = listDesktopSessions(desktopLimit).map((session) => ({
+  return listDesktopSessions(desktopLimit).map((session) => ({
     key: `desktop:${session.threadId}`,
-    kind: 'desktop' as const,
+    kind: 'desktop',
     id: session.threadId,
-    label: `[Desktop] ${session.title}`,
+    label: session.title,
     description: `${session.threadId.slice(0, 8)}... · ${session.cwd || '(no cwd)'}`,
+    cwd: session.cwd,
+    threadId: session.threadId,
   }));
-
-  const sessionOptions = store.listSessions().map((session) => ({
-    key: `session:${session.id}`,
-    kind: 'session' as const,
-    id: session.id,
-    label: `[Internal] ${getSessionName(session)}`,
-    description: `${session.id.slice(0, 8)}... · ${getSessionDescription(session)}${session.sdk_session_id ? ` · thread ${session.sdk_session_id.slice(0, 8)}...` : ''}`,
-  }));
-
-  return [...desktopOptions, ...sessionOptions];
 }
 
 export function listBindingSummaries(store: BridgeStore): BindingSummary[] {
   return store.listChannelBindings().map((binding) => {
     const session = store.getSession(binding.codepilotSessionId);
     const currentThreadId = binding.sdkSessionId || session?.sdk_session_id || undefined;
+    const desktop = currentThreadId ? getDesktopSessionByThreadId(currentThreadId) : null;
+    const archived = currentThreadId ? isArchivedDesktopThread(currentThreadId) : false;
     const currentTargetKey = currentThreadId ? `desktop:${currentThreadId}` : `session:${binding.codepilotSessionId}`;
     const currentTargetLabel = currentThreadId
-      ? `Desktop thread ${currentThreadId.slice(0, 8)}...`
-      : `Internal session ${binding.codepilotSessionId.slice(0, 8)}...`;
+      ? (desktop?.title || (archived ? `已归档桌面线程 ${currentThreadId.slice(0, 8)}...` : `Desktop thread ${currentThreadId.slice(0, 8)}...`))
+      : getSessionName(session || {
+          id: binding.codepilotSessionId,
+          working_directory: binding.workingDirectory,
+          model: binding.model,
+        });
 
     return {
       id: binding.id,

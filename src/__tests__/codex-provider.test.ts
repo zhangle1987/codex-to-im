@@ -475,8 +475,8 @@ describe('CodexProvider', () => {
 import fs from 'node:fs';
 
 /** Helper: build a full FileAttachment object for tests. */
-function makeFile(type: string, data: string, name = 'test-file') {
-  return { id: `file-${Date.now()}`, name, type, size: data.length, data };
+function makeFile(type: string, data: string, name = 'test-file', extra: Record<string, unknown> = {}) {
+  return { id: `file-${Date.now()}`, name, type, size: data.length, data, ...extra };
 }
 
 describe('CodexProvider image input', () => {
@@ -600,6 +600,50 @@ describe('CodexProvider image input', () => {
     assert.ok(parts[1].path.endsWith('.png'));
     assert.equal(parts[2].type, 'local_image');
     assert.ok(parts[2].path.endsWith('.jpg'));
+  });
+
+  it('reuses persisted local image paths when filePath is already present', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const persistedImagePath = 'D:\\codex\\Claude-to-IM-skill\\.codepilot-uploads\\persisted.png';
+    const originalExistsSync = fs.existsSync;
+    fs.existsSync = ((target: fs.PathLike) => String(target) === persistedImagePath || originalExistsSync(target)) as typeof fs.existsSync;
+
+    let capturedInput: unknown;
+    const mockThread = {
+      runStreamed: (input: unknown) => {
+        capturedInput = input;
+        return {
+          events: (async function* () {
+            yield { type: 'turn.completed', usage: { input_tokens: 0, output_tokens: 0 } };
+          })(),
+        };
+      },
+    };
+
+    const mockCodex = {
+      startThread: () => mockThread,
+    };
+
+    try {
+      (provider as any).ensureSDK = async () => ({ sdk: {}, codex: mockCodex });
+
+      const stream = provider.streamChat({
+        prompt: 'Use the persisted screenshot',
+        sessionId: 'persisted-img-session',
+        files: [makeFile('image/png', 'cG5n', 'persisted.png', { filePath: persistedImagePath })],
+      });
+
+      await collectStream(stream);
+
+      const parts = capturedInput as Array<Record<string, string>>;
+      assert.equal(parts[1].type, 'local_image');
+      assert.equal(parts[1].path, persistedImagePath);
+    } finally {
+      fs.existsSync = originalExistsSync;
+    }
   });
 });
 

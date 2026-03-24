@@ -38,9 +38,12 @@ export class WeixinAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'weixin';
 
   private _running = false;
+  private idleLogged = false;
+  private reconcileTimer: NodeJS.Timeout | null = null;
   private queue: InboundMessage[] = [];
   private waiters: Array<(msg: InboundMessage | null) => void> = [];
   private pollAborts = new Map<string, AbortController>();
+  private workerSignatures = new Map<string, string>();
   private seenMessageIds = new Map<string, Set<string>>();
   private consecutiveFailures = new Map<string, number>();
   private typingTickets = new Map<string, string>();
@@ -55,35 +58,32 @@ export class WeixinAdapter extends BaseChannelAdapter {
   async start(): Promise<void> {
     if (this._running) return;
     this._running = true;
+    this.idleLogged = false;
     clearAllPauses();
 
-    const linkedAccounts = listWeixinAccounts().filter((account) => account.enabled && account.token);
-    if (linkedAccounts.length === 0) {
-      console.log('[weixin-adapter] No linked WeChat account is enabled, adapter started but idle');
-    }
-
-    for (const account of linkedAccounts) {
-      this.startAccountWorker(account.accountId, this.accountToCreds(account));
-    }
-
-    if (linkedAccounts.length > 0) {
-      console.log(`[weixin-adapter] Started in single-account mode with ${linkedAccounts[0].accountId}`);
-    }
+    await this.reconcileAccounts();
+    this.reconcileTimer = setInterval(() => {
+      void this.reconcileAccounts().catch((error) => {
+        console.warn(
+          '[weixin-adapter] Failed to reconcile linked accounts:',
+          error instanceof Error ? error.message : error,
+        );
+      });
+    }, 10_000);
   }
 
   async stop(): Promise<void> {
     if (!this._running) return;
     this._running = false;
-
-    for (const controller of this.pollAborts.values()) {
-      controller.abort();
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = null;
     }
 
-    this.pollAborts.clear();
+    for (const accountId of this.pollAborts.keys()) {
+      this.stopAccountWorker(accountId);
+    }
     this.pendingCursors.clear();
-    this.seenMessageIds.clear();
-    this.consecutiveFailures.clear();
-    this.typingTickets.clear();
     this.queue = [];
 
     for (const waiter of this.waiters) {
@@ -178,12 +178,66 @@ export class WeixinAdapter extends BaseChannelAdapter {
     this.queue.push(message);
   }
 
+  private async reconcileAccounts(): Promise<void> {
+    const linkedAccounts = listWeixinAccounts().filter((account) => account.enabled && account.token);
+    if (linkedAccounts.length === 0 && this.pollAborts.size === 0) {
+      if (!this.idleLogged) {
+        console.log('[weixin-adapter] No linked WeChat account is enabled, adapter started but idle');
+        this.idleLogged = true;
+      }
+    } else {
+      this.idleLogged = false;
+    }
+
+    const activeAccountIds = new Set(this.pollAborts.keys());
+    const nextAccountIds = new Set(linkedAccounts.map((account) => account.accountId));
+
+    for (const account of linkedAccounts) {
+      const creds = this.accountToCreds(account);
+      const signature = this.accountSignature(account);
+      const existingSignature = this.workerSignatures.get(account.accountId);
+
+      if (!activeAccountIds.has(account.accountId)) {
+        this.startAccountWorker(account.accountId, creds);
+        this.workerSignatures.set(account.accountId, signature);
+        console.log(`[weixin-adapter] Linked account ${account.accountId} is now active`);
+        continue;
+      }
+
+      if (existingSignature !== signature) {
+        this.stopAccountWorker(account.accountId);
+        this.startAccountWorker(account.accountId, creds);
+        this.workerSignatures.set(account.accountId, signature);
+        console.log(`[weixin-adapter] Refreshed linked account ${account.accountId}`);
+      }
+    }
+
+    for (const accountId of activeAccountIds) {
+      if (nextAccountIds.has(accountId)) continue;
+      this.stopAccountWorker(accountId);
+      console.log(`[weixin-adapter] Linked account ${accountId} was removed or disabled`);
+    }
+  }
+
   private startAccountWorker(accountId: string, creds: WeixinCredentials): void {
     const controller = new AbortController();
     this.pollAborts.set(accountId, controller);
     this.seenMessageIds.set(accountId, new Set());
     this.consecutiveFailures.set(accountId, 0);
     void this.runPollLoop(accountId, creds, controller.signal);
+  }
+
+  private stopAccountWorker(accountId: string): void {
+    this.pollAborts.get(accountId)?.abort();
+    this.pollAborts.delete(accountId);
+    this.workerSignatures.delete(accountId);
+    this.seenMessageIds.delete(accountId);
+    this.consecutiveFailures.delete(accountId);
+    for (const key of Array.from(this.typingTickets.keys())) {
+      if (key.startsWith(`${accountId}:`)) {
+        this.typingTickets.delete(key);
+      }
+    }
   }
 
   private async runPollLoop(accountId: string, creds: WeixinCredentials, signal: AbortSignal): Promise<void> {
@@ -431,6 +485,20 @@ export class WeixinAdapter extends BaseChannelAdapter {
       baseUrl: account.baseUrl || DEFAULT_BASE_URL,
       cdnBaseUrl: account.cdnBaseUrl || DEFAULT_CDN_BASE_URL,
     };
+  }
+
+  private accountSignature(account: {
+    accountId: string;
+    token: string;
+    baseUrl?: string;
+    cdnBaseUrl?: string;
+  }): string {
+    return JSON.stringify({
+      accountId: account.accountId,
+      token: account.token,
+      baseUrl: account.baseUrl || DEFAULT_BASE_URL,
+      cdnBaseUrl: account.cdnBaseUrl || DEFAULT_CDN_BASE_URL,
+    });
   }
 
   private sleep(ms: number, signal?: AbortSignal): Promise<void> {

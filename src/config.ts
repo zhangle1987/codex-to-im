@@ -98,19 +98,19 @@ function parsePositiveInt(value: string | undefined): number | undefined {
 export function loadConfig(): Config {
   const env = loadRawConfigEnv();
 
-  const rawRuntime = env.get("CTI_RUNTIME") || "claude";
-  const runtime = (["claude", "codex", "auto"].includes(rawRuntime) ? rawRuntime : "claude") as Config["runtime"];
+  const rawRuntime = env.get("CTI_RUNTIME") || "codex";
+  const runtime = (["claude", "codex", "auto"].includes(rawRuntime) ? rawRuntime : "codex") as Config["runtime"];
 
   return {
     runtime,
-    enabledChannels: splitCsv(env.get("CTI_ENABLED_CHANNELS")) ?? [],
+    enabledChannels: splitCsv(env.get("CTI_ENABLED_CHANNELS")) ?? ["feishu"],
     defaultWorkDir: env.get("CTI_DEFAULT_WORKDIR") || process.cwd(),
     defaultModel: env.get("CTI_DEFAULT_MODEL") || undefined,
     defaultMode: env.get("CTI_DEFAULT_MODE") || "code",
     historyMessageLimit: parsePositiveInt(env.get("CTI_HISTORY_MESSAGE_LIMIT")) ?? 8,
     codexSkipGitRepoCheck: env.has("CTI_CODEX_SKIP_GIT_REPO_CHECK")
       ? env.get("CTI_CODEX_SKIP_GIT_REPO_CHECK") === "true"
-      : undefined,
+      : true,
     tgBotToken: env.get("CTI_TG_BOT_TOKEN") || undefined,
     tgChatId: env.get("CTI_TG_CHAT_ID") || undefined,
     tgAllowedUsers: splitCsv(env.get("CTI_TG_ALLOWED_USERS")),

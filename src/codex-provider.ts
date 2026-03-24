@@ -5,9 +5,8 @@
  * the bridge conversation engine, making Codex a drop-in alternative
  * to the Claude Code SDK backend.
  *
- * Requires `@openai/codex-sdk` to be installed (optionalDependency).
- * The provider lazily imports the SDK at first use and throws a clear
- * error if it is not available.
+ * The provider lazily imports the installed SDK at first use and throws
+ * a clear error if the package is missing from the current installation.
  */
 
 import fs from 'node:fs';
@@ -27,7 +26,7 @@ const MIME_EXT: Record<string, string> = {
   'image/webp': '.webp',
 };
 
-// All SDK types kept as `any` because @openai/codex-sdk is optional.
+// Keep SDK types as `any` because we lazy-load the package at runtime.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type CodexModule = any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -79,7 +78,7 @@ export class CodexProvider implements LLMProvider {
   constructor(private pendingPerms: PendingPermissions) {}
 
   /**
-   * Lazily load the Codex SDK. Throws a clear error if not installed.
+   * Lazily load the Codex SDK. Throws a clear error if the installation is incomplete.
    */
   private async ensureSDK(): Promise<{ sdk: CodexModule; codex: CodexInstance }> {
     if (this.sdk && this.codex) {
@@ -90,8 +89,8 @@ export class CodexProvider implements LLMProvider {
       this.sdk = await (Function('return import("@openai/codex-sdk")')() as Promise<CodexModule>);
     } catch {
       throw new Error(
-        '[CodexProvider] @openai/codex-sdk is not installed. ' +
-        'Install it with: npm install @openai/codex-sdk'
+        '[CodexProvider] @openai/codex-sdk is missing from this codex-to-im installation. ' +
+        'Reinstall codex-to-im or run npm install in the project root.'
       );
     }
 
@@ -148,6 +147,11 @@ export class CodexProvider implements LLMProvider {
                 { type: 'text', text: params.prompt },
               ];
               for (const file of imageFiles) {
+                if (file.filePath && fs.existsSync(file.filePath)) {
+                  parts.push({ type: 'local_image', path: file.filePath });
+                  continue;
+                }
+
                 const ext = MIME_EXT[file.type] || '.png';
                 const tmpPath = path.join(os.tmpdir(), `cti-img-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
                 fs.writeFileSync(tmpPath, Buffer.from(file.data, 'base64'));

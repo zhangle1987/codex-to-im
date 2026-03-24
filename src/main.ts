@@ -12,7 +12,6 @@ import { initBridgeContext } from './lib/bridge/context.js';
 import * as bridgeManager from './lib/bridge/bridge-manager.js';
 // Side-effect import to trigger adapter self-registration
 import './lib/bridge/adapters/index.js';
-import './adapters/weixin-adapter.js';
 
 import type { LLMProvider } from './lib/bridge/host.js';
 import { loadConfig, configToSettings, CTI_HOME } from './config.js';

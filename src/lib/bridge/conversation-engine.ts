@@ -56,6 +56,47 @@ export interface ConversationResult {
   sdkSessionId: string | null;
 }
 
+interface PersistedAttachmentMeta {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  filePath: string;
+}
+
+function formatAttachmentSize(size: number): string {
+  if (!Number.isFinite(size) || size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+export function buildLocalAttachmentPromptSupplement(files: PersistedAttachmentMeta[]): string {
+  const nonImageFiles = files.filter((file) => !file.type.startsWith('image/'));
+  if (nonImageFiles.length === 0) return '';
+
+  const hasVideo = nonImageFiles.some((file) => file.type.startsWith('video/'));
+  const lines = [
+    'Attached local files:',
+    'The user included non-image attachments. They have already been downloaded locally.',
+    'If they are relevant, inspect them directly from disk using the available local tools.',
+  ];
+
+  if (hasVideo) {
+    lines.push('For video files, inspect metadata first and extract frames or audio only when needed.');
+  }
+
+  lines.push('');
+  for (const [index, file] of nonImageFiles.entries()) {
+    lines.push(
+      `${index + 1}. ${file.name} (${file.type || 'application/octet-stream'}, ${formatAttachmentSize(file.size)})`,
+    );
+    lines.push(`   path: ${file.filePath}`);
+  }
+
+  return lines.join('\n');
+}
+
 /**
  * Process an inbound message: send to Claude, consume the response stream,
  * save to DB, and return the result.
@@ -96,12 +137,14 @@ export async function processMessage(
   try {
     // Resolve session early — needed for workingDirectory and provider resolution
     const session = store.getSession(sessionId);
+    const workDir = binding.workingDirectory || session?.working_directory || '';
 
     // Save user message — persist file attachments to disk using the same
     // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
     let savedContent = text;
+    let llmFiles = files;
+    let persistedFileMeta: PersistedAttachmentMeta[] = [];
     if (files && files.length > 0) {
-      const workDir = binding.workingDirectory || session?.working_directory || '';
       if (workDir) {
         try {
           const uploadDir = path.join(workDir, '.codepilot-uploads');
@@ -115,16 +158,26 @@ export async function processMessage(
             fs.writeFileSync(filePath, buffer);
             return { id: f.id, name: f.name, type: f.type, size: buffer.length, filePath };
           });
+          persistedFileMeta = fileMeta;
+          llmFiles = files.map((file) => {
+            const persisted = fileMeta.find((item) => item.id === file.id);
+            return persisted ? { ...file, size: persisted.size, filePath: persisted.filePath } : file;
+          });
           savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${text}`;
         } catch (err) {
           console.warn('[conversation-engine] Failed to persist file attachments:', err instanceof Error ? err.message : err);
-          savedContent = `[${files.length} image(s) attached] ${text}`;
+          savedContent = `[${files.length} attachment(s) attached] ${text}`;
         }
       } else {
-        savedContent = `[${files.length} image(s) attached] ${text}`;
+        savedContent = `[${files.length} attachment(s) attached] ${text}`;
       }
     }
     store.addMessage(sessionId, 'user', savedContent);
+
+    const attachmentSupplement = buildLocalAttachmentPromptSupplement(persistedFileMeta);
+    const promptText = attachmentSupplement
+      ? (text.trim() ? `${text}\n\n${attachmentSupplement}` : attachmentSupplement)
+      : text;
 
     // Resolve provider
     let resolvedProvider: import('./host.js').BridgeApiProvider | undefined;
@@ -165,17 +218,17 @@ export async function processMessage(
     }
 
     const stream = llm.streamChat({
-      prompt: text,
+      prompt: promptText,
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,
       model: effectiveModel,
       systemPrompt: session?.system_prompt || undefined,
-      workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
+      workingDirectory: workDir || undefined,
       abortController,
       permissionMode,
       provider: resolvedProvider,
       conversationHistory: historyMsgs,
-      files,
+      files: llmFiles,
       onRuntimeStatusChange: (status: string) => {
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },
