@@ -1319,6 +1319,7 @@ function renderHtml(): string {
                 <div class="toolbar">
                   <button id="saveFeishuChannelBtn">保存通道配置</button>
                   <button id="testFeishuBtn">测试飞书凭据</button>
+                  <button id="refreshFeishuStateBtn">刷新状态</button>
                 </div>
               </div>
 
@@ -1373,6 +1374,7 @@ function renderHtml(): string {
                 <div class="toolbar">
                   <button id="saveWeixinChannelBtn">保存通道配置</button>
                   <button id="weixinLoginBtn">开始微信扫码</button>
+                  <button id="refreshWeixinStateBtn">刷新状态</button>
                 </div>
               </div>
 
@@ -1685,7 +1687,7 @@ function renderHtml(): string {
           return label + '已启用，但 Bridge 还没启动。启动 Bridge 后才会真正接通。';
         }
         if (!isChannelRunning(channelType)) {
-          return label + '已写入配置，但当前运行中的 Bridge 还没加载这个通道。点击“重启 Bridge”后生效。';
+          return label + '已写入配置，Bridge 会在几秒内自动同步这个通道；如果页面还没更新，可手动点“刷新状态”。';
         }
         return label + '已接通到当前运行中的 Bridge。';
       }
@@ -1699,7 +1701,7 @@ function renderHtml(): string {
           return label + '已启用，但 Bridge 还没启动。启动后才会创建绑定。';
         }
         if (!isChannelRunning(channelType)) {
-          return label + '已启用，但当前运行中的 Bridge 还没加载这个通道。点击“重启 Bridge”后生效。';
+          return label + '已启用，Bridge 会在几秒内自动同步这个通道；如果页面还没更新，可手动点“刷新状态”。';
         }
         return label + '当前还没有聊天接入。先从' + label + '发一条消息，bridge 才会创建绑定。';
       }
@@ -1713,7 +1715,7 @@ function renderHtml(): string {
           return { disabled: true, title: 'Bridge 还没启动。启动后再切换' + label + '会话。' };
         }
         if (!isChannelRunning(channelType)) {
-          return { disabled: true, title: label + '已写入配置，但当前运行中的 Bridge 还没加载。请先重启 Bridge。' };
+          return { disabled: true, title: label + '已写入配置，Bridge 会在几秒内自动同步；同步完成后再切换会话。' };
         }
 
         const bindings = state.bindings.filter((item) => item.channelType === channelType);
@@ -1992,7 +1994,7 @@ function renderHtml(): string {
           'configMessage',
           'success',
           bridgeNeedsRestart()
-            ? '配置已保存。当前 Bridge 还在使用旧通道配置，点击“重启 Bridge”后生效。'
+            ? '配置已保存。Bridge 会在几秒内自动同步通道配置；如果页面还没更新，可手动点“刷新状态”。'
             : '配置已保存。'
         );
         return saved;
@@ -2032,7 +2034,7 @@ function renderHtml(): string {
             'feishuMessage',
             'success',
             bridgeNeedsRestart()
-              ? '飞书配置已保存。当前 Bridge 还在使用旧通道配置，点击“重启 Bridge”后生效。'
+              ? '飞书配置已保存。Bridge 会在几秒内自动同步通道配置；如果页面还没更新，可手动点“刷新状态”。'
               : '飞书配置已保存。'
           );
         } catch (error) {
@@ -2052,6 +2054,17 @@ function renderHtml(): string {
         }
       });
 
+      document.getElementById('refreshFeishuStateBtn').addEventListener('click', async () => {
+        try {
+          await loadStatus();
+          await loadBindings();
+          await loadDesktopSessions();
+          showMessage('feishuMessage', 'success', '飞书通道状态已刷新。');
+        } catch (error) {
+          showMessage('feishuMessage', 'error', error.message);
+        }
+      });
+
       document.getElementById('saveWeixinChannelBtn').addEventListener('click', async () => {
         try {
           await saveConfig();
@@ -2061,9 +2074,20 @@ function renderHtml(): string {
             'weixinMessage',
             'success',
             bridgeNeedsRestart()
-              ? '微信配置已保存。当前 Bridge 还在使用旧通道配置，点击“重启 Bridge”后生效。'
+              ? '微信配置已保存。Bridge 会在几秒内自动同步通道配置；如果页面还没更新，可手动点“刷新状态”。'
               : '微信配置已保存。'
           );
+        } catch (error) {
+          showMessage('weixinMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('refreshWeixinStateBtn').addEventListener('click', async () => {
+        try {
+          await loadStatus();
+          await loadBindings();
+          await loadDesktopSessions();
+          showMessage('weixinMessage', 'success', '微信通道状态已刷新。');
         } catch (error) {
           showMessage('weixinMessage', 'error', error.message);
         }
@@ -2078,7 +2102,7 @@ function renderHtml(): string {
           await loadBindings();
           const followup = isChannelRunning('weixin')
             ? '微信账号已保存。当前 Bridge 已加载微信通道，几秒后会自动接入新账号。'
-            : '微信账号已保存。当前运行中的 Bridge 还没加载微信通道，点击“重启 Bridge”后生效。';
+            : '微信账号已保存。Bridge 会在几秒内自动同步微信通道；如果页面还没更新，可手动点“刷新状态”。';
           showMessage('weixinMessage', result.ok ? 'success' : 'error', followup);
         } catch (error) {
           showMessage('weixinMessage', 'error', error.message);

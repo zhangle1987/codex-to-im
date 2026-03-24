@@ -20,7 +20,7 @@ import type {
   UpsertChannelBindingInput,
 } from './lib/bridge/host.js';
 import type { ChannelBinding, ChannelType } from './lib/bridge/types.js';
-import { CTI_HOME } from './config.js';
+import { CTI_HOME, configToSettings, loadConfig } from './config.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
@@ -70,6 +70,7 @@ interface LockEntry {
 
 export class JsonFileStore implements BridgeStore {
   private settings: Map<string, string>;
+  private dynamicSettings: boolean;
   private sessions = new Map<string, BridgeSession>();
   private bindings = new Map<string, ChannelBinding>();
   private messages = new Map<string, BridgeMessage[]>();
@@ -79,8 +80,12 @@ export class JsonFileStore implements BridgeStore {
   private locks = new Map<string, LockEntry>();
   private auditLog: Array<AuditLogInput & { id: string; createdAt: string }> = [];
 
-  constructor(settingsMap: Map<string, string>) {
+  constructor(
+    settingsMap: Map<string, string>,
+    options?: { dynamicSettings?: boolean },
+  ) {
     this.settings = settingsMap;
+    this.dynamicSettings = options?.dynamicSettings === true;
     ensureDir(DATA_DIR);
     ensureDir(MESSAGES_DIR);
     this.loadAll();
@@ -197,7 +202,21 @@ export class JsonFileStore implements BridgeStore {
 
   // ── Settings ──
 
+  private refreshSettings(): void {
+    if (!this.dynamicSettings) return;
+    try {
+      const next = configToSettings(loadConfig());
+      this.settings = new Map([
+        ...this.settings,
+        ...next,
+      ]);
+    } catch {
+      // Keep the last known settings if the config file is temporarily unreadable.
+    }
+  }
+
   getSetting(key: string): string | null {
+    this.refreshSettings();
     return this.settings.get(key) ?? null;
   }
 
@@ -225,19 +244,19 @@ export class JsonFileStore implements BridgeStore {
       this.persistBindings();
       return updated;
     }
-    const binding: ChannelBinding = {
-      id: uuid(),
-      channelType: data.channelType,
-      chatId: data.chatId,
-      codepilotSessionId: data.codepilotSessionId,
-      sdkSessionId: data.sdkSessionId ?? '',
-      workingDirectory: data.workingDirectory,
-      model: data.model,
-      mode: (this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
-      active: true,
-      createdAt: now(),
-      updatedAt: now(),
-    };
+      const binding: ChannelBinding = {
+        id: uuid(),
+        channelType: data.channelType,
+        chatId: data.chatId,
+        codepilotSessionId: data.codepilotSessionId,
+        sdkSessionId: data.sdkSessionId ?? '',
+        workingDirectory: data.workingDirectory,
+        model: data.model,
+        mode: (this.getSetting('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
+        active: true,
+        createdAt: now(),
+        updatedAt: now(),
+      };
     this.bindings.set(key, binding);
     this.persistBindings();
     return binding;
@@ -294,7 +313,7 @@ export class JsonFileStore implements BridgeStore {
     const session: BridgeSession = {
       id: uuid(),
       name,
-      working_directory: cwd || this.settings.get('bridge_default_work_dir') || process.cwd(),
+      working_directory: cwd || this.getSetting('bridge_default_work_dir') || process.cwd(),
       model,
       system_prompt: systemPrompt,
     };

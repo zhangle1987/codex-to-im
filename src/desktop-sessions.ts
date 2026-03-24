@@ -58,6 +58,7 @@ interface SessionIndexLine {
 
 const ACTIVE_WINDOW_MS = 15 * 60 * 1000;
 const MAX_SESSION_META_BYTES = 4 * 1024 * 1024;
+const MAX_SESSION_TITLE_SCAN_BYTES = 512 * 1024;
 const TITLE_MAX_CHARS = 72;
 
 function getCodexHome(): string {
@@ -129,6 +130,27 @@ function readFirstLine(filePath: string, maxBytes = MAX_SESSION_META_BYTES): str
   }
 }
 
+function readFilePrefix(filePath: string, maxBytes = MAX_SESSION_TITLE_SCAN_BYTES): string {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(Math.min(maxBytes, 64 * 1024));
+    const chunks: Buffer[] = [];
+    let offset = 0;
+
+    while (offset < maxBytes) {
+      const bytesToRead = Math.min(buffer.length, maxBytes - offset);
+      const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, offset);
+      if (bytesRead <= 0) break;
+      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+      offset += bytesRead;
+    }
+
+    return Buffer.concat(chunks).toString('utf-8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function walkSessionFiles(dirPath: string, target: string[]): void {
   let entries: fs.Dirent[];
   try {
@@ -152,6 +174,7 @@ function walkSessionFiles(dirPath: string, target: string[]): void {
 function isDesktopLike(meta: SessionMetaLine['payload']): boolean {
   const originator = meta?.originator?.toLowerCase() || '';
   const source = meta?.source?.toLowerCase() || '';
+  if (source === 'exec') return false;
   return originator.includes('desktop') || source === 'vscode' || source === 'desktop';
 }
 
@@ -191,6 +214,33 @@ function loadThreadNameIndex(archivedThreadIds: Set<string>): Map<string, string
   return new Map(Array.from(titles.entries()).map(([threadId, entry]) => [threadId, entry.title]));
 }
 
+function buildFallbackTitle(threadId: string, filePath: string, cwd: string): string {
+  try {
+    const content = readFilePrefix(filePath);
+    for (const line of content.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+
+      let parsed: SessionMessageLine | SessionEventLine;
+      try {
+        parsed = JSON.parse(line) as SessionMessageLine | SessionEventLine;
+      } catch {
+        continue;
+      }
+
+      if (!isSessionEventLine(parsed) || parsed.payload?.type !== 'user_message') continue;
+
+      const firstUserMessage = trimTitle(normalizeFreeText(parsed.payload.message || ''));
+      if (firstUserMessage) return firstUserMessage;
+    }
+  } catch {
+    // Best-effort fallback only.
+  }
+
+  const dirName = trimTitle(path.basename(cwd || ''));
+  if (dirName) return dirName;
+  return `Session ${threadId.slice(0, 8)}`;
+}
+
 function parseDesktopSession(
   filePath: string,
   threadNames: Map<string, string>,
@@ -225,8 +275,7 @@ function parseDesktopSession(
   const lastEventAt = stat.mtime.toISOString();
   const firstSeenAt = parsed.payload.timestamp || parsed.timestamp || stat.birthtime.toISOString();
   const threadId = parsed.payload.id;
-  const title = threadNames.get(threadId);
-  if (!title) return null;
+  const title = threadNames.get(threadId) || buildFallbackTitle(threadId, filePath, cwd);
 
   return {
     threadId,
@@ -266,7 +315,6 @@ export function listDesktopSessions(limit = 12): DesktopSessionSummary[] {
   if (!fs.existsSync(root)) return [];
   const archivedThreadIds = loadArchivedThreadIds();
   const threadNames = loadThreadNameIndex(archivedThreadIds);
-  if (threadNames.size === 0) return [];
 
   const files: string[] = [];
   walkSessionFiles(root, files);

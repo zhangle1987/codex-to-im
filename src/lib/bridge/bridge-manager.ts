@@ -328,6 +328,7 @@ interface BridgeManagerState {
   running: boolean;
   startedAt: string | null;
   loopAborts: Map<string, AbortController>;
+  reconcileTimer: NodeJS.Timeout | null;
   activeTasks: Map<string, AbortController>;
   /** Per-session processing chains for concurrency control */
   sessionLocks: Map<string, Promise<void>>;
@@ -343,6 +344,7 @@ function getState(): BridgeManagerState {
       running: false,
       startedAt: null,
       loopAborts: new Map(),
+      reconcileTimer: null,
       activeTasks: new Map(),
       sessionLocks: new Map(),
       autoStartChecked: false,
@@ -374,6 +376,88 @@ function processWithSessionLock(sessionId: string, fn: () => Promise<void>): Pro
   return current;
 }
 
+function getActiveChannelTypes(state = getState()): string[] {
+  return Array.from(state.adapters.keys()).sort();
+}
+
+function notifyAdapterSetChanged(): void {
+  const { lifecycle } = getBridgeContext();
+  lifecycle.onBridgeAdaptersChanged?.(getActiveChannelTypes());
+}
+
+async function stopAdapterInstance(channelType: string): Promise<void> {
+  const state = getState();
+  const adapter = state.adapters.get(channelType);
+  if (!adapter) return;
+
+  state.loopAborts.get(channelType)?.abort();
+  state.loopAborts.delete(channelType);
+
+  try {
+    await adapter.stop();
+    console.log(`[bridge-manager] Stopped adapter: ${channelType}`);
+  } catch (err) {
+    console.error(`[bridge-manager] Error stopping adapter ${channelType}:`, err);
+  }
+
+  state.adapters.delete(channelType);
+  state.adapterMeta.delete(channelType);
+}
+
+async function syncConfiguredAdapters(options: { startLoops: boolean }): Promise<void> {
+  const state = getState();
+  const { store } = getBridgeContext();
+  let changed = false;
+
+  for (const channelType of getRegisteredTypes()) {
+    const enabled = store.getSetting(`bridge_${channelType}_enabled`) === 'true';
+    const existing = state.adapters.get(channelType);
+
+    if (!enabled) {
+      if (existing) {
+        await stopAdapterInstance(channelType);
+        changed = true;
+      }
+      continue;
+    }
+
+    if (existing) {
+      continue;
+    }
+
+    const adapter = createAdapter(channelType);
+    if (!adapter) continue;
+
+    const configError = adapter.validateConfig();
+    if (configError) {
+      console.warn(`[bridge-manager] ${channelType} adapter not valid:`, configError);
+      continue;
+    }
+
+    try {
+      state.adapters.set(channelType, adapter);
+      state.adapterMeta.set(channelType, {
+        lastMessageAt: null,
+        lastError: null,
+      });
+      await adapter.start();
+      console.log(`[bridge-manager] Started adapter: ${channelType}`);
+      if (options.startLoops && state.running && adapter.isRunning()) {
+        runAdapterLoop(adapter);
+      }
+      changed = true;
+    } catch (err) {
+      state.adapters.delete(channelType);
+      state.adapterMeta.delete(channelType);
+      console.error(`[bridge-manager] Failed to start adapter ${channelType}:`, err);
+    }
+  }
+
+  if (changed) {
+    notifyAdapterSetChanged();
+  }
+}
+
 /**
  * Start the bridge system.
  * Checks feature flags, registers enabled adapters, starts polling loops.
@@ -390,33 +474,8 @@ export async function start(): Promise<void> {
     return;
   }
 
-  // Iterate all registered adapter types and create those that are enabled
-  for (const channelType of getRegisteredTypes()) {
-    const settingKey = `bridge_${channelType}_enabled`;
-    if (store.getSetting(settingKey) !== 'true') continue;
-
-    const adapter = createAdapter(channelType);
-    if (!adapter) continue;
-
-    const configError = adapter.validateConfig();
-    if (!configError) {
-      registerAdapter(adapter);
-    } else {
-      console.warn(`[bridge-manager] ${channelType} adapter not valid:`, configError);
-    }
-  }
-
-  // Start all registered adapters, track how many succeeded
-  let startedCount = 0;
-  for (const [type, adapter] of state.adapters) {
-    try {
-      await adapter.start();
-      console.log(`[bridge-manager] Started adapter: ${type}`);
-      startedCount++;
-    } catch (err) {
-      console.error(`[bridge-manager] Failed to start adapter ${type}:`, err);
-    }
-  }
+  await syncConfiguredAdapters({ startLoops: false });
+  const startedCount = state.adapters.size;
 
   // Only mark as running if at least one adapter started successfully
   if (startedCount === 0) {
@@ -441,6 +500,12 @@ export async function start(): Promise<void> {
     }
   }
 
+  state.reconcileTimer = setInterval(() => {
+    void syncConfiguredAdapters({ startLoops: true }).catch((err) => {
+      console.error('[bridge-manager] Adapter reconcile failed:', err);
+    });
+  }, 5_000);
+
   console.log(`[bridge-manager] Bridge started with ${startedCount} adapter(s)`);
 }
 
@@ -455,6 +520,11 @@ export async function stop(): Promise<void> {
 
   state.running = false;
 
+  if (state.reconcileTimer) {
+    clearInterval(state.reconcileTimer);
+    state.reconcileTimer = null;
+  }
+
   // Abort all event loops
   for (const [, abort] of state.loopAborts) {
     abort.abort();
@@ -462,17 +532,10 @@ export async function stop(): Promise<void> {
   state.loopAborts.clear();
 
   // Stop all adapters
-  for (const [type, adapter] of state.adapters) {
-    try {
-      await adapter.stop();
-      console.log(`[bridge-manager] Stopped adapter: ${type}`);
-    } catch (err) {
-      console.error(`[bridge-manager] Error stopping adapter ${type}:`, err);
-    }
+  for (const type of Array.from(state.adapters.keys())) {
+    await stopAdapterInstance(type);
   }
 
-  state.adapters.clear();
-  state.adapterMeta.clear();
   state.startedAt = null;
 
   // Notify host that bridge stopped
@@ -528,6 +591,10 @@ export function getStatus(): BridgeStatus {
 export function registerAdapter(adapter: BaseChannelAdapter): void {
   const state = getState();
   state.adapters.set(adapter.channelType, adapter);
+  state.adapterMeta.set(adapter.channelType, {
+    lastMessageAt: null,
+    lastError: null,
+  });
 }
 
 /**

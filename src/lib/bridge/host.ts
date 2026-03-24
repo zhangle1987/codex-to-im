@@ -251,6 +251,8 @@ export interface PermissionGateway {
 export interface LifecycleHooks {
   /** Called when the bridge system starts (e.g., to suppress competing polling). */
   onBridgeStart?(): void;
+  /** Called when the active adapter set changes while the bridge is running. */
+  onBridgeAdaptersChanged?(channels: string[]): void;
   /** Called when the bridge system stops. */
   onBridgeStop?(): void;
 }

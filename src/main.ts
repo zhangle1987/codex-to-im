@@ -114,6 +114,10 @@ function writeStatus(info: StatusInfo): void {
   fs.renameSync(tmp, STATUS_FILE);
 }
 
+function getRunningChannels(): string[] {
+  return bridgeManager.getStatus().adapters.map((adapter) => adapter.channelType).sort();
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   setupLogger();
@@ -122,7 +126,7 @@ async function main(): Promise<void> {
   console.log(`[codex-to-im] Starting bridge (run_id: ${runId})`);
 
   const settings = configToSettings(config);
-  const store = new JsonFileStore(settings);
+  const store = new JsonFileStore(settings, { dynamicSettings: true });
   const pendingPerms = new PendingPermissions();
   const llm = await resolveProvider(config, pendingPerms);
   console.log(`[codex-to-im] Runtime: ${config.runtime}`);
@@ -141,17 +145,27 @@ async function main(): Promise<void> {
         // Write authoritative PID from the actual process (not shell $!)
         fs.mkdirSync(RUNTIME_DIR, { recursive: true });
         fs.writeFileSync(PID_FILE, String(process.pid), 'utf-8');
+        const channels = getRunningChannels();
         writeStatus({
           running: true,
           pid: process.pid,
           runId,
           startedAt: new Date().toISOString(),
-          channels: config.enabledChannels,
+          channels,
         });
-        console.log(`[codex-to-im] Bridge started (PID: ${process.pid}, channels: ${config.enabledChannels.join(', ')})`);
+        console.log(`[codex-to-im] Bridge started (PID: ${process.pid}, channels: ${channels.join(', ')})`);
+      },
+      onBridgeAdaptersChanged: (channels) => {
+        writeStatus({
+          running: true,
+          pid: process.pid,
+          runId,
+          channels,
+        });
+        console.log(`[codex-to-im] Active channels updated: ${channels.join(', ') || 'none'}`);
       },
       onBridgeStop: () => {
-        writeStatus({ running: false });
+        writeStatus({ running: false, channels: [] });
         console.log('[codex-to-im] Bridge stopped');
       },
     },
