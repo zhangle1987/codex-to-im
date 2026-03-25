@@ -125,6 +125,7 @@ export async function forwardPermissionRequest(
         channelType: adapter.channelType,
         chatId: address.chatId,
         messageId: result.messageId,
+        sessionId,
         toolName,
         suggestions: suggestions ? JSON.stringify(suggestions) : '',
       });

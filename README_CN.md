@@ -38,13 +38,13 @@ Windows 主机安装说明见：[docs/install-windows.md](D:/codex/Claude-to-IM-
 ### 依赖
 
 - Node.js 20+
-- 如果使用 `codex` 或 `auto` 运行时：需要在同一 Windows 用户下完成 Codex 认证
+- 如果使用 `codex` 或 `auto` 运行时：需要在同一系统用户下完成 Codex 认证
 
 `codex-to-im` 当前已经随包带上运行所需的 `@openai/codex-sdk` / Codex CLI 平台依赖，正常使用 bridge 时不要求你额外再全局安装一份 Codex CLI。
 
 但你仍然需要让 Codex 在当前用户下可用。推荐满足以下任一条件：
 
-- 已安装并登录过 Codex Windows App
+- 已安装并登录过 Codex Desktop App
 - 已经有可用的 Codex CLI 登录态
 - 已配置 `CTI_CODEX_API_KEY`、`CODEX_API_KEY` 或 `OPENAI_API_KEY`
 
@@ -127,8 +127,17 @@ codex-to-im stop
 
 常用命令补充：
 
-- `/history` 查看当前会话最近 N 条消息
+- `/` / `/status` 查看当前会话
+- `/h` / `/help` 查看帮助
+- `/t` / `/threads` 查看最近桌面会话，`/t 1` / `/thread 1` 接管第 1 条
+- `/n proj1` / `/new proj1` 在默认工作空间下新建项目会话
+- `/m` / `/mode` 查看或切换模式，可选 `code` / `plan` / `ask`
+- `/r` / `/reasoning` 查看或切换思考级别，可选 `0|1|2|3|4|5`
+- `/his` / `/history` 查看整理后的历史摘要，`/his raw` / `/history raw` 查看原始记录
+- `/t 0` / `/thread 0` 进入临时草稿线程，不污染正式工作会话
+- `1 / 2 / 3` 或 `/perm ...` 处理权限
 - N 可在 Web 工作台的“基础配置”里调整
+- Web 工作台的“命令说明”页会同时列出短命令和兼容原命令
 
 如果你启用了飞书流式响应卡片，需要先在飞书应用侧开通并发布相关权限，至少包括：
 
@@ -149,6 +158,32 @@ codex-to-im stop
 
 - 把默认工作目录改成一个你已经信任的 Git 仓库
 - 或在基础配置里打开“允许在未信任 Git 目录运行 Codex”，然后重启 Bridge
+
+当前配置页新增了几项和 Codex 运行行为直接相关的配置：
+
+- `默认工作空间`
+  - 给 `/new proj1` 这类相对项目名提供父目录
+  - 留空时默认回退到 `~/cx2im`，并按当前系统展开为实际路径
+- `Codex 文件系统权限`
+  - 可选 `read-only`、`workspace-write`、`danger-full-access`
+  - 默认 `workspace-write`
+- `Codex 思考级别`
+  - 全局默认值，可在 IM 中用 `/reasoning` 对当前会话覆盖
+  - 官方仅有 5 个级别：`minimal`、`low`、`medium`、`high`、`xhigh`
+  - IM 中也支持数字别名：`0=minimal`、`1=low`、`2=medium`、`3=high`、`4/5=xhigh`
+
+如果你是在自己的本地开发机上长期用 `codex-to-im` 做实际编码，当前更激进的推荐配置是：
+
+- `Codex 文件系统权限` 设为 `danger-full-access`
+- `Codex 思考级别` 设为 `xhigh`
+
+这样更接近完整 `code` 模式下的开发体验。它适合你自己的受控项目目录，不适合直接照搬到陌生仓库或高风险环境。
+
+通道页还支持“命令反馈使用 Markdown”开关：
+- 飞书默认开启
+- 微信默认关闭
+- 只影响 `/h`、`/status`、`/threads` 这类 bridge 自己生成的反馈
+- 不影响 Codex 原始回复内容
 
 ## 更新
 

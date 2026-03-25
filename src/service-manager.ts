@@ -30,6 +30,7 @@ const bridgePidFile = path.join(runtimeDir, 'bridge.pid');
 const bridgeStatusFile = path.join(runtimeDir, 'status.json');
 const uiStatusFile = path.join(runtimeDir, 'ui-server.json');
 const uiPort = 4781;
+const WINDOWS_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
 
 function ensureDirs(): void {
   fs.mkdirSync(runtimeDir, { recursive: true });
@@ -170,6 +171,7 @@ export async function startBridge(): Promise<BridgeStatus> {
     detached: true,
     env: buildDaemonEnv(),
     stdio: ['ignore', stdoutFd, stderrFd],
+    ...WINDOWS_HIDE,
   });
   child.unref();
 
@@ -190,6 +192,7 @@ export async function stopBridge(): Promise<BridgeStatus> {
     await new Promise<void>((resolve) => {
       const killer = spawn('cmd', ['/c', 'taskkill', '/PID', String(status.pid), '/T', '/F'], {
         stdio: 'ignore',
+        ...WINDOWS_HIDE,
       });
       killer.on('exit', () => resolve());
       killer.on('error', () => resolve());
@@ -246,6 +249,7 @@ export async function ensureUiServerRunning(): Promise<UiServerStatus> {
       CTI_HOME,
     },
     stdio: ['ignore', stdoutFd, stderrFd],
+    ...WINDOWS_HIDE,
   });
   child.unref();
 
@@ -268,6 +272,7 @@ export async function stopUiServer(): Promise<UiServerStatus> {
     await new Promise<void>((resolve) => {
       const killer = spawn('cmd', ['/c', 'taskkill', '/PID', String(status.pid), '/T', '/F'], {
         stdio: 'ignore',
+        ...WINDOWS_HIDE,
       });
       killer.on('exit', () => resolve());
       killer.on('error', () => resolve());
@@ -339,7 +344,7 @@ export function isCodexIntegrationInstalled(): boolean {
 
 export function openBrowser(url: string): void {
   if (process.platform === 'win32') {
-    const child = spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' });
+    const child = spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', ...WINDOWS_HIDE });
     child.unref();
     return;
   }

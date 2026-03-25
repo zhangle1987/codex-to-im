@@ -238,6 +238,7 @@ export class JsonFileStore implements BridgeStore {
         sdkSessionId: data.sdkSessionId ?? existing.sdkSessionId,
         workingDirectory: data.workingDirectory,
         model: data.model,
+        mode: (data.mode as ChannelBinding['mode']) ?? existing.mode,
         updatedAt: now(),
       };
       this.bindings.set(key, updated);
@@ -252,7 +253,7 @@ export class JsonFileStore implements BridgeStore {
         sdkSessionId: data.sdkSessionId ?? '',
         workingDirectory: data.workingDirectory,
         model: data.model,
-        mode: (this.getSetting('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
+        mode: (data.mode as 'code' | 'plan' | 'ask') || (this.getSetting('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
         active: true,
         createdAt: now(),
         updatedAt: now(),
@@ -307,15 +308,31 @@ export class JsonFileStore implements BridgeStore {
     model: string,
     systemPrompt?: string,
     cwd?: string,
-    _mode?: string,
+    mode?: string,
+    options?: {
+      reasoningEffort?: BridgeSession['reasoning_effort'];
+      sessionType?: BridgeSession['session_type'];
+      hidden?: boolean;
+      parentSessionId?: string;
+      expiresAt?: string;
+    },
   ): BridgeSession {
     this.reloadSessions();
+    const timestamp = now();
     const session: BridgeSession = {
       id: uuid(),
       name,
       working_directory: cwd || this.getSetting('bridge_default_work_dir') || process.cwd(),
       model,
+      preferred_mode: mode as BridgeSession['preferred_mode'],
       system_prompt: systemPrompt,
+      reasoning_effort: options?.reasoningEffort,
+      session_type: options?.sessionType || 'normal',
+      hidden: options?.hidden === true,
+      parent_session_id: options?.parentSessionId,
+      expires_at: options?.expiresAt,
+      created_at: timestamp,
+      updated_at: timestamp,
     };
     this.sessions.set(session.id, session);
     this.persistSessions();
@@ -327,8 +344,42 @@ export class JsonFileStore implements BridgeStore {
     const s = this.sessions.get(sessionId);
     if (s) {
       s.provider_id = providerId;
+      s.updated_at = now();
       this.persistSessions();
     }
+  }
+
+  updateSession(sessionId: string, updates: Partial<BridgeSession>): void {
+    this.reloadSessions();
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const next: BridgeSession = {
+      ...session,
+      ...updates,
+      id: session.id,
+      updated_at: now(),
+    };
+    this.sessions.set(sessionId, next);
+    this.persistSessions();
+  }
+
+  deleteSession(sessionId: string): void {
+    this.reloadSessions();
+    this.reloadBindings();
+    this.sessions.delete(sessionId);
+    for (const [key, binding] of this.bindings) {
+      if (binding.codepilotSessionId === sessionId) {
+        this.bindings.delete(key);
+      }
+    }
+    this.messages.delete(sessionId);
+    try {
+      fs.rmSync(path.join(MESSAGES_DIR, `${sessionId}.json`), { force: true });
+    } catch {
+      // best effort
+    }
+    this.persistSessions();
+    this.persistBindings();
   }
 
   // ── Messages ──
@@ -378,7 +429,31 @@ export class JsonFileStore implements BridgeStore {
   }
 
   setSessionRuntimeStatus(_sessionId: string, _status: string): void {
-    // no-op for file-based store
+    this.reloadSessions();
+    const session = this.sessions.get(_sessionId);
+    if (!session) return;
+
+    const queuedCount = session.queued_count && session.queued_count > 0
+      ? session.queued_count
+      : 0;
+    let runtimeStatus: BridgeSession['runtime_status'];
+
+    if (_status === 'running') {
+      runtimeStatus = queuedCount > 0 ? 'queued' : 'running';
+    } else if (_status === 'idle') {
+      runtimeStatus = queuedCount > 0 ? 'queued' : 'idle';
+    } else {
+      runtimeStatus = session.runtime_status;
+    }
+
+    const next: BridgeSession = {
+      ...session,
+      runtime_status: runtimeStatus,
+      last_runtime_update_at: now(),
+      updated_at: now(),
+    };
+    this.sessions.set(_sessionId, next);
+    this.persistSessions();
   }
 
   // ── SDK Session ──
@@ -389,6 +464,7 @@ export class JsonFileStore implements BridgeStore {
     const s = this.sessions.get(sessionId);
     if (s) {
       s.sdk_session_id = sdkSessionId;
+      s.updated_at = now();
       this.persistSessions();
     }
     // Also update any bindings that reference this session
@@ -405,6 +481,7 @@ export class JsonFileStore implements BridgeStore {
     const s = this.sessions.get(sessionId);
     if (s) {
       s.model = model;
+      s.updated_at = now();
       this.persistSessions();
     }
   }
@@ -477,6 +554,7 @@ export class JsonFileStore implements BridgeStore {
       permissionRequestId: link.permissionRequestId,
       chatId: link.chatId,
       messageId: link.messageId,
+      sessionId: link.sessionId,
       resolved: false,
       suggestions: link.suggestions,
     };

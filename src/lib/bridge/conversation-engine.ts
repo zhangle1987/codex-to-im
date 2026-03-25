@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import type { ChannelBinding } from './types.js';
 import type {
+  BridgeSession,
   FileAttachment,
   SSEEvent,
   TokenUsage,
@@ -54,6 +55,37 @@ export interface ConversationResult {
   permissionRequests: PermissionRequestInfo[];
   /** SDK session ID captured from status/result events, for session resume */
   sdkSessionId: string | null;
+}
+
+function resolveSandboxMode(
+  store: ReturnType<typeof getBridgeContext>['store'],
+): 'read-only' | 'workspace-write' | 'danger-full-access' {
+  const configured = store.getSetting('bridge_codex_sandbox_mode');
+  if (
+    configured === 'read-only'
+    || configured === 'workspace-write'
+    || configured === 'danger-full-access'
+  ) {
+    return configured;
+  }
+  return 'workspace-write';
+}
+
+function resolveReasoningEffort(
+  store: ReturnType<typeof getBridgeContext>['store'],
+  session: BridgeSession | null,
+): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' {
+  const configured = session?.reasoning_effort || store.getSetting('bridge_codex_reasoning_effort');
+  if (
+    configured === 'minimal'
+    || configured === 'low'
+    || configured === 'medium'
+    || configured === 'high'
+    || configured === 'xhigh'
+  ) {
+    return configured;
+  }
+  return 'medium';
 }
 
 interface PersistedAttachmentMeta {
@@ -138,6 +170,8 @@ export async function processMessage(
     // Resolve session early — needed for workingDirectory and provider resolution
     const session = store.getSession(sessionId);
     const workDir = binding.workingDirectory || session?.working_directory || '';
+    const sandboxMode = resolveSandboxMode(store);
+    const modelReasoningEffort = resolveReasoningEffort(store, session);
 
     // Save user message — persist file attachments to disk using the same
     // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
@@ -222,6 +256,8 @@ export async function processMessage(
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,
       model: effectiveModel,
+      sandboxMode,
+      modelReasoningEffort,
       systemPrompt: session?.system_prompt || undefined,
       workingDirectory: workDir || undefined,
       abortController,

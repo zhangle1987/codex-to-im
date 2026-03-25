@@ -4,7 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { listDesktopSessions } from '../desktop-sessions.js';
+import {
+  listDesktopSessions,
+  readDesktopSessionEventDeltaByFilePath,
+  readDesktopSessionEventStreamByFilePath,
+} from '../desktop-sessions.js';
 
 const originalCodexHome = process.env.CODEX_HOME;
 
@@ -102,6 +106,93 @@ describe('listDesktopSessions', () => {
     const sessions = listDesktopSessions(10);
 
     assert.equal(sessions.length, 0);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+describe('readDesktopSessionEventStreamByFilePath', () => {
+  it('falls back to task_complete.last_agent_message for final answers', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-events-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-03-25T00:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'user_message',
+            message: 'hello',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-03-25T00:00:02.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'task_complete',
+            last_agent_message: 'final answer',
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const events = readDesktopSessionEventStreamByFilePath(filePath);
+
+    assert.deepEqual(
+      events.map((event) => ({ role: event.role, content: event.content })),
+      [
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'final answer' },
+      ],
+    );
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('reads only appended complete lines and preserves trailing partial text', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-events-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    const firstLine = JSON.stringify({
+      timestamp: '2026-03-25T00:00:00.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'user_message',
+        message: 'hello',
+      },
+    });
+    const secondLine = JSON.stringify({
+      timestamp: '2026-03-25T00:00:02.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'task_complete',
+        last_agent_message: 'final answer',
+      },
+    });
+    fs.writeFileSync(filePath, `${firstLine}\n${secondLine.slice(0, 40)}`, 'utf-8');
+
+    const firstDelta = readDesktopSessionEventDeltaByFilePath(filePath, 0, fs.statSync(filePath).size);
+
+    assert.deepEqual(
+      firstDelta.events.map((event) => ({ role: event.role, content: event.content })),
+      [{ role: 'user', content: 'hello' }],
+    );
+    assert.equal(firstDelta.trailingText, secondLine.slice(0, 40));
+
+    fs.appendFileSync(filePath, `${secondLine.slice(40)}\n`, 'utf-8');
+    const secondDelta = readDesktopSessionEventDeltaByFilePath(
+      filePath,
+      firstDelta.nextOffset,
+      fs.statSync(filePath).size,
+      firstDelta.trailingText,
+    );
+
+    assert.deepEqual(
+      secondDelta.events.map((event) => ({ role: event.role, content: event.content })),
+      [{ role: 'assistant', content: 'final answer' }],
+    );
+    assert.equal(secondDelta.trailingText, '');
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });

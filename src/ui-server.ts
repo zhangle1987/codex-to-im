@@ -231,10 +231,13 @@ function configToPayload(config: Config) {
     runtime: config.runtime,
     enabledChannels: config.enabledChannels,
     defaultWorkDir: config.defaultWorkDir,
+    defaultWorkspaceRoot: config.defaultWorkspaceRoot || '',
     defaultModel: config.defaultModel || '',
     defaultMode: config.defaultMode,
     historyMessageLimit: config.historyMessageLimit ?? 8,
     codexSkipGitRepoCheck: config.codexSkipGitRepoCheck === true,
+    codexSandboxMode: config.codexSandboxMode || 'workspace-write',
+    codexReasoningEffort: config.codexReasoningEffort || 'medium',
     uiAllowLan: config.uiAllowLan === true,
     uiAccessToken: config.uiAccessToken || '',
     autoApprove: config.autoApprove === true,
@@ -243,7 +246,9 @@ function configToPayload(config: Config) {
     feishuDomain: config.feishuDomain || 'https://open.feishu.cn',
     feishuAllowedUsers: config.feishuAllowedUsers?.join(',') || '',
     feishuStreamingEnabled: config.feishuStreamingEnabled !== false,
+    feishuCommandMarkdownEnabled: config.feishuCommandMarkdownEnabled !== false,
     weixinMediaEnabled: config.weixinMediaEnabled === true,
+    weixinCommandMarkdownEnabled: config.weixinCommandMarkdownEnabled === true,
   };
 }
 
@@ -263,10 +268,21 @@ function mergeConfig(payload: Record<string, unknown>): Config {
     runtime: payload.runtime === 'claude' || payload.runtime === 'auto' ? payload.runtime : 'codex',
     enabledChannels: requestedChannels.filter((channel) => supportedChannels.includes(channel as typeof supportedChannels[number])),
     defaultWorkDir: asString(payload.defaultWorkDir) || current.defaultWorkDir || process.cwd(),
+    defaultWorkspaceRoot: asString(payload.defaultWorkspaceRoot),
     defaultModel: asString(payload.defaultModel),
     defaultMode: payload.defaultMode === 'plan' || payload.defaultMode === 'ask' ? payload.defaultMode : 'code',
     historyMessageLimit: asPositiveInt(payload.historyMessageLimit) || current.historyMessageLimit || 8,
     codexSkipGitRepoCheck: payload.codexSkipGitRepoCheck === true,
+    codexSandboxMode: payload.codexSandboxMode === 'read-only'
+      || payload.codexSandboxMode === 'danger-full-access'
+      ? payload.codexSandboxMode
+      : 'workspace-write',
+    codexReasoningEffort: payload.codexReasoningEffort === 'minimal'
+      || payload.codexReasoningEffort === 'low'
+      || payload.codexReasoningEffort === 'high'
+      || payload.codexReasoningEffort === 'xhigh'
+      ? payload.codexReasoningEffort
+      : 'medium',
     uiAllowLan,
     uiAccessToken,
     autoApprove: payload.autoApprove === true,
@@ -275,7 +291,9 @@ function mergeConfig(payload: Record<string, unknown>): Config {
     feishuDomain: asString(payload.feishuDomain) || 'https://open.feishu.cn',
     feishuAllowedUsers: parseCsv(payload.feishuAllowedUsers),
     feishuStreamingEnabled: payload.feishuStreamingEnabled !== false,
+    feishuCommandMarkdownEnabled: payload.feishuCommandMarkdownEnabled !== false,
     weixinMediaEnabled: payload.weixinMediaEnabled === true,
+    weixinCommandMarkdownEnabled: payload.weixinCommandMarkdownEnabled === true,
   };
 }
 
@@ -859,43 +877,80 @@ function renderHtml(): string {
 
       .message {
         display: none;
-        margin-top: 14px;
-        padding: 10px 12px;
-        border-radius: 8px;
       }
-
-      .message.show { display: block; }
-      .message.success { background: rgba(21, 128, 61, 0.10); color: var(--success); }
-      .message.error { background: rgba(220, 38, 38, 0.10); color: var(--danger); }
 
       .global-message-host {
         position: fixed;
-        top: 20px;
+        top: 18px;
         left: 50%;
         transform: translateX(-50%);
         display: grid;
-        gap: 10px;
-        z-index: 2000;
+        gap: 12px;
+        z-index: 2400;
         pointer-events: none;
       }
 
       .global-message {
-        min-width: 240px;
-        max-width: min(560px, calc(100vw - 32px));
-        padding: 10px 14px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        background: rgba(255, 255, 255, 0.96);
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 260px;
+        max-width: min(640px, calc(100vw - 32px));
+        padding: 11px 14px;
+        border-radius: 10px;
+        border: 1px solid rgba(208, 215, 226, 0.88);
+        background: rgba(255, 255, 255, 0.98);
         box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
         color: var(--text);
+        line-height: 1.45;
+        animation: message-enter 160ms ease;
       }
 
       .global-message.success {
-        border-color: rgba(21, 128, 61, 0.16);
+        border-color: rgba(22, 163, 74, 0.22);
       }
 
       .global-message.error {
-        border-color: rgba(220, 38, 38, 0.16);
+        border-color: rgba(220, 38, 38, 0.24);
+      }
+
+      .global-message-icon {
+        flex: 0 0 auto;
+        width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 700;
+        background: rgba(15, 23, 42, 0.06);
+      }
+
+      .global-message.success .global-message-icon {
+        color: var(--success);
+        background: rgba(22, 163, 74, 0.12);
+      }
+
+      .global-message.error .global-message-icon {
+        color: var(--danger);
+        background: rgba(220, 38, 38, 0.10);
+      }
+
+      .global-message-content {
+        min-width: 0;
+        word-break: break-word;
+      }
+
+      @keyframes message-enter {
+        from {
+          opacity: 0;
+          transform: translateY(-6px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
       }
 
       .info-list {
@@ -1113,11 +1168,24 @@ function renderHtml(): string {
         display: grid;
       }
 
+      .command-list-head,
       .command-item {
         display: grid;
-        grid-template-columns: 280px minmax(0, 1fr);
+        grid-template-columns: 220px 320px minmax(0, 1fr);
         gap: 16px;
         padding: 10px 14px;
+        align-items: start;
+      }
+
+      .command-list-head {
+        padding-top: 12px;
+        padding-bottom: 8px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        background: #fcfcfd;
         border-top: 1px solid var(--border);
       }
 
@@ -1127,6 +1195,15 @@ function renderHtml(): string {
 
       .command-item code {
         word-break: break-all;
+      }
+
+      .command-col-command,
+      .command-col-original {
+        min-width: 0;
+      }
+
+      .command-col-desc {
+        color: #475467;
       }
 
       .channel-tab {
@@ -1301,6 +1378,7 @@ function renderHtml(): string {
         .field-row,
         .field-row.triple,
         .command-item,
+        .command-list-head,
         .binding-controls { grid-template-columns: 1fr; }
         .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       }
@@ -1442,7 +1520,7 @@ function renderHtml(): string {
           </div>
 
           <section class="panel" id="desktop">
-            <div class="notice">这里只展示在 Codex 桌面索引里有名字的线程，和 Windows App 左侧列表保持一致。</div>
+            <div class="notice">这里只展示在 Codex 桌面索引里有名字的线程，和 Codex Desktop App 左侧列表保持一致。</div>
             <div class="notice" style="margin-top: 12px;">最短路径：找到目标 thread，然后把 <code>/thread 019d1da4</code> 这样的命令发给飞书机器人，或直接到“通道”页切换绑定。</div>
             <div class="small" id="desktopSessionMeta" style="margin: 14px 0 16px;">正在加载…</div>
             <div class="session-list" id="desktopSessionsList"></div>
@@ -1462,7 +1540,7 @@ function renderHtml(): string {
             <div class="panel-header">
               <div>
                 <h2>基础配置</h2>
-                <p>保存后会写入本地配置目录；涉及运行时的选项通常需要重启 Bridge 才生效。</p>
+                <p>保存后会写入本地配置目录。默认目录、默认工作空间、Sandbox、思考级别等会在下一次请求生效；通道启停会自动同步；只有少数运行时配置需要重启 Bridge。</p>
               </div>
               <div class="toolbar">
                 <button class="primary" id="saveConfigBtn">保存配置</button>
@@ -1497,9 +1575,35 @@ function renderHtml(): string {
                 <input id="defaultWorkDir" placeholder="D:\\workspace\\project" />
               </label>
               <label>
+                默认工作空间
+                <input id="defaultWorkspaceRoot" placeholder="留空时使用 ~/cx2im" />
+              </label>
+              <label>
                 默认模型
                 <input id="defaultModel" placeholder="留空则使用 runtime 默认模型" />
               </label>
+              <div class="field-row">
+                <label>
+                  Codex 文件系统权限
+                  <select id="codexSandboxMode">
+                    <option value="workspace-write">workspace-write</option>
+                    <option value="read-only">read-only</option>
+                    <option value="danger-full-access">danger-full-access</option>
+                  </select>
+                </label>
+                <label>
+                  Codex 思考级别
+                  <select id="codexReasoningEffort">
+                    <option value="medium">medium</option>
+                    <option value="minimal">minimal</option>
+                    <option value="low">low</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                  </select>
+                </label>
+              </div>
+              <div class="small">“默认工作目录”用于新会话默认 cwd；“默认工作空间”用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。</div>
+              <div class="small">当前需要重启 Bridge 的配置：<code>Runtime</code>、<code>自动批准工具权限</code>、<code>允许在未信任 Git 目录运行 Codex</code>、飞书 <code>App ID</code>/<code>App Secret</code>/<code>Domain</code>。</div>
               <div class="checkbox-row">
                 <label class="checkbox"><input id="channelFeishu" type="checkbox" checked /> 启用飞书</label>
                 <label class="checkbox"><input id="channelWeixin" type="checkbox" /> 启用微信</label>
@@ -1553,45 +1657,42 @@ function renderHtml(): string {
               </div>
             </div>
 
-            <div class="notice" style="margin-bottom: 16px;">最短使用路径：先发 <code>/threads</code> 查看最近桌面会话，再发 <code>/thread 1</code> 接管；之后直接发送文本即可继续当前会话。</div>
+            <div class="notice" style="margin-bottom: 16px;">最短使用路径：先发 <code>/t</code> 查看最近会话，再发 <code>/t 1</code> 接管；之后直接发送文本即可继续当前会话。这里保留原始命令，仅用于后台查阅和兼容旧用法。</div>
 
             <div class="command-sections">
               <section class="command-section">
                 <h3 class="command-section-title">最常用</h3>
                 <div class="command-list">
-                  <div class="command-item"><code>/help</code><div>查看完整命令说明。</div></div>
-                  <div class="command-item"><code>/threads</code><div>列出最近桌面会话。</div></div>
-                  <div class="command-item"><code>/thread &lt;thread-id | 序号&gt;</code><div>绑定桌面 thread，接管桌面会话。</div></div>
-                  <div class="command-item"><code>直接发送文本</code><div>继续当前已绑定会话。</div></div>
-                  <div class="command-item"><code>/status</code><div>查看当前聊天绑定到了哪条会话、thread、目录和模式。</div></div>
-                  <div class="command-item"><code>/history</code><div>查看当前会话最近 N 条消息。</div></div>
+                  <div class="command-list-head"><div>命令</div><div>原始命令</div><div>说明</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/</code></div><div class="command-col-original"><code>/status</code></div><div class="command-col-desc">查看当前会话。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/h</code></div><div class="command-col-original"><code>/help</code></div><div class="command-col-desc">查看帮助。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/t</code></div><div class="command-col-original"><code>/threads</code></div><div class="command-col-desc">列出最近桌面会话。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/t &lt;序号&gt;</code></div><div class="command-col-original"><code>/thread &lt;序号&gt;</code></div><div class="command-col-desc">按序号接管桌面会话。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/n [绝对路径 | 项目名]</code></div><div class="command-col-original"><code>/new [绝对路径 | 项目名]</code></div><div class="command-col-desc">新建会话；相对项目名会在“默认工作空间”下创建目录。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>直接发送文本</code></div><div class="command-col-original">—</div><div class="command-col-desc">继续当前已绑定会话。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/his</code></div><div class="command-col-original"><code>/history</code></div><div class="command-col-desc">查看当前会话整理后的摘要。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/his raw</code></div><div class="command-col-original"><code>/history raw</code></div><div class="command-col-desc">查看最近 N 条原始消息。</div></div>
                 </div>
               </section>
 
               <section class="command-section">
-                <h3 class="command-section-title">切换与绑定</h3>
+                <h3 class="command-section-title">设置与切换</h3>
                 <div class="command-list">
-                  <div class="command-item"><code>/sessions</code><div>列出内部会话。</div></div>
-                  <div class="command-item"><code>/use &lt;session-id | 序号&gt;</code><div>切换到已有内部会话。</div></div>
-                  <div class="command-item"><code>/bind &lt;session-id | thread-id | 序号&gt;</code><div>智能绑定，兼容旧用法；可绑定内部会话或桌面 thread。</div></div>
-                </div>
-              </section>
-
-              <section class="command-section">
-                <h3 class="command-section-title">会话设置</h3>
-                <div class="command-list">
-                  <div class="command-item"><code>/new [绝对路径]</code><div>新建会话；可选地指定工作目录。</div></div>
-                  <div class="command-item"><code>/cwd /path/to/project</code><div>修改当前会话工作目录。</div></div>
-                  <div class="command-item"><code>/mode plan|code|ask</code><div>修改当前会话模式。</div></div>
-                  <div class="command-item"><code>/stop</code><div>停止当前任务。</div></div>
+                  <div class="command-list-head"><div>命令</div><div>原始命令</div><div>说明</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/m</code></div><div class="command-col-original"><code>/mode</code></div><div class="command-col-desc">查看当前模式；可选 <code>code</code>、<code>plan</code>、<code>ask</code>。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/r</code></div><div class="command-col-original"><code>/reasoning</code></div><div class="command-col-desc">查看当前思考级别；可选 <code>0=minimal</code>、<code>1=low</code>、<code>2=medium</code>、<code>3=high</code>、<code>4/5=xhigh</code>。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/t 0</code></div><div class="command-col-original"><code>/thread 0</code></div><div class="command-col-desc">切换到当前聊天的临时草稿线程。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/t 0 reset</code></div><div class="command-col-original"><code>/thread 0 reset</code></div><div class="command-col-desc">丢弃当前草稿上下文并重建一条新的草稿线程。</div></div>
+                  <div class="command-item"><div class="command-col-command">—</div><div class="command-col-original"><code>/stop</code></div><div class="command-col-desc">停止当前任务。</div></div>
                 </div>
               </section>
 
               <section class="command-section">
                 <h3 class="command-section-title">权限</h3>
                 <div class="command-list">
-                  <div class="command-item"><code>/perm allow|allow_session|deny &lt;id&gt;</code><div>文本方式处理一个待批准权限。</div></div>
-                  <div class="command-item"><code>1 / 2 / 3</code><div>快速处理单个待批准权限。</div></div>
+                  <div class="command-list-head"><div>命令</div><div>原始命令</div><div>说明</div></div>
+                  <div class="command-item"><div class="command-col-command">—</div><div class="command-col-original"><code>/perm allow|allow_session|deny &lt;id&gt;</code></div><div class="command-col-desc">文本方式处理一个待批准权限。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>1 / 2 / 3</code></div><div class="command-col-original">—</div><div class="command-col-desc">快速处理单个待批准权限。</div></div>
                 </div>
               </section>
             </div>
@@ -1650,7 +1751,12 @@ function renderHtml(): string {
                 <div class="checkbox-row">
                   <label class="checkbox"><input id="feishuStreamingEnabled" type="checkbox" checked /> 启用飞书流式响应卡片</label>
                 </div>
+                <div class="checkbox-row">
+                  <label class="checkbox"><input id="feishuCommandMarkdownEnabled" type="checkbox" checked /> 命令反馈使用 Markdown</label>
+                </div>
                 <div class="small">需要飞书侧已开通可更新卡片的相关能力；如果权限不足，会自动回退为最终结果消息。</div>
+                <div class="small">只影响 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈，不影响 Codex 原始回复。</div>
+                <div class="small">修改飞书 <code>App ID</code>、<code>App Secret</code>、<code>Domain</code> 后，需要重启 Bridge 让客户端重新初始化；白名单、流式开关、Markdown 开关会即时生效。</div>
               </div>
 
               <div class="panel-block">
@@ -1685,7 +1791,11 @@ function renderHtml(): string {
                 <div class="checkbox-row">
                   <label class="checkbox"><input id="weixinMediaEnabled" type="checkbox" /> 启用图片 / 文件 / 视频入站下载</label>
                 </div>
+                <div class="checkbox-row">
+                  <label class="checkbox"><input id="weixinCommandMarkdownEnabled" type="checkbox" /> 命令反馈使用 Markdown</label>
+                </div>
               </div>
+              <div class="small">只影响 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈，不影响 Codex 原始回复。默认关闭。</div>
               <div class="panel-block">
                 <p class="panel-subtitle">通道状态</p>
                 <div class="small" id="weixinRuntimeMeta">正在加载…</div>
@@ -1818,8 +1928,11 @@ function renderHtml(): string {
           defaultMode: document.getElementById('defaultMode').value,
           historyMessageLimit: document.getElementById('historyMessageLimit').value,
           defaultWorkDir: document.getElementById('defaultWorkDir').value,
+          defaultWorkspaceRoot: document.getElementById('defaultWorkspaceRoot').value,
           defaultModel: document.getElementById('defaultModel').value,
           codexSkipGitRepoCheck: document.getElementById('codexSkipGitRepoCheck').checked,
+          codexSandboxMode: document.getElementById('codexSandboxMode').value,
+          codexReasoningEffort: document.getElementById('codexReasoningEffort').value,
           uiAllowLan: document.getElementById('uiAllowLan').checked,
           uiAccessToken: document.getElementById('uiAccessToken').value,
           enabledChannels: enabledChannelsFromForm(),
@@ -1829,15 +1942,19 @@ function renderHtml(): string {
           feishuDomain: document.getElementById('feishuDomain').value,
           feishuAllowedUsers: document.getElementById('feishuAllowedUsers').value,
           feishuStreamingEnabled: document.getElementById('feishuStreamingEnabled').checked,
+          feishuCommandMarkdownEnabled: document.getElementById('feishuCommandMarkdownEnabled').checked,
           weixinMediaEnabled: document.getElementById('weixinMediaEnabled').checked,
+          weixinCommandMarkdownEnabled: document.getElementById('weixinCommandMarkdownEnabled').checked,
         };
       }
 
       function showMessage(id, type, message) {
         const node = document.getElementById(id);
-        if (!node) return;
-        node.className = 'message show ' + type;
-        node.textContent = message;
+        if (node) {
+          node.className = 'message';
+          node.textContent = '';
+        }
+        showGlobalMessage(type, message);
       }
 
       function showGlobalMessage(type, message) {
@@ -1846,7 +1963,16 @@ function renderHtml(): string {
 
         const item = document.createElement('div');
         item.className = 'global-message ' + (type || 'success');
-        item.textContent = message;
+        const icon = document.createElement('span');
+        icon.className = 'global-message-icon';
+        icon.textContent = type === 'error' ? '!' : '✓';
+
+        const content = document.createElement('div');
+        content.className = 'global-message-content';
+        content.textContent = message;
+
+        item.appendChild(icon);
+        item.appendChild(content);
         host.appendChild(item);
 
         window.setTimeout(() => {
@@ -1973,11 +2099,136 @@ function renderHtml(): string {
         return Boolean(state.bridgeStatus && state.bridgeStatus.running && runningChannels().includes(channelType));
       }
 
-      function bridgeNeedsRestart() {
-        if (!state.config || !state.bridgeStatus || !state.bridgeStatus.running) return false;
-        const configured = (state.config.enabledChannels || []).slice().sort().join(',');
-        const running = runningChannels().slice().sort().join(',');
-        return configured !== running;
+      const CONFIG_FIELD_LABELS = {
+        runtime: 'Runtime',
+        enabledChannels: '通道启用状态',
+        defaultWorkDir: '默认工作目录',
+        defaultWorkspaceRoot: '默认工作空间',
+        defaultModel: '默认模型',
+        defaultMode: '默认模式',
+        historyMessageLimit: '/history 返回条数',
+        codexSkipGitRepoCheck: '允许在未信任 Git 目录运行 Codex',
+        codexSandboxMode: 'Codex 文件系统权限',
+        codexReasoningEffort: 'Codex 思考级别',
+        uiAllowLan: '允许局域网访问 Web 控制台',
+        uiAccessToken: '局域网访问 token',
+        autoApprove: '自动批准工具权限',
+        feishuAppId: '飞书 App ID',
+        feishuAppSecret: '飞书 App Secret',
+        feishuDomain: '飞书 Domain',
+        feishuAllowedUsers: '飞书 Allowed Users',
+        feishuStreamingEnabled: '飞书流式响应卡片',
+        feishuCommandMarkdownEnabled: '飞书命令 Markdown',
+        weixinMediaEnabled: '微信图片/文件/视频入站下载',
+        weixinCommandMarkdownEnabled: '微信命令 Markdown',
+      };
+
+      const BRIDGE_RESTART_FIELDS = new Set([
+        'runtime',
+        'codexSkipGitRepoCheck',
+        'autoApprove',
+        'feishuAppId',
+        'feishuAppSecret',
+        'feishuDomain',
+      ]);
+
+      const AUTO_SYNC_FIELDS = new Set([
+        'enabledChannels',
+      ]);
+
+      const IMMEDIATE_FIELDS = new Set([
+        'defaultWorkDir',
+        'defaultWorkspaceRoot',
+        'defaultModel',
+        'defaultMode',
+        'historyMessageLimit',
+        'codexSandboxMode',
+        'codexReasoningEffort',
+        'uiAllowLan',
+        'uiAccessToken',
+        'feishuAllowedUsers',
+        'feishuStreamingEnabled',
+        'feishuCommandMarkdownEnabled',
+        'weixinMediaEnabled',
+        'weixinCommandMarkdownEnabled',
+      ]);
+
+      const SAVE_SCOPE_FIELDS = {
+        all: null,
+        feishu: new Set([
+          'enabledChannels',
+          'feishuAppId',
+          'feishuAppSecret',
+          'feishuDomain',
+          'feishuAllowedUsers',
+          'feishuStreamingEnabled',
+          'feishuCommandMarkdownEnabled',
+        ]),
+        weixin: new Set([
+          'enabledChannels',
+          'weixinMediaEnabled',
+          'weixinCommandMarkdownEnabled',
+        ]),
+      };
+
+      function normalizeConfigValue(value) {
+        if (Array.isArray(value)) {
+          return value.slice().map((item) => String(item)).sort().join('|');
+        }
+        if (value === undefined || value === null) return '';
+        if (typeof value === 'boolean') return value ? 'true' : 'false';
+        return String(value);
+      }
+
+      function listChangedConfigFields(before, after, scope) {
+        const allowedFields = SAVE_SCOPE_FIELDS[scope] || null;
+        const keys = new Set([
+          ...Object.keys(before || {}),
+          ...Object.keys(after || {}),
+        ]);
+
+        return Array.from(keys).filter((key) => {
+          if (allowedFields && !allowedFields.has(key)) return false;
+          return normalizeConfigValue(before ? before[key] : undefined) !== normalizeConfigValue(after ? after[key] : undefined);
+        });
+      }
+
+      function formatFieldLabels(fields) {
+        return fields
+          .map((field) => CONFIG_FIELD_LABELS[field] || field)
+          .join('、');
+      }
+
+      function buildConfigSaveMessage(before, after, scope) {
+        const changed = listChangedConfigFields(before, after, scope);
+        if (changed.length === 0) {
+          return '配置未变更。';
+        }
+
+        const restartFields = changed.filter((field) => BRIDGE_RESTART_FIELDS.has(field));
+        const autoSyncFields = changed.filter((field) => AUTO_SYNC_FIELDS.has(field));
+        const immediateFields = changed.filter((field) => IMMEDIATE_FIELDS.has(field));
+        const notes = [];
+
+        if (immediateFields.length > 0) {
+          notes.push('已即时生效：' + formatFieldLabels(immediateFields));
+        }
+        if (autoSyncFields.length > 0) {
+          notes.push(
+            (state.bridgeStatus && state.bridgeStatus.running)
+              ? '会在几秒内自动同步：' + formatFieldLabels(autoSyncFields)
+              : '会在下次启动 Bridge 时生效：' + formatFieldLabels(autoSyncFields),
+          );
+        }
+        if (restartFields.length > 0) {
+          notes.push(
+            (state.bridgeStatus && state.bridgeStatus.running)
+              ? '需要重启 Bridge 后生效：' + formatFieldLabels(restartFields)
+              : '会在下次启动 Bridge 时生效：' + formatFieldLabels(restartFields),
+          );
+        }
+
+        return '配置已保存。' + (notes.length > 0 ? ' ' + notes.join('；') + '。' : '');
       }
 
       function channelLabel(channelType) {
@@ -2058,6 +2309,30 @@ function renderHtml(): string {
         return marks;
       }
 
+      function bindingRuntimeText(binding) {
+        const status = binding.runtimeStatus || 'idle';
+        const queuedCount = Number(binding.queuedCount || 0);
+        if (status === 'queued') {
+          return queuedCount > 0 ? '排队中（' + queuedCount + '）' : '排队中';
+        }
+        if (status === 'running') {
+          return '运行中';
+        }
+        return '空闲';
+      }
+
+      function bindingMirrorText(binding) {
+        if (binding.mirrorStatus === 'watching') {
+          return binding.mirrorLastEventAt
+            ? '监听中 · 最近同步 ' + formatTime(binding.mirrorLastEventAt)
+            : '监听中';
+        }
+        if (binding.mirrorStatus === 'stale') {
+          return '待恢复（暂时没定位到桌面 thread 文件）';
+        }
+        return '未监听';
+      }
+
       function renderDesktopSessionCard(session) {
         const feishuSwitch = quickSwitchState('feishu');
         const weixinSwitch = quickSwitchState('weixin');
@@ -2101,7 +2376,7 @@ function renderHtml(): string {
 
         const list = document.getElementById('desktopSessionsList');
         if (state.desktopSessions.length === 0) {
-          list.innerHTML = '<div class="notice ghost">当前没有发现桌面端会话。先在 Codex Windows App 中打开或运行一个会话，再回到这里刷新。</div>';
+          list.innerHTML = '<div class="notice ghost">当前没有发现桌面端会话。先在 Codex Desktop App 中打开或运行一个会话，再回到这里刷新。</div>';
           rerenderBindingPanels();
           return;
         }
@@ -2170,6 +2445,8 @@ function renderHtml(): string {
             +   '<div class="binding-detail">当前会话：<code>' + escapeHtml(binding.currentSessionId.slice(0, 8)) + '...</code> · ' + escapeHtml(binding.currentSessionName) + '</div>'
             +   '<div class="binding-detail">当前目标：' + escapeHtml(binding.currentTargetLabel || '未绑定') + '</div>'
             +   '<div class="binding-detail">当前 thread：<code>' + escapeHtml(binding.currentThreadId || 'not-shared') + '</code></div>'
+            +   '<div class="binding-detail">运行状态：' + escapeHtml(bindingRuntimeText(binding)) + '</div>'
+            +   '<div class="binding-detail">共享镜像：' + escapeHtml(bindingMirrorText(binding)) + '</div>'
             +   '<div class="binding-detail">目录：' + escapeHtml(binding.workingDirectory || '~') + '</div>'
             +   renderBindingTable(binding)
             + '</article>';
@@ -2271,8 +2548,11 @@ function renderHtml(): string {
         document.getElementById('defaultMode').value = config.defaultMode || 'code';
         document.getElementById('historyMessageLimit').value = String(config.historyMessageLimit || 8);
         document.getElementById('defaultWorkDir').value = config.defaultWorkDir || '';
+        document.getElementById('defaultWorkspaceRoot').value = config.defaultWorkspaceRoot || '';
         document.getElementById('defaultModel').value = config.defaultModel || '';
         document.getElementById('codexSkipGitRepoCheck').checked = config.codexSkipGitRepoCheck === true;
+        document.getElementById('codexSandboxMode').value = config.codexSandboxMode || 'workspace-write';
+        document.getElementById('codexReasoningEffort').value = config.codexReasoningEffort || 'medium';
         document.getElementById('uiAllowLan').checked = config.uiAllowLan === true;
         document.getElementById('uiAccessToken').value = config.uiAccessToken || '';
         document.getElementById('channelFeishu').checked = (config.enabledChannels || []).includes('feishu');
@@ -2283,7 +2563,9 @@ function renderHtml(): string {
         document.getElementById('feishuDomain').value = config.feishuDomain || 'https://open.feishu.cn';
         document.getElementById('feishuAllowedUsers').value = config.feishuAllowedUsers || '';
         document.getElementById('feishuStreamingEnabled').checked = config.feishuStreamingEnabled !== false;
+        document.getElementById('feishuCommandMarkdownEnabled').checked = config.feishuCommandMarkdownEnabled !== false;
         document.getElementById('weixinMediaEnabled').checked = config.weixinMediaEnabled === true;
+        document.getElementById('weixinCommandMarkdownEnabled').checked = config.weixinCommandMarkdownEnabled === true;
         renderUiAccess();
         rerenderDesktopSessions();
       }
@@ -2338,19 +2620,21 @@ function renderHtml(): string {
         renderBindings(result);
       }
 
-      async function saveConfig() {
+      async function saveConfig(options) {
+        const opts = options || {};
+        const beforeConfig = state.config || {};
         const saved = await api('/api/config', {
           method: 'POST',
           body: JSON.stringify(formPayload()),
         });
         fillForm(saved.config);
-        showMessage(
-          'configMessage',
-          'success',
-          bridgeNeedsRestart()
-            ? '配置已保存。Bridge 会在几秒内自动同步通道配置；如果页面还没更新，可手动点“刷新状态”。'
-            : '配置已保存。'
-        );
+        if (opts.messageId) {
+          showMessage(
+            opts.messageId,
+            'success',
+            buildConfigSaveMessage(beforeConfig, saved.config, opts.scope || 'all'),
+          );
+        }
         return saved;
       }
 
@@ -2403,7 +2687,7 @@ function renderHtml(): string {
 
       document.getElementById('saveConfigBtn').addEventListener('click', async () => {
         try {
-          await saveConfig();
+          await saveConfig({ messageId: 'configMessage', scope: 'all' });
           await loadStatus();
           await loadBindings();
         } catch (error) {
@@ -2413,16 +2697,9 @@ function renderHtml(): string {
 
       document.getElementById('saveFeishuChannelBtn').addEventListener('click', async () => {
         try {
-          await saveConfig();
+          await saveConfig({ messageId: 'feishuMessage', scope: 'feishu' });
           await loadStatus();
           await loadBindings();
-          showMessage(
-            'feishuMessage',
-            'success',
-            bridgeNeedsRestart()
-              ? '飞书配置已保存。Bridge 会在几秒内自动同步通道配置；如果页面还没更新，可手动点“刷新状态”。'
-              : '飞书配置已保存。'
-          );
         } catch (error) {
           showMessage('feishuMessage', 'error', error.message);
         }
@@ -2453,16 +2730,9 @@ function renderHtml(): string {
 
       document.getElementById('saveWeixinChannelBtn').addEventListener('click', async () => {
         try {
-          await saveConfig();
+          await saveConfig({ messageId: 'weixinMessage', scope: 'weixin' });
           await loadStatus();
           await loadBindings();
-          showMessage(
-            'weixinMessage',
-            'success',
-            bridgeNeedsRestart()
-              ? '微信配置已保存。Bridge 会在几秒内自动同步通道配置；如果页面还没更新，可手动点“刷新状态”。'
-              : '微信配置已保存。'
-          );
         } catch (error) {
           showMessage('weixinMessage', 'error', error.message);
         }
@@ -2660,6 +2930,10 @@ function renderHtml(): string {
       Promise.all([loadStatus(), loadBindings(), loadDesktopSessions(), loadLogs()]).catch((error) => {
         showMessage('opsMessage', 'error', error.message);
       });
+
+      setInterval(() => {
+        loadBindings().catch(() => {});
+      }, 4000);
     </script>
   </body>
 </html>`;

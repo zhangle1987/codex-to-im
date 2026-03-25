@@ -81,13 +81,54 @@ class InMemoryStore implements BridgeStore {
     return Array.from(this.sessions.values()).find((session) => session.sdk_session_id === sdkSessionId) ?? null;
   }
 
-  createSession(name: string, model: string, _sp?: string, cwd?: string) {
-    const session: BridgeSession = { id: `session-${this.nextId++}`, name, working_directory: cwd || '/tmp', model };
+  createSession(
+    name: string,
+    model: string,
+    _sp?: string,
+    cwd?: string,
+    _mode?: string,
+    options?: {
+      reasoningEffort?: BridgeSession['reasoning_effort'];
+      sessionType?: BridgeSession['session_type'];
+      hidden?: boolean;
+      parentSessionId?: string;
+      expiresAt?: string;
+    },
+  ) {
+    const now = new Date().toISOString();
+    const session: BridgeSession = {
+      id: `session-${this.nextId++}`,
+      name,
+      working_directory: cwd || '/tmp',
+      model,
+      preferred_mode: (_mode as BridgeSession['preferred_mode']) || 'code',
+      reasoning_effort: options?.reasoningEffort,
+      session_type: options?.sessionType || 'normal',
+      hidden: options?.hidden === true,
+      parent_session_id: options?.parentSessionId,
+      expires_at: options?.expiresAt,
+      created_at: now,
+      updated_at: now,
+    };
     this.sessions.set(session.id, session);
     return session;
   }
 
   updateSessionProviderId() {}
+  updateSession(sessionId: string, updates: Partial<BridgeSession>) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.set(sessionId, { ...session, ...updates, id: session.id, updated_at: new Date().toISOString() });
+  }
+  deleteSession(sessionId: string) {
+    this.sessions.delete(sessionId);
+    this.messages.delete(sessionId);
+    for (const [key, binding] of this.bindings) {
+      if (binding.codepilotSessionId === sessionId) {
+        this.bindings.delete(key);
+      }
+    }
+  }
   addMessage(sessionId: string, role: string, content: string) {
     const msgs = this.messages.get(sessionId) || [];
     msgs.push({ role, content });

@@ -176,23 +176,34 @@ codex-to-im stop
    - 推荐：`codex`
 2. 设置默认工作目录
 3. 设置 `/history` 默认返回条数（可选）
-4. 如果目标目录不是 Codex 已信任的 Git 仓库，可勾选“允许在未信任 Git 目录运行 Codex”
-5. 如果要从局域网设备访问配置页，可勾选“允许局域网访问 Web 控制台”
-6. 勾选要启用的通道
+4. 设置默认工作空间
+   - 用于 `/new proj1` 这类相对项目名
+   - 留空时自动回退到 `~/cx2im`，并按当前系统展开为实际路径
+5. 选择 Codex 文件系统权限
+   - 默认推荐 `workspace-write`
+6. 选择 Codex 思考级别
+   - 默认推荐 `medium`
+   - 官方仅有 5 个级别：`minimal`、`low`、`medium`、`high`、`xhigh`
+   - 如果这台机器就是你自己的本地开发机，希望 `codex-to-im` 直接承担更强的编码执行能力，建议改成：
+     - 文件系统权限：`danger-full-access`
+     - 思考级别：`xhigh`
+7. 如果目标目录不是 Codex 已信任的 Git 仓库，可勾选“允许在未信任 Git 目录运行 Codex”
+8. 如果要从局域网设备访问配置页，可勾选“允许局域网访问 Web 控制台”
+9. 勾选要启用的通道
    - 飞书：勾选 `启用飞书`
    - 微信：勾选 `启用微信`
-7. 飞书场景下填写：
+10. 飞书场景下填写：
    - `App ID`
    - `App Secret`
    - `Domain`
    - `Allowed Users` 可选
    - `启用飞书流式响应卡片` 可选
-8. 微信场景下点击：
+11. 微信场景下点击：
    - `开始微信扫码`
-9. 点击测试
+12. 点击测试
    - 飞书：`测试飞书凭据`
    - Codex：`测试 Codex`
-10. 点击：
+13. 点击：
     - `启动 Bridge`
 
 说明：
@@ -206,6 +217,22 @@ codex-to-im stop
 - 缺权限时，`logs\\bridge.log` 里通常会出现 `99991672` 和 `cardkit:card:write`。
 - 另外，当前 `codex` runtime 下正文通常不是逐字流式输出；更常见的效果是先显示 `Thinking / Tool Progress`，正文在回答完成时一次性落到卡片里。
 - IM 里发送 `/history` 可以查看当前会话最近 N 条消息，N 由“基础配置”中的返回条数控制。
+- IM 里发送 `/history` 默认返回整理后的摘要；发送 `/history raw` 才会查看最近 N 条原始消息。
+- IM 里发送 `/reasoning high` 或 `/reasoning 2` 之类命令，可以只对当前会话覆盖思考级别。
+- IM 里发送 `/thread 0` 会进入临时草稿线程，适合短讨论或临时想法。
+- “通道”页里可以分别控制“命令反馈使用 Markdown”：
+  - 飞书默认开启
+  - 微信默认关闭
+  - 只影响 `/h`、`/status`、`/threads` 这类系统反馈，不影响 Codex 原始回复
+- IM 里也支持一组短命令别名：
+- `/` / `/status` 当前会话
+- `/h` / `/help` 帮助
+- `/t` / `/threads` 最近桌面会话，`/t 1` / `/thread 1` 接管
+- `/n proj1` / `/new proj1` 新建项目会话
+- `/m` / `/mode` 查看或切换模式，可选 `code` / `plan` / `ask`
+- `/r` / `/reasoning` 查看或切换思考级别，也支持 `0|1|2|3|4|5`
+- `/his` / `/history` 历史摘要，`/his raw` / `/history raw` 原始记录
+- `/t 0` / `/thread 0` 临时草稿线程
 - 如果 `测试 Codex` 失败，优先检查当前 Windows 用户下是否已经存在可用的 Codex 登录态或 API Key。
 - 如果开启了局域网访问，建议直接从本机工作台复制局域网登录链接，再发给手机或其他设备打开。
 

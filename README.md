@@ -38,13 +38,13 @@ Windows host installation guide: [docs/install-windows.md](D:/codex/Claude-to-IM
 ### Prerequisites
 
 - Node.js 20+
-- If you use the `codex` or `auto` runtime, complete Codex authentication under the same Windows user
+- If you use the `codex` or `auto` runtime, complete Codex authentication under the same OS user account
 
 `codex-to-im` now ships with the required `@openai/codex-sdk` / Codex CLI platform dependency, so you do not need to install a separate global Codex CLI just to run the bridge.
 
 You still need Codex credentials to be available for the current user. Any of these is sufficient:
 
-- a logged-in Codex Windows App
+- a logged-in Codex Desktop App
 - an existing Codex CLI login state
 - `CTI_CODEX_API_KEY`, `CODEX_API_KEY`, or `OPENAI_API_KEY`
 
@@ -125,10 +125,19 @@ codex-to-im stop
 
 If LAN access is enabled, the easiest path is to copy the LAN login link from the local workbench and open it on your phone or another device on the same network.
 
-Useful command:
+Useful commands:
 
-- `/history` shows the latest N messages of the current session
+- `/` / `/status` shows the current session
+- `/h` / `/help` shows help
+- `/t` / `/threads` lists recent desktop threads, and `/t 1` / `/thread 1` binds the first one
+- `/n proj1` / `/new proj1` creates a new project session under the default workspace root
+- `/m` / `/mode` shows or changes the current mode; options: `code` / `plan` / `ask`
+- `/r` / `/reasoning` shows or changes the current reasoning effort; options: `0|1|2|3|4|5`
+- `/his` / `/history` shows the summarized history, and `/his raw` / `/history raw` shows raw history
+- `/t 0` / `/thread 0` enters a temporary draft thread that does not pollute the main work thread
+- `1 / 2 / 3` or `/perm ...` handles permission prompts
 - N is configurable in the web workbench under the basic settings panel
+- The workbench command guide shows both short commands and compatible original commands
 
 If you enable Feishu streaming response cards, the Feishu app must have the required permissions published first, at minimum:
 
@@ -149,6 +158,33 @@ If creating a new session fails with `Not inside a trusted directory`, either:
 
 - change the default working directory to a trusted Git repo, or
 - enable `Allow Codex outside trusted Git repos` in the basic settings and restart the bridge
+
+The configuration page also includes Codex runtime controls:
+
+- `Default workspace root`
+  - parent directory used for `/new proj1`
+  - falls back to `~/cx2im` when left empty, expanded for the current OS
+- `Codex filesystem permission`
+  - `read-only`, `workspace-write`, or `danger-full-access`
+  - default: `workspace-write`
+- `Codex reasoning effort`
+  - global default reasoning level
+  - can be overridden per IM session with `/reasoning`
+  - official runtime levels are `minimal`, `low`, `medium`, `high`, `xhigh`
+  - IM numeric aliases are `0=minimal`, `1=low`, `2=medium`, `3=high`, `4/5=xhigh`
+
+If you are using `codex-to-im` on your own development machine for real coding work, the more aggressive recommended setup is:
+
+- set `Codex filesystem permission` to `danger-full-access`
+- set `Codex reasoning effort` to `xhigh`
+
+This is closer to a full-power `code` workflow. It fits a controlled local project, but is not a good default for unknown repositories or higher-risk environments.
+
+The channel pages also expose a “Use Markdown for command feedback” switch:
+- enabled by default for Feishu
+- disabled by default for WeChat
+- only affects bridge-generated feedback such as `/h`, `/status`, and `/threads`
+- does not affect raw Codex replies
 
 ## Update
 

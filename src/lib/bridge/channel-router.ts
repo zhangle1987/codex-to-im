@@ -61,7 +61,7 @@ export function createBinding(
     sdkSessionId: '',
     workingDirectory: defaultCwd,
     model: defaultModel,
-    mode: 'code',
+    mode: session.preferred_mode || 'code',
   });
 }
 

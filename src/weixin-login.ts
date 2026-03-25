@@ -142,7 +142,7 @@ function openQrHtml(): boolean {
       return true;
     }
     if (process.platform === 'win32') {
-      const child = spawn('cmd', ['/c', 'start', '', HTML_PATH], { detached: true, stdio: 'ignore' });
+      const child = spawn('cmd', ['/c', 'start', '', HTML_PATH], { detached: true, stdio: 'ignore', windowsHide: true });
       child.unref();
       return true;
     }

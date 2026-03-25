@@ -83,12 +83,14 @@ describe('configToSettings', () => {
       feishuDomain: 'example.com',
       feishuAllowedUsers: ['fu1'],
       feishuStreamingEnabled: false,
+      feishuCommandMarkdownEnabled: true,
     });
     assert.equal(m.get('bridge_feishu_app_id'), 'app-id');
     assert.equal(m.get('bridge_feishu_app_secret'), 'app-secret');
     assert.equal(m.get('bridge_feishu_domain'), 'example.com');
     assert.equal(m.get('bridge_feishu_allowed_users'), 'fu1');
     assert.equal(m.get('bridge_feishu_streaming_enabled'), 'false');
+    assert.equal(m.get('bridge_feishu_command_markdown_enabled'), 'true');
   });
 
   it('sets bridge_qq_enabled based on enabledChannels', () => {
@@ -135,11 +137,13 @@ describe('configToSettings', () => {
       weixinBaseUrl: 'https://example.weixin.test',
       weixinCdnBaseUrl: 'https://cdn.weixin.test',
       weixinMediaEnabled: true,
+      weixinCommandMarkdownEnabled: false,
     });
     assert.equal(m.get('bridge_weixin_enabled'), 'true');
     assert.equal(m.get('bridge_weixin_base_url'), 'https://example.weixin.test');
     assert.equal(m.get('bridge_weixin_cdn_base_url'), 'https://cdn.weixin.test');
     assert.equal(m.get('bridge_weixin_media_enabled'), 'true');
+    assert.equal(m.get('bridge_weixin_command_markdown_enabled'), 'false');
   });
 
   it('omits qq image settings when not set', () => {
@@ -173,9 +177,24 @@ describe('configToSettings', () => {
     assert.equal(m.get('bridge_history_message_limit'), '12');
   });
 
+  it('maps default workspace root', () => {
+    const m = configToSettings({ ...base, defaultWorkspaceRoot: '/tmp/workspace' });
+    assert.equal(m.get('bridge_default_workspace_root'), '/tmp/workspace');
+  });
+
   it('maps codex skip git repo check flag', () => {
     const m = configToSettings({ ...base, codexSkipGitRepoCheck: true });
     assert.equal(m.get('bridge_codex_skip_git_repo_check'), 'true');
+  });
+
+  it('maps codex sandbox mode and reasoning effort', () => {
+    const m = configToSettings({
+      ...base,
+      codexSandboxMode: 'danger-full-access',
+      codexReasoningEffort: 'xhigh',
+    });
+    assert.equal(m.get('bridge_codex_sandbox_mode'), 'danger-full-access');
+    assert.equal(m.get('bridge_codex_reasoning_effort'), 'xhigh');
   });
 
   it('maps non-default mode', () => {

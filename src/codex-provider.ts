@@ -16,6 +16,7 @@ import path from 'node:path';
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host.js';
 import type { PendingPermissions } from './permission-gateway.js';
 import { sseEvent } from './sse-utils.js';
+import type { CodexReasoningEffort, CodexSandboxMode } from './config.js';
 
 /** MIME → file extension for temp image files. */
 const MIME_EXT: Record<string, string> = {
@@ -42,6 +43,7 @@ type ThreadInstance = any;
  */
 function toApprovalPolicy(permissionMode?: string): string {
   switch (permissionMode) {
+    case 'never': return 'never';
     case 'acceptEdits': return 'on-failure';
     case 'plan': return 'on-request';
     case 'default': return 'on-request';
@@ -57,6 +59,30 @@ function shouldPassModelToCodex(): boolean {
 /** Allow Codex to run outside a trusted Git repository when explicitly enabled. */
 function shouldSkipGitRepoCheck(): boolean {
   return process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK === 'true';
+}
+
+function normalizeSandboxMode(mode: string | undefined): CodexSandboxMode {
+  if (
+    mode === 'read-only'
+    || mode === 'workspace-write'
+    || mode === 'danger-full-access'
+  ) {
+    return mode;
+  }
+  return 'workspace-write';
+}
+
+function normalizeReasoningEffort(value: string | undefined): CodexReasoningEffort | undefined {
+  if (
+    value === 'minimal'
+    || value === 'low'
+    || value === 'medium'
+    || value === 'high'
+    || value === 'xhigh'
+  ) {
+    return value;
+  }
+  return undefined;
 }
 
 function shouldRetryFreshThread(message: string): boolean {
@@ -126,11 +152,15 @@ export class CodexProvider implements LLMProvider {
 
             const approvalPolicy = toApprovalPolicy(params.permissionMode);
             const passModel = shouldPassModelToCodex();
+            const sandboxMode = normalizeSandboxMode(params.sandboxMode);
+            const modelReasoningEffort = normalizeReasoningEffort(params.modelReasoningEffort);
 
             const threadOptions: Record<string, unknown> = {
               ...(passModel && params.model ? { model: params.model } : {}),
               ...(params.workingDirectory ? { workingDirectory: params.workingDirectory } : {}),
               ...(shouldSkipGitRepoCheck() ? { skipGitRepoCheck: true } : {}),
+              sandboxMode,
+              ...(modelReasoningEffort ? { modelReasoningEffort } : {}),
               approvalPolicy,
             };
 

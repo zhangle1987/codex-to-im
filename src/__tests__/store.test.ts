@@ -39,7 +39,16 @@ describe('JsonFileStore', () => {
     assert.equal(session.system_prompt, 'system prompt');
 
     const fetched = store.getSession(session.id);
-    assert.deepEqual(fetched, session);
+    assert.ok(fetched);
+    assert.equal(fetched.id, session.id);
+    assert.equal(fetched.name, session.name);
+    assert.equal(fetched.model, session.model);
+    assert.equal(fetched.working_directory, session.working_directory);
+    assert.equal(fetched.system_prompt, session.system_prompt);
+    assert.equal(fetched.session_type, 'normal');
+    assert.equal(fetched.hidden, false);
+    assert.ok(fetched.created_at);
+    assert.ok(fetched.updated_at);
   });
 
   it('getSession returns null for unknown id', () => {
@@ -55,6 +64,7 @@ describe('JsonFileStore', () => {
       codepilotSessionId: 'sess-1',
       workingDirectory: '/tmp',
       model: 'model-1',
+      mode: 'code',
     });
     assert.ok(b1.id);
     assert.equal(b1.channelType, 'telegram');
@@ -67,9 +77,11 @@ describe('JsonFileStore', () => {
       codepilotSessionId: 'sess-2',
       workingDirectory: '/tmp/new',
       model: 'model-2',
+      mode: 'ask',
     });
     assert.equal(b2.id, b1.id);
     assert.equal(b2.codepilotSessionId, 'sess-2');
+    assert.equal(b2.mode, 'ask');
   });
 
   it('upsertChannelBinding uses default mode from settings', () => {
@@ -181,6 +193,7 @@ describe('JsonFileStore', () => {
       channelType: 'telegram',
       chatId: '123',
       messageId: 'msg-1',
+      sessionId: 'sess-1',
       toolName: 'bash',
       suggestions: 'allow,deny',
     });
@@ -188,6 +201,7 @@ describe('JsonFileStore', () => {
     assert.ok(link);
     assert.equal(link.permissionRequestId, 'pr-1');
     assert.equal(link.resolved, false);
+    assert.equal(link.sessionId, 'sess-1');
   });
 
   it('markPermissionLinkResolved is atomic', () => {
@@ -197,6 +211,7 @@ describe('JsonFileStore', () => {
       channelType: 'telegram',
       chatId: '123',
       messageId: 'msg-2',
+      sessionId: 'sess-1',
       toolName: 'bash',
       suggestions: '',
     });
@@ -214,6 +229,7 @@ describe('JsonFileStore', () => {
       channelType: 'qq',
       chatId: 'chat-1',
       messageId: 'msg-a',
+      sessionId: 'sess-a',
       toolName: 'Bash',
       suggestions: '',
     });
@@ -222,6 +238,7 @@ describe('JsonFileStore', () => {
       channelType: 'qq',
       chatId: 'chat-1',
       messageId: 'msg-b',
+      sessionId: 'sess-b',
       toolName: 'Read',
       suggestions: '',
     });
@@ -230,6 +247,7 @@ describe('JsonFileStore', () => {
       channelType: 'qq',
       chatId: 'chat-2',
       messageId: 'msg-c',
+      sessionId: 'sess-c',
       toolName: 'Bash',
       suggestions: '',
     });
@@ -315,6 +333,55 @@ describe('JsonFileStore', () => {
     store.updateSessionModel(session.id, 'model-new');
     const updated = store.getSession(session.id);
     assert.equal(updated?.model, 'model-new');
+  });
+
+  it('createSession stores hidden metadata and reasoning effort', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('draft', 'model', undefined, '/tmp', 'ask', {
+      hidden: true,
+      sessionType: 'draft',
+      parentSessionId: 'parent-1',
+      reasoningEffort: 'low',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    });
+    const fetched = store.getSession(session.id);
+    assert.equal(fetched?.hidden, true);
+    assert.equal(fetched?.session_type, 'draft');
+    assert.equal(fetched?.parent_session_id, 'parent-1');
+    assert.equal(fetched?.reasoning_effort, 'low');
+    assert.equal(fetched?.expires_at, '2099-01-01T00:00:00.000Z');
+    assert.equal(fetched?.preferred_mode, 'ask');
+  });
+
+  it('updateSession merges session metadata', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('test', 'model-old', undefined, '/tmp');
+    store.updateSession(session.id, {
+      reasoning_effort: 'high',
+      hidden: true,
+      session_type: 'history_summary',
+    });
+    const updated = store.getSession(session.id);
+    assert.equal(updated?.reasoning_effort, 'high');
+    assert.equal(updated?.hidden, true);
+    assert.equal(updated?.session_type, 'history_summary');
+  });
+
+  it('deleteSession removes the session, bindings, and stored messages', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('test', 'model', undefined, '/tmp');
+    store.upsertChannelBinding({
+      channelType: 'telegram',
+      chatId: 'delete-me',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp',
+      model: 'model',
+    });
+    store.addMessage(session.id, 'user', 'hello');
+    store.deleteSession(session.id);
+    assert.equal(store.getSession(session.id), null);
+    assert.equal(store.getChannelBinding('telegram', 'delete-me'), null);
+    assert.deepEqual(store.getMessages(session.id).messages, []);
   });
 
   // ── Provider (no-op) ──

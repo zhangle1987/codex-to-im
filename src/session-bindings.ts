@@ -31,12 +31,24 @@ export interface BindingSummary {
   currentSessionId: string;
   currentSessionName: string;
   currentThreadId?: string;
+  runtimeStatus?: BridgeSession['runtime_status'];
+  queuedCount?: number;
+  mirrorStatus?: BridgeSession['mirror_status'];
+  mirrorLastEventAt?: string;
 }
 
 function getSessionName(session: BridgeSession): string {
+  if (session.session_type === 'draft') return '临时草稿线程';
+  if (session.session_type === 'history_summary') return '历史摘要线程';
   if (session.name?.trim()) return session.name.trim();
   if (session.working_directory) return path.basename(session.working_directory);
   return session.id.slice(0, 8);
+}
+
+function getSessionMode(store: BridgeStore, session: BridgeSession): ChannelBinding['mode'] {
+  return session.preferred_mode
+    || (store.getSetting('bridge_default_mode') as ChannelBinding['mode'])
+    || 'code';
 }
 
 export function bindStoreToSession(
@@ -55,6 +67,7 @@ export function bindStoreToSession(
     sdkSessionId: session.sdk_session_id || '',
     workingDirectory: session.working_directory,
     model: session.model,
+    mode: getSessionMode(store, session),
   });
 }
 
@@ -67,14 +80,15 @@ export function bindStoreToSdkSession(
 ): ChannelBinding {
   const existing = store.findSessionBySdkSessionId(sdkSessionId);
   if (existing) {
-    return store.upsertChannelBinding({
-      channelType,
-      chatId,
-      codepilotSessionId: existing.id,
-      sdkSessionId,
-      workingDirectory: opts?.workingDirectory || existing.working_directory,
-      model: opts?.model || existing.model,
-    });
+      return store.upsertChannelBinding({
+        channelType,
+        chatId,
+        codepilotSessionId: existing.id,
+        sdkSessionId,
+        workingDirectory: opts?.workingDirectory || existing.working_directory,
+        model: opts?.model || existing.model,
+        mode: getSessionMode(store, existing),
+      });
   }
 
   const workingDirectory = opts?.workingDirectory
@@ -101,6 +115,7 @@ export function bindStoreToSdkSession(
     sdkSessionId,
     workingDirectory: workingDirectory || session.working_directory,
     model: model || session.model,
+    mode: getSessionMode(store, session),
   });
 }
 
@@ -146,6 +161,10 @@ export function listBindingSummaries(store: BridgeStore): BindingSummary[] {
       currentSessionId: binding.codepilotSessionId,
       currentSessionName: session ? getSessionName(session) : binding.codepilotSessionId.slice(0, 8),
       currentThreadId,
+      runtimeStatus: session?.runtime_status,
+      queuedCount: session?.queued_count,
+      mirrorStatus: session?.mirror_status,
+      mirrorLastEventAt: session?.mirror_last_event_at,
     };
   }).sort((a, b) => {
     if (a.channelType !== b.channelType) return a.channelType.localeCompare(b.channelType);

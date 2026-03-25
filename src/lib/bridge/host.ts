@@ -7,6 +7,7 @@
  */
 
 import type { ChannelBinding, ChannelType } from './types.js';
+import type { CodexReasoningEffort, CodexSandboxMode } from '../../config.js';
 
 // ── Bridge-local types (replacing @/types imports) ────────────
 
@@ -71,9 +72,22 @@ export interface BridgeSession {
   name?: string;
   working_directory: string;
   model: string;
+  preferred_mode?: ChannelBinding['mode'];
   system_prompt?: string;
   provider_id?: string;
   sdk_session_id?: string;
+  reasoning_effort?: CodexReasoningEffort;
+  session_type?: 'normal' | 'draft' | 'history_summary';
+  hidden?: boolean;
+  parent_session_id?: string;
+  expires_at?: string;
+  runtime_status?: 'idle' | 'running' | 'queued';
+  queued_count?: number;
+  last_runtime_update_at?: string;
+  mirror_status?: 'inactive' | 'watching' | 'stale';
+  mirror_last_event_at?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 /** Minimal message object returned by the store. */
@@ -105,6 +119,7 @@ export interface PermissionLinkInput {
   channelType: string;
   chatId: string;
   messageId: string;
+  sessionId?: string;
   toolName: string;
   suggestions: string;
 }
@@ -114,6 +129,7 @@ export interface PermissionLinkRecord {
   permissionRequestId: string;
   chatId: string;
   messageId: string;
+  sessionId?: string;
   resolved: boolean;
   suggestions: string;
 }
@@ -162,8 +178,17 @@ export interface BridgeStore {
     systemPrompt?: string,
     cwd?: string,
     mode?: string,
+    options?: {
+      reasoningEffort?: CodexReasoningEffort;
+      sessionType?: BridgeSession['session_type'];
+      hidden?: boolean;
+      parentSessionId?: string;
+      expiresAt?: string;
+    },
   ): BridgeSession;
   updateSessionProviderId(sessionId: string, providerId: string): void;
+  updateSession(sessionId: string, updates: Partial<BridgeSession>): void;
+  deleteSession(sessionId: string): void;
 
   // ── Messages ──
   addMessage(sessionId: string, role: string, content: string, usage?: string | null): void;
@@ -211,6 +236,8 @@ export interface StreamChatParams {
   sessionId: string;
   sdkSessionId?: string;
   model?: string;
+  sandboxMode?: CodexSandboxMode;
+  modelReasoningEffort?: CodexReasoningEffort;
   systemPrompt?: string;
   workingDirectory?: string;
   abortController?: AbortController;

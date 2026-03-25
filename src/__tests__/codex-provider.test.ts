@@ -645,6 +645,39 @@ describe('CodexProvider image input', () => {
       fs.existsSync = originalExistsSync;
     }
   });
+
+  it('passes sandboxMode and reasoning effort to the Codex thread', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    let capturedStartOptions: Record<string, unknown> | undefined;
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
+        })(),
+      }),
+    };
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: (opts: Record<string, unknown>) => {
+        capturedStartOptions = opts;
+        return mockThread;
+      },
+    };
+
+    const stream = provider.streamChat({
+      prompt: 'hello',
+      sessionId: 'sandbox-reasoning-session',
+      sandboxMode: 'danger-full-access',
+      modelReasoningEffort: 'xhigh',
+    });
+    await collectStream(stream);
+
+    assert.equal(capturedStartOptions?.sandboxMode, 'danger-full-access');
+    assert.equal(capturedStartOptions?.modelReasoningEffort, 'xhigh');
+  });
 });
 
 // ── Error event tests ───────────────────────────────────────

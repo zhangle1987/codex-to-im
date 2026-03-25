@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import type { BridgeMessage } from './lib/bridge/host.js';
 
 export interface DesktopSessionSummary {
@@ -14,6 +15,19 @@ export interface DesktopSessionSummary {
   lastEventAt: string;
   title: string;
   activeEstimate: boolean;
+}
+
+export interface DesktopSessionEvent {
+  signature: string;
+  role: 'user' | 'assistant' | 'commentary';
+  content: string;
+  timestamp: string;
+}
+
+export interface DesktopSessionEventDelta {
+  events: DesktopSessionEvent[];
+  nextOffset: number;
+  trailingText: string;
 }
 
 interface SessionMetaLine {
@@ -30,6 +44,7 @@ interface SessionMetaLine {
 }
 
 interface SessionMessageLine {
+  timestamp?: string;
   type?: string;
   payload?: {
     type?: string;
@@ -43,10 +58,12 @@ interface SessionMessageLine {
 }
 
 interface SessionEventLine {
+  timestamp?: string;
   type?: string;
   payload?: {
     type?: string;
     message?: string;
+    last_agent_message?: string;
   };
 }
 
@@ -302,6 +319,31 @@ function normalizeFreeText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+function createDesktopEventSignature(rawLine: string): string {
+  return crypto.createHash('sha1').update(rawLine).digest('hex');
+}
+
+function readFileUtf8Range(filePath: string, startOffset: number, endOffset: number): string {
+  const safeStart = Math.max(0, startOffset);
+  const safeEnd = Math.max(safeStart, endOffset);
+  const bytesToRead = safeEnd - safeStart;
+  if (bytesToRead <= 0) return '';
+
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(bytesToRead);
+    let totalRead = 0;
+    while (totalRead < bytesToRead) {
+      const bytesRead = fs.readSync(fd, buffer, totalRead, bytesToRead - totalRead, safeStart + totalRead);
+      if (bytesRead <= 0) break;
+      totalRead += bytesRead;
+    }
+    return buffer.subarray(0, totalRead).toString('utf-8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function isSessionEventLine(line: SessionMessageLine | SessionEventLine): line is SessionEventLine {
   return line.type === 'event_msg';
 }
@@ -351,47 +393,147 @@ function extractDesktopMessageText(line: SessionMessageLine): string {
   return text;
 }
 
-export function readDesktopSessionMessages(threadId: string, limit = 8): BridgeMessage[] {
-  const session = getDesktopSessionByThreadId(threadId);
-  if (!session) return [];
-
-  let content = '';
-  try {
-    content = fs.readFileSync(session.filePath, 'utf-8');
-  } catch {
-    return [];
+function pushDesktopSessionEvent(
+  events: DesktopSessionEvent[],
+  parsed: SessionMessageLine | SessionEventLine,
+  rawLine: string,
+): void {
+  if (isSessionEventLine(parsed) && parsed.payload?.type === 'user_message') {
+    const text = normalizeFreeText(parsed.payload.message || '');
+    if (!text) return;
+    events.push({
+      signature: createDesktopEventSignature(rawLine),
+      role: 'user',
+      content: text,
+      timestamp: parsed.timestamp || '',
+    });
+    return;
   }
 
-  const messages: BridgeMessage[] = [];
-  for (const line of content.split(/\r?\n/)) {
-    if (!line.trim()) continue;
+  if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_complete') {
+    const text = normalizeFreeText(parsed.payload.last_agent_message || '');
+    if (!text) return;
+
+    const lastEvent = events[events.length - 1];
+    if (lastEvent?.role === 'assistant' && lastEvent.content === text) {
+      return;
+    }
+
+    events.push({
+      signature: createDesktopEventSignature(rawLine),
+      role: 'assistant',
+      content: text,
+      timestamp: parsed.timestamp || '',
+    });
+    return;
+  }
+
+  if (isSessionMessageLine(parsed) && parsed.payload?.type === 'message' && parsed.payload.role === 'assistant') {
+    const text = extractDesktopMessageText(parsed);
+    if (!text) return;
+    events.push({
+      signature: createDesktopEventSignature(rawLine),
+      role: parsed.payload.phase === 'commentary' ? 'commentary' : 'assistant',
+      content: parsed.payload.phase === 'commentary' ? text.replace(/^\[commentary\]\n/, '') : text,
+      timestamp: parsed.timestamp || '',
+    });
+  }
+}
+
+function parseDesktopSessionEventText(
+  content: string,
+  leadingText = '',
+  flushTrailingText = false,
+): DesktopSessionEventDelta {
+  const combined = `${leadingText}${content}`;
+  if (!combined) {
+    return {
+      events: [],
+      nextOffset: 0,
+      trailingText: '',
+    };
+  }
+
+  const hasTrailingNewline = combined.endsWith('\n') || combined.endsWith('\r');
+  const rawLines = combined.split(/\r?\n/);
+  let trailingText = hasTrailingNewline ? '' : (rawLines.pop() || '');
+  if (flushTrailingText && trailingText) {
+    rawLines.push(trailingText);
+    trailingText = '';
+  }
+  const events: DesktopSessionEvent[] = [];
+
+  for (const line of rawLines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
     let parsed: SessionMessageLine | SessionEventLine;
     try {
-      parsed = JSON.parse(line) as SessionMessageLine | SessionEventLine;
+      parsed = JSON.parse(trimmed) as SessionMessageLine | SessionEventLine;
     } catch {
       continue;
     }
 
-    if (isSessionEventLine(parsed) && parsed.payload?.type === 'user_message') {
-      const text = normalizeFreeText(parsed.payload.message || '');
-      if (!text) continue;
-      messages.push({
-        role: 'user',
-        content: text,
-      });
-      continue;
-    }
-
-    if (isSessionMessageLine(parsed) && parsed.payload?.type === 'message' && parsed.payload.role === 'assistant') {
-      const text = extractDesktopMessageText(parsed);
-      if (!text) continue;
-      messages.push({
-        role: parsed.payload.role,
-        content: text,
-      });
-    }
+    pushDesktopSessionEvent(events, parsed, trimmed);
   }
+
+  return {
+    events,
+    nextOffset: 0,
+    trailingText,
+  };
+}
+
+export function readDesktopSessionMessages(threadId: string, limit = 8): BridgeMessage[] {
+  const messages = readDesktopSessionEventStream(threadId).map((event) => ({
+    role: event.role === 'commentary' ? 'assistant' : event.role,
+    content: event.role === 'commentary'
+      ? `[commentary]\n${event.content}`
+      : event.content,
+  }));
 
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 8;
   return messages.slice(-safeLimit);
+}
+
+export function readDesktopSessionEventStreamByFilePath(filePath: string): DesktopSessionEvent[] {
+  let content = '';
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return [];
+  }
+
+  return parseDesktopSessionEventText(content, '', true).events;
+}
+
+export function readDesktopSessionEventDeltaByFilePath(
+  filePath: string,
+  startOffset: number,
+  endOffset: number,
+  trailingText = '',
+): DesktopSessionEventDelta {
+  let content = '';
+  try {
+    content = readFileUtf8Range(filePath, startOffset, endOffset);
+  } catch {
+    return {
+      events: [],
+      nextOffset: startOffset,
+      trailingText,
+    };
+  }
+
+  const parsed = parseDesktopSessionEventText(content, trailingText);
+  return {
+    events: parsed.events,
+    nextOffset: Math.max(startOffset, endOffset),
+    trailingText: parsed.trailingText,
+  };
+}
+
+export function readDesktopSessionEventStream(threadId: string): DesktopSessionEvent[] {
+  const session = getDesktopSessionByThreadId(threadId);
+  if (!session) return [];
+  return readDesktopSessionEventStreamByFilePath(session.filePath);
 }
