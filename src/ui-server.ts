@@ -1680,7 +1680,7 @@ function renderHtml(): string {
                 <div class="command-list">
                   <div class="command-list-head"><div>命令</div><div>原始命令</div><div>说明</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/m</code></div><div class="command-col-original"><code>/mode</code></div><div class="command-col-desc">查看当前模式；可选 <code>code</code>、<code>plan</code>、<code>ask</code>。</div></div>
-                  <div class="command-item"><div class="command-col-command"><code>/r</code></div><div class="command-col-original"><code>/reasoning</code></div><div class="command-col-desc">查看当前思考级别；可选 <code>0=minimal</code>、<code>1=low</code>、<code>2=medium</code>、<code>3=high</code>、<code>4/5=xhigh</code>。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/r</code></div><div class="command-col-original"><code>/reasoning</code></div><div class="command-col-desc">查看当前思考级别；可选 <code>1=minimal</code>、<code>2=low</code>、<code>3=medium</code>、<code>4=high</code>、<code>5=xhigh</code>。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0</code></div><div class="command-col-original"><code>/thread 0</code></div><div class="command-col-desc">切换到当前聊天的临时草稿线程。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0 reset</code></div><div class="command-col-original"><code>/thread 0 reset</code></div><div class="command-col-desc">丢弃当前草稿上下文并重建一条新的草稿线程。</div></div>
                   <div class="command-item"><div class="command-col-command">—</div><div class="command-col-original"><code>/stop</code></div><div class="command-col-desc">停止当前任务。</div></div>

@@ -132,7 +132,7 @@ Useful commands:
 - `/t` / `/threads` lists recent desktop threads, and `/t 1` / `/thread 1` binds the first one
 - `/n proj1` / `/new proj1` creates a new project session under the default workspace root
 - `/m` / `/mode` shows or changes the current mode; options: `code` / `plan` / `ask`
-- `/r` / `/reasoning` shows or changes the current reasoning effort; options: `0|1|2|3|4|5`
+- `/r` / `/reasoning` shows or changes the current reasoning effort; options: `1|2|3|4|5`
 - `/his` / `/history` shows the summarized history, and `/his raw` / `/history raw` shows raw history
 - `/t 0` / `/thread 0` enters a temporary draft thread that does not pollute the main work thread
 - `1 / 2 / 3` or `/perm ...` handles permission prompts
@@ -171,7 +171,7 @@ The configuration page also includes Codex runtime controls:
   - global default reasoning level
   - can be overridden per IM session with `/reasoning`
   - official runtime levels are `minimal`, `low`, `medium`, `high`, `xhigh`
-  - IM numeric aliases are `0=minimal`, `1=low`, `2=medium`, `3=high`, `4/5=xhigh`
+  - IM numeric aliases are `1=minimal`, `2=low`, `3=medium`, `4=high`, `5=xhigh`
 
 If you are using `codex-to-im` on your own development machine for real coding work, the more aggressive recommended setup is:
 

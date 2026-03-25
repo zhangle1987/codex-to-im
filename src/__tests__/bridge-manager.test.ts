@@ -121,11 +121,11 @@ describe('bridge-manager resolveCommandAlias', () => {
   });
 
   it('maps numeric reasoning aliases to supported effort levels', () => {
-    assert.equal(_testOnly.normalizeReasoningEffort('0'), 'minimal');
-    assert.equal(_testOnly.normalizeReasoningEffort('1'), 'low');
-    assert.equal(_testOnly.normalizeReasoningEffort('2'), 'medium');
-    assert.equal(_testOnly.normalizeReasoningEffort('3'), 'high');
-    assert.equal(_testOnly.normalizeReasoningEffort('4'), 'xhigh');
+    assert.equal(_testOnly.normalizeReasoningEffort('0'), null);
+    assert.equal(_testOnly.normalizeReasoningEffort('1'), 'minimal');
+    assert.equal(_testOnly.normalizeReasoningEffort('2'), 'low');
+    assert.equal(_testOnly.normalizeReasoningEffort('3'), 'medium');
+    assert.equal(_testOnly.normalizeReasoningEffort('4'), 'high');
     assert.equal(_testOnly.normalizeReasoningEffort('5'), 'xhigh');
     assert.equal(_testOnly.normalizeReasoningEffort('xhigh'), 'xhigh');
     assert.equal(_testOnly.normalizeReasoningEffort('9'), null);

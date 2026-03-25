@@ -218,7 +218,7 @@ codex-to-im stop
 - 另外，当前 `codex` runtime 下正文通常不是逐字流式输出；更常见的效果是先显示 `Thinking / Tool Progress`，正文在回答完成时一次性落到卡片里。
 - IM 里发送 `/history` 可以查看当前会话最近 N 条消息，N 由“基础配置”中的返回条数控制。
 - IM 里发送 `/history` 默认返回整理后的摘要；发送 `/history raw` 才会查看最近 N 条原始消息。
-- IM 里发送 `/reasoning high` 或 `/reasoning 2` 之类命令，可以只对当前会话覆盖思考级别。
+- IM 里发送 `/reasoning high` 或 `/reasoning 4` 之类命令，可以只对当前会话覆盖思考级别。
 - IM 里发送 `/thread 0` 会进入临时草稿线程，适合短讨论或临时想法。
 - “通道”页里可以分别控制“命令反馈使用 Markdown”：
   - 飞书默认开启
@@ -230,7 +230,7 @@ codex-to-im stop
 - `/t` / `/threads` 最近桌面会话，`/t 1` / `/thread 1` 接管
 - `/n proj1` / `/new proj1` 新建项目会话
 - `/m` / `/mode` 查看或切换模式，可选 `code` / `plan` / `ask`
-- `/r` / `/reasoning` 查看或切换思考级别，也支持 `0|1|2|3|4|5`
+- `/r` / `/reasoning` 查看或切换思考级别，也支持 `1|2|3|4|5`
 - `/his` / `/history` 历史摘要，`/his raw` / `/history raw` 原始记录
 - `/t 0` / `/thread 0` 临时草稿线程
 - 如果 `测试 Codex` 失败，优先检查当前 Windows 用户下是否已经存在可用的 Codex 登录态或 API Key。

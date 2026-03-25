@@ -132,7 +132,7 @@ codex-to-im stop
 - `/t` / `/threads` 查看最近桌面会话，`/t 1` / `/thread 1` 接管第 1 条
 - `/n proj1` / `/new proj1` 在默认工作空间下新建项目会话
 - `/m` / `/mode` 查看或切换模式，可选 `code` / `plan` / `ask`
-- `/r` / `/reasoning` 查看或切换思考级别，可选 `0|1|2|3|4|5`
+- `/r` / `/reasoning` 查看或切换思考级别，可选 `1|2|3|4|5`
 - `/his` / `/history` 查看整理后的历史摘要，`/his raw` / `/history raw` 查看原始记录
 - `/t 0` / `/thread 0` 进入临时草稿线程，不污染正式工作会话
 - `1 / 2 / 3` 或 `/perm ...` 处理权限
@@ -170,7 +170,7 @@ codex-to-im stop
 - `Codex 思考级别`
   - 全局默认值，可在 IM 中用 `/reasoning` 对当前会话覆盖
   - 官方仅有 5 个级别：`minimal`、`low`、`medium`、`high`、`xhigh`
-  - IM 中也支持数字别名：`0=minimal`、`1=low`、`2=medium`、`3=high`、`4/5=xhigh`
+  - IM 中也支持数字别名：`1=minimal`、`2=low`、`3=medium`、`4=high`、`5=xhigh`
 
 如果你是在自己的本地开发机上长期用 `codex-to-im` 做实际编码，当前更激进的推荐配置是：
 

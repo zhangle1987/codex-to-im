@@ -55,7 +55,7 @@ const DRAFT_SESSION_PREFIX = 'Draft';
 const HISTORY_SESSION_PREFIX = 'History Summary';
 const REASONING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 const MODE_OPTIONS_TEXT = '可选：`code`（直接执行，默认） `plan`（先分析再行动） `ask`（轻对话 / 草稿）';
-const REASONING_OPTIONS_TEXT = '可选：`0=minimal` `1=low` `2=medium` `3=high` `4/5=xhigh`';
+const REASONING_OPTIONS_TEXT = '可选：`1=minimal` `2=low` `3=medium` `4=high` `5=xhigh`';
 const MIRROR_POLL_INTERVAL_MS = 2_500;
 const MIRROR_WATCH_DEBOUNCE_MS = 350;
 const MIRROR_EVENT_BATCH_LIMIT = 8;
@@ -196,15 +196,14 @@ function normalizeReasoningEffort(raw: string): typeof REASONING_LEVELS[number] 
   }
 
   switch (token) {
-    case '0':
-      return 'minimal';
     case '1':
-      return 'low';
+      return 'minimal';
     case '2':
-      return 'medium';
+      return 'low';
     case '3':
-      return 'high';
+      return 'medium';
     case '4':
+      return 'high';
     case '5':
       return 'xhigh';
     default:
@@ -215,15 +214,15 @@ function normalizeReasoningEffort(raw: string): typeof REASONING_LEVELS[number] 
 function formatReasoningEffort(reasoning: string): string {
   switch (reasoning) {
     case 'minimal':
-      return 'minimal (0)';
+      return 'minimal (1)';
     case 'low':
-      return 'low (1)';
+      return 'low (2)';
     case 'medium':
-      return 'medium (2)';
+      return 'medium (3)';
     case 'high':
-      return 'high (3)';
+      return 'high (4)';
     case 'xhigh':
-      return 'xhigh (4/5)';
+      return 'xhigh (5)';
     default:
       return reasoning;
   }
@@ -2358,7 +2357,7 @@ async function handleCommand(
         response = buildCommandFields(
           '当前思考级别',
           [['级别', formatReasoningEffort(resolveEffectiveReasoningEffort(session))]],
-          [REASONING_OPTIONS_TEXT, '发送 `/r 2` 或 `/r high` 可切换。'],
+          [REASONING_OPTIONS_TEXT, '发送 `/r 4` 或 `/r high` 可切换。'],
           responseParseMode === 'Markdown',
         );
         break;
@@ -2368,7 +2367,7 @@ async function handleCommand(
         response = buildCommandFields(
           '思考级别用法',
           [['命令', '`/reasoning minimal|low|medium|high|xhigh`']],
-          ['也支持完整命令：`/reasoning 0|1|2|3|4|5`', REASONING_OPTIONS_TEXT],
+          ['也支持完整命令：`/reasoning 1|2|3|4|5`', REASONING_OPTIONS_TEXT],
           responseParseMode === 'Markdown',
         );
         break;
@@ -2602,7 +2601,7 @@ async function handleCommand(
         '',
         '**设置**',
         '- `/m` 查看模式；可用 `code | plan | ask`',
-        '- `/r` 查看思考级别；可用 `0 | 1 | 2 | 3 | 4/5`',
+        '- `/r` 查看思考级别；可用 `1 | 2 | 3 | 4 | 5`',
         '- `/t 0` 临时草稿线程',
         '- `/t 0 reset` 重置草稿线程',
         '- `/stop` 停止当前任务',
