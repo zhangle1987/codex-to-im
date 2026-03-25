@@ -68,6 +68,12 @@ npm install
 npm run build
 ```
 
+Windows 维护说明：
+
+- 仓库包含 [patch-codex-sdk-windows-hide.js](D:/codex/Claude-to-IM-skill/scripts/patch-codex-sdk-windows-hide.js)，会在 `npm install` 后给 `@openai/codex-sdk` 打一个保守补丁。
+- 原因是 Windows 下 SDK 拉起 Codex CLI 时若不带 `windowsHide`，每次 IM 触发运行都可能弹出黑色控制台窗口。
+- 后续升级 `@openai/codex-sdk` 时，要确认这个补丁仍然能匹配；如果上游已经原生修复，应直接删除这层补丁。
+
 ## 启动
 
 启动本地应用：
@@ -180,7 +186,7 @@ codex-to-im stop
 
 这样更接近完整 `code` 模式下的开发体验。它适合你自己的受控项目目录，不适合直接照搬到陌生仓库或高风险环境。
 
-通道页还支持“命令反馈使用 Markdown”开关：
+通道页还支持“反馈使用 Markdown”开关：
 - 飞书默认开启
 - 微信默认关闭
 - 只影响 `/h`、`/status`、`/threads` 这类 bridge 自己生成的反馈

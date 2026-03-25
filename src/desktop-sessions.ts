@@ -30,6 +30,24 @@ export interface DesktopSessionEventDelta {
   trailingText: string;
 }
 
+export interface DesktopMirrorRecord {
+  signature: string;
+  type: 'message' | 'task_started' | 'task_complete' | 'tool_started' | 'tool_finished';
+  role?: 'user' | 'assistant' | 'commentary';
+  content: string;
+  timestamp: string;
+  turnId?: string;
+  toolId?: string;
+  toolName?: string;
+  isError?: boolean;
+}
+
+export interface DesktopMirrorRecordDelta {
+  records: DesktopMirrorRecord[];
+  nextOffset: number;
+  trailingText: string;
+}
+
 interface SessionMetaLine {
   timestamp?: string;
   type?: string;
@@ -50,6 +68,11 @@ interface SessionMessageLine {
     type?: string;
     role?: string;
     phase?: string;
+    name?: string;
+    arguments?: string;
+    call_id?: string;
+    output?: string;
+    is_error?: boolean;
     content?: Array<{
       type?: string;
       text?: string;
@@ -64,6 +87,7 @@ interface SessionEventLine {
     type?: string;
     message?: string;
     last_agent_message?: string;
+    turn_id?: string;
   };
 }
 
@@ -319,6 +343,10 @@ function normalizeFreeText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+function normalizeStructuredText(text: string): string {
+  return text.replace(/\r\n/g, '\n').trim();
+}
+
 function createDesktopEventSignature(rawLine: string): string {
   return crypto.createHash('sha1').update(rawLine).digest('hex');
 }
@@ -399,7 +427,7 @@ function pushDesktopSessionEvent(
   rawLine: string,
 ): void {
   if (isSessionEventLine(parsed) && parsed.payload?.type === 'user_message') {
-    const text = normalizeFreeText(parsed.payload.message || '');
+    const text = normalizeStructuredText(parsed.payload.message || '');
     if (!text) return;
     events.push({
       signature: createDesktopEventSignature(rawLine),
@@ -411,7 +439,7 @@ function pushDesktopSessionEvent(
   }
 
   if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_complete') {
-    const text = normalizeFreeText(parsed.payload.last_agent_message || '');
+    const text = normalizeStructuredText(parsed.payload.last_agent_message || '');
     if (!text) return;
 
     const lastEvent = events[events.length - 1];
@@ -436,6 +464,88 @@ function pushDesktopSessionEvent(
       role: parsed.payload.phase === 'commentary' ? 'commentary' : 'assistant',
       content: parsed.payload.phase === 'commentary' ? text.replace(/^\[commentary\]\n/, '') : text,
       timestamp: parsed.timestamp || '',
+    });
+  }
+}
+
+function pushDesktopMirrorRecord(
+  records: DesktopMirrorRecord[],
+  parsed: SessionMessageLine | SessionEventLine,
+  rawLine: string,
+): void {
+  if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_started') {
+    records.push({
+      signature: createDesktopEventSignature(rawLine),
+      type: 'task_started',
+      content: '',
+      timestamp: parsed.timestamp || '',
+      turnId: parsed.payload.turn_id || '',
+    });
+    return;
+  }
+
+  if (isSessionEventLine(parsed) && parsed.payload?.type === 'user_message') {
+    const text = normalizeStructuredText(parsed.payload.message || '');
+    if (!text) return;
+    records.push({
+      signature: createDesktopEventSignature(rawLine),
+      type: 'message',
+      role: 'user',
+      content: text,
+      timestamp: parsed.timestamp || '',
+    });
+    return;
+  }
+
+  if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_complete') {
+    records.push({
+      signature: createDesktopEventSignature(rawLine),
+      type: 'task_complete',
+      role: 'assistant',
+      content: normalizeStructuredText(parsed.payload.last_agent_message || ''),
+      timestamp: parsed.timestamp || '',
+      turnId: parsed.payload.turn_id || '',
+    });
+    return;
+  }
+
+  if (isSessionMessageLine(parsed) && parsed.payload?.type === 'message' && parsed.payload.role === 'assistant') {
+    const text = extractDesktopMessageText(parsed);
+    if (!text) return;
+    records.push({
+      signature: createDesktopEventSignature(rawLine),
+      type: 'message',
+      role: parsed.payload.phase === 'commentary' ? 'commentary' : 'assistant',
+      content: parsed.payload.phase === 'commentary' ? text.replace(/^\[commentary\]\n/, '') : text,
+      timestamp: parsed.timestamp || '',
+    });
+    return;
+  }
+
+  if (isSessionMessageLine(parsed) && parsed.payload?.type === 'function_call') {
+    const toolName = normalizeFreeText(parsed.payload.name || '');
+    const toolId = normalizeFreeText(parsed.payload.call_id || '') || createDesktopEventSignature(rawLine);
+    if (!toolName) return;
+    records.push({
+      signature: createDesktopEventSignature(rawLine),
+      type: 'tool_started',
+      content: '',
+      timestamp: parsed.timestamp || '',
+      toolId,
+      toolName,
+    });
+    return;
+  }
+
+  if (isSessionMessageLine(parsed) && parsed.payload?.type === 'function_call_output') {
+    const toolId = normalizeFreeText(parsed.payload.call_id || '') || createDesktopEventSignature(rawLine);
+    records.push({
+      signature: createDesktopEventSignature(rawLine),
+      type: 'tool_finished',
+      content: normalizeFreeText(parsed.payload.output || ''),
+      timestamp: parsed.timestamp || '',
+      toolId,
+      isError: parsed.payload.is_error === true,
     });
   }
 }
@@ -484,6 +594,50 @@ function parseDesktopSessionEventText(
   };
 }
 
+function parseDesktopMirrorRecordText(
+  content: string,
+  leadingText = '',
+  flushTrailingText = false,
+): DesktopMirrorRecordDelta {
+  const combined = `${leadingText}${content}`;
+  if (!combined) {
+    return {
+      records: [],
+      nextOffset: 0,
+      trailingText: '',
+    };
+  }
+
+  const hasTrailingNewline = combined.endsWith('\n') || combined.endsWith('\r');
+  const rawLines = combined.split(/\r?\n/);
+  let trailingText = hasTrailingNewline ? '' : (rawLines.pop() || '');
+  if (flushTrailingText && trailingText) {
+    rawLines.push(trailingText);
+    trailingText = '';
+  }
+  const records: DesktopMirrorRecord[] = [];
+
+  for (const line of rawLines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    let parsed: SessionMessageLine | SessionEventLine;
+    try {
+      parsed = JSON.parse(trimmed) as SessionMessageLine | SessionEventLine;
+    } catch {
+      continue;
+    }
+
+    pushDesktopMirrorRecord(records, parsed, trimmed);
+  }
+
+  return {
+    records,
+    nextOffset: 0,
+    trailingText,
+  };
+}
+
 export function readDesktopSessionMessages(threadId: string, limit = 8): BridgeMessage[] {
   const messages = readDesktopSessionEventStream(threadId).map((event) => ({
     role: event.role === 'commentary' ? 'assistant' : event.role,
@@ -527,6 +681,42 @@ export function readDesktopSessionEventDeltaByFilePath(
   const parsed = parseDesktopSessionEventText(content, trailingText);
   return {
     events: parsed.events,
+    nextOffset: Math.max(startOffset, endOffset),
+    trailingText: parsed.trailingText,
+  };
+}
+
+export function readDesktopSessionMirrorRecordStreamByFilePath(filePath: string): DesktopMirrorRecord[] {
+  let content = '';
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return [];
+  }
+
+  return parseDesktopMirrorRecordText(content, '', true).records;
+}
+
+export function readDesktopSessionMirrorRecordDeltaByFilePath(
+  filePath: string,
+  startOffset: number,
+  endOffset: number,
+  trailingText = '',
+): DesktopMirrorRecordDelta {
+  let content = '';
+  try {
+    content = readFileUtf8Range(filePath, startOffset, endOffset);
+  } catch {
+    return {
+      records: [],
+      nextOffset: startOffset,
+      trailingText,
+    };
+  }
+
+  const parsed = parseDesktopMirrorRecordText(content, trailingText);
+  return {
+    records: parsed.records,
     nextOffset: Math.max(startOffset, endOffset),
     trailingText: parsed.trailingText,
   };

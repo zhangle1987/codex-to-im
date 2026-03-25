@@ -6,16 +6,18 @@ import {
   filterDuplicateAssistantEvents,
   reconcileDesktopMirrorCursor,
 } from '../desktop-session-mirror.js';
-import type { DesktopSessionEvent } from '../desktop-sessions.js';
+import type { DesktopMirrorRecord } from '../desktop-sessions.js';
 
 function makeEvent(
   signature: string,
-  role: DesktopSessionEvent['role'],
+  role: NonNullable<DesktopMirrorRecord['role']>,
   content: string,
   timestamp = '2026-03-25T00:00:00.000Z',
-): DesktopSessionEvent {
+  type: DesktopMirrorRecord['type'] = 'message',
+): DesktopMirrorRecord {
   return {
     signature,
+    type,
     role,
     content,
     timestamp,
@@ -31,9 +33,10 @@ describe('reconcileDesktopMirrorCursor', () => {
 
     const delta = reconcileDesktopMirrorCursor(null, events);
 
-    assert.equal(delta.deliverableEvents.length, 0);
+    assert.equal(delta.deliverableRecords.length, 0);
     assert.equal(delta.nextCursor.initialized, true);
     assert.equal(delta.nextCursor.lastEventSignature, 'b');
+    assert.equal(delta.nextCursor.lastEventType, 'message');
     assert.equal(delta.reset, false);
   });
 
@@ -48,10 +51,11 @@ describe('reconcileDesktopMirrorCursor', () => {
       initialized: true,
       lastEventSignature: 'b',
       lastEventTimestamp: '2026-03-25T00:00:00.000Z',
+      lastEventType: 'message',
       lastEventCount: 2,
     }, events);
 
-    assert.deepEqual(delta.deliverableEvents.map((event) => event.signature), ['c']);
+    assert.deepEqual(delta.deliverableRecords.map((event) => event.signature), ['c']);
     assert.equal(delta.reset, false);
   });
 
@@ -66,7 +70,7 @@ describe('reconcileDesktopMirrorCursor', () => {
       lastEventCount: 0,
     }, events);
 
-    assert.deepEqual(delta.deliverableEvents.map((event) => event.signature), ['a', 'b']);
+    assert.deepEqual(delta.deliverableRecords.map((event) => event.signature), ['a', 'b']);
     assert.equal(delta.reset, false);
   });
 
@@ -80,10 +84,11 @@ describe('reconcileDesktopMirrorCursor', () => {
       initialized: true,
       lastEventSignature: 'b',
       lastEventTimestamp: '2026-03-25T00:00:02.000Z',
+      lastEventType: 'message',
       lastEventCount: 2,
     }, events);
 
-    assert.deepEqual(delta.deliverableEvents.map((event) => event.signature), ['y']);
+    assert.deepEqual(delta.deliverableRecords.map((event) => event.signature), ['y']);
     assert.equal(delta.reset, true);
     assert.equal(delta.nextCursor.lastEventSignature, 'y');
   });
@@ -98,10 +103,11 @@ describe('reconcileDesktopMirrorCursor', () => {
       initialized: true,
       lastEventSignature: 'b',
       lastEventTimestamp: '2026-03-25T00:00:02.000Z',
+      lastEventType: 'message',
       lastEventCount: 2,
     }, events);
 
-    assert.equal(delta.deliverableEvents.length, 0);
+    assert.equal(delta.deliverableRecords.length, 0);
     assert.equal(delta.reset, true);
   });
 
@@ -110,6 +116,7 @@ describe('reconcileDesktopMirrorCursor', () => {
       initialized: true,
       lastEventSignature: 'b',
       lastEventTimestamp: '2026-03-25T00:00:02.000Z',
+      lastEventType: 'message',
       lastEventRole: 'assistant',
       lastEventContent: 'world',
       lastEventCount: 2,
@@ -131,6 +138,7 @@ describe('reconcileDesktopMirrorCursor', () => {
       initialized: true,
       lastEventSignature: 'b',
       lastEventTimestamp: '2026-03-25T00:00:02.000Z',
+      lastEventType: 'message',
       lastEventRole: 'assistant',
       lastEventContent: '888',
       lastEventCount: 2,
@@ -147,6 +155,7 @@ describe('reconcileDesktopMirrorCursor', () => {
       initialized: true,
       lastEventSignature: 'b',
       lastEventTimestamp: '2026-03-25T00:00:02.000Z',
+      lastEventType: 'message',
       lastEventRole: 'assistant',
       lastEventContent: '888',
       lastEventCount: 2,
@@ -159,10 +168,11 @@ describe('reconcileDesktopMirrorCursor', () => {
       initialized: true,
       lastEventSignature: 'b',
       lastEventTimestamp: '2026-03-25T00:00:02.000Z',
+      lastEventType: 'message',
       lastEventRole: 'assistant',
       lastEventContent: '888',
       lastEventCount: 2,
-    }, delta.deliverableEvents);
+    }, delta.deliverableRecords);
 
     assert.equal(delta.reset, true);
     assert.deepEqual(filtered, []);

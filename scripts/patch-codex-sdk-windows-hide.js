@@ -1,8 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+/**
+ * Windows note:
+ * `@openai/codex-sdk` spawns the bundled Codex CLI without `windowsHide`,
+ * which causes a black console window to flash for each IM-triggered run.
+ *
+ * We patch the installed SDK after `npm install` so the bridge can keep using
+ * the upstream package while avoiding the extra console window on Windows.
+ *
+ * Maintenance rule:
+ * - Keep this patch conservative and version-gated.
+ * - When upgrading `@openai/codex-sdk`, verify the spawn block still matches.
+ * - If upstream adds `windowsHide` natively, remove this script.
+ */
 const PATCH_MARKER = 'windowsHide: process.platform === "win32"';
-const SUPPORTED_SDK_VERSION = /^0\.110\.\d+$/;
+const SUPPORTED_SDK_VERSION = /^0\.11\d\.\d+$/;
 
 function logSkip(message) {
   console.warn(`[postinstall] ${message}`);

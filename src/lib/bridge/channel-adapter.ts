@@ -105,6 +105,13 @@ export abstract class BaseChannelAdapter {
   onStreamText?(_chatId: string, _fullText: string): void;
 
   /**
+   * Start a detached streaming UI cycle that is not tied to the current
+   * inbound IM message. Shared desktop-thread mirroring uses this to create
+   * a standalone streaming card/message in channels that support it.
+   */
+  onMirrorStreamStart?(_chatId: string): void;
+
+  /**
    * Called when tool_use / tool_result events arrive during streaming.
    * Adapter can use this to display tool progress in the streaming card.
    */

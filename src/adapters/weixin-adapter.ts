@@ -22,6 +22,7 @@ import type {
   WeixinCredentials,
   WeixinMessage,
 } from './weixin/weixin-types.js';
+import { markdownToPlainText } from '../lib/bridge/markdown/plain.js';
 import {
   DEFAULT_BASE_URL,
   DEFAULT_CDN_BASE_URL,
@@ -530,14 +531,7 @@ function stripFormatting(text: string, parseMode?: 'HTML' | 'Markdown' | 'plain'
     return text.replace(/<[^>]+>/g, '');
   }
   if (parseMode === 'Markdown') {
-    return text
-      .replace(/\*\*(.*?)\*\*/g, '$1')
-      .replace(/__(.*?)__/g, '$1')
-      .replace(/\*(.*?)\*/g, '$1')
-      .replace(/_(.*?)_/g, '$1')
-      .replace(/`{3}[\s\S]*?`{3}/g, (match) => match.replace(/`{3}\w*\n?/g, '').replace(/`{3}/g, ''))
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    return markdownToPlainText(text);
   }
   return text;
 }

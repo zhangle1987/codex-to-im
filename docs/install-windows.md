@@ -219,7 +219,7 @@ codex-to-im stop
 - IM 里发送 `/history` 默认返回整理后的摘要；发送 `/history raw` 才会查看最近 N 条原始消息。
 - IM 里发送 `/reasoning high` 或 `/reasoning 4` 之类命令，可以只对当前会话覆盖思考级别。
 - IM 里发送 `/thread 0` 会进入临时草稿线程，适合短讨论或临时想法。
-- “通道”页里可以分别控制“命令反馈使用 Markdown”：
+- “通道”页里可以分别控制“反馈使用 Markdown”：
   - 飞书默认开启
   - 微信默认关闭
   - 只影响 `/h`、`/status`、`/threads` 这类系统反馈，不影响 Codex 原始回复

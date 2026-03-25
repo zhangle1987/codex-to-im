@@ -200,6 +200,16 @@ describe('bridge-manager resolveCommandAlias', () => {
 });
 
 describe('bridge-manager status formatting', () => {
+  beforeEach(() => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+  });
+
   it('resolves the displayed model from the most specific available source', () => {
     assert.equal(
       _testOnly.resolveDisplayedModel(
@@ -266,35 +276,223 @@ describe('bridge-manager status formatting', () => {
   });
 
   it('formats mirror event batches for IM delivery', () => {
-    const rendered = _testOnly.formatMirrorMessage('Current Thread', [
-      {
-        signature: '1',
-        role: 'user',
-        content: 'Desktop question',
-        timestamp: '2026-03-25T08:00:00.000Z',
-      },
-      {
-        signature: '2',
-        role: 'assistant',
-        content: 'Desktop answer',
-        timestamp: '2026-03-25T08:00:02.000Z',
-      },
-    ]);
+    const rendered = _testOnly.formatMirrorMessage('Current Thread', 'Desktop answer');
 
-    assert.equal(rendered, 'Current Thread 回复:\nDesktop answer');
+    assert.equal(rendered, '<Current Thread> codex:\n\nDesktop answer');
   });
 
-  it('omits desktop user mirror text when there is no codex output', () => {
-    const rendered = _testOnly.formatMirrorMessage('Current Thread', [
+  it('returns an empty mirror message when there is no text', () => {
+    const rendered = _testOnly.formatMirrorMessage('Current Thread', '');
+
+    assert.equal(rendered, '');
+  });
+
+  it('formats user mirror messages with the 我 header', () => {
+    const rendered = _testOnly.formatMirrorMessageForRole('Current Thread', 'Desktop prompt', 'user');
+
+    assert.equal(rendered, '<Current Thread> 我:\n\nDesktop prompt');
+  });
+
+  it('formats markdown mirror headers with bold speaker labels', () => {
+    const rendered = _testOnly.formatMirrorMessageForRole('Current Thread', '- item 1\n- item 2', 'assistant', true);
+
+    assert.equal(rendered, '**&lt;Current Thread&gt; codex:**\n\n- item 1\n- item 2');
+  });
+
+  it('emits desktop user mirror text as a standalone finalized turn', () => {
+    const subscription = {
+      pendingTurn: null,
+      threadId: 'thread-1',
+    } as { pendingTurn: unknown; threadId: string };
+
+    const finalized = _testOnly.consumeMirrorRecords(subscription as any, [
       {
-        signature: '1',
+        signature: 'user-1',
+        type: 'message',
         role: 'user',
-        content: 'Desktop question',
+        content: 'desktop prompt',
         timestamp: '2026-03-25T08:00:00.000Z',
       },
     ]);
 
-    assert.equal(rendered, '');
+    assert.deepEqual(finalized, [
+      {
+        text: 'desktop prompt',
+        signature: 'user-1',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        status: 'completed',
+        role: 'user',
+      },
+    ]);
+    assert.equal(subscription.pendingTurn, null);
+  });
+
+  it('buffers mirror records until task_complete arrives', () => {
+    const subscription = {
+      pendingTurn: null,
+      threadId: 'thread-1',
+    } as { pendingTurn: unknown; threadId: string };
+
+    const finalized = _testOnly.consumeMirrorRecords(subscription as any, [
+      {
+        signature: 'start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'commentary',
+        type: 'message',
+        role: 'commentary',
+        content: 'thinking',
+        timestamp: '2026-03-25T08:00:01.000Z',
+      },
+      {
+        signature: 'assistant',
+        type: 'message',
+        role: 'assistant',
+        content: 'final answer',
+        timestamp: '2026-03-25T08:00:02.000Z',
+      },
+      {
+        signature: 'complete',
+        type: 'task_complete',
+        role: 'assistant',
+        content: 'final answer',
+        timestamp: '2026-03-25T08:00:03.000Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.deepEqual(finalized, [
+      {
+        text: 'final answer',
+        signature: 'complete',
+        timestamp: '2026-03-25T08:00:03.000Z',
+        status: 'completed',
+      },
+    ]);
+    assert.equal(subscription.pendingTurn, null);
+  });
+
+  it('accumulates streamed mirror text instead of replacing earlier chunks', () => {
+    const subscription = {
+      pendingTurn: null,
+      threadId: 'thread-1',
+    } as { pendingTurn: any; threadId: string };
+
+    _testOnly.consumeMirrorRecords(subscription as any, [
+      {
+        signature: 'start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'commentary-1',
+        type: 'message',
+        role: 'commentary',
+        content: 'thinking step 1',
+        timestamp: '2026-03-25T08:00:01.000Z',
+      },
+      {
+        signature: 'assistant-1',
+        type: 'message',
+        role: 'assistant',
+        content: 'partial answer',
+        timestamp: '2026-03-25T08:00:02.000Z',
+      },
+      {
+        signature: 'assistant-2',
+        type: 'message',
+        role: 'assistant',
+        content: 'final answer',
+        timestamp: '2026-03-25T08:00:03.000Z',
+      },
+    ]);
+
+    assert.equal(
+      subscription.pendingTurn?.streamedText,
+      'thinking step 1\n\npartial answer\n\nfinal answer',
+    );
+  });
+
+  it('keeps tool-only mirror turns finalizable so streaming cards can close cleanly', () => {
+    const subscription = {
+      pendingTurn: null,
+      threadId: 'thread-1',
+    } as { pendingTurn: unknown; threadId: string };
+
+    const finalized = _testOnly.consumeMirrorRecords(subscription as any, [
+      {
+        signature: 'start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'tool-start',
+        type: 'tool_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:01.000Z',
+        toolId: 'call-1',
+        toolName: 'shell_command',
+      },
+      {
+        signature: 'tool-finish',
+        type: 'tool_finished',
+        content: 'Exit code: 0',
+        timestamp: '2026-03-25T08:00:02.000Z',
+        toolId: 'call-1',
+        isError: false,
+      },
+      {
+        signature: 'complete',
+        type: 'task_complete',
+        role: 'assistant',
+        content: '',
+        timestamp: '2026-03-25T08:00:03.000Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.deepEqual(finalized, [
+      {
+        text: '',
+        signature: 'complete',
+        timestamp: '2026-03-25T08:00:03.000Z',
+        status: 'completed',
+      },
+    ]);
+    assert.equal(subscription.pendingTurn, null);
+  });
+
+  it('flushes a buffered mirror turn after the idle timeout', () => {
+    const subscription = {
+      threadId: 'thread-1',
+      pendingTurn: {
+        turnId: 'turn-1',
+        startedAt: '2026-03-25T08:00:00.000Z',
+        lastActivityAt: '2026-03-25T08:00:00.000Z',
+        lastAssistantText: 'stale answer',
+      },
+    } as { pendingTurn: unknown; threadId: string };
+
+    const flushed = _testOnly.flushTimedOutMirrorTurn(
+      subscription as any,
+      Date.parse('2026-03-25T08:20:01.000Z'),
+    );
+
+    assert.deepEqual(flushed, {
+      text: 'stale answer',
+      signature: 'timeout:thread-1:turn-1',
+      timestamp: '2026-03-25T08:00:00.000Z',
+      status: 'interrupted',
+    });
+    assert.equal(subscription.pendingTurn, null);
   });
 });
 

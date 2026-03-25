@@ -1764,11 +1764,11 @@ function renderHtml(): string {
                   <label class="checkbox"><input id="feishuStreamingEnabled" type="checkbox" checked /> 启用飞书流式响应卡片</label>
                 </div>
                 <div class="checkbox-row">
-                  <label class="checkbox"><input id="feishuCommandMarkdownEnabled" type="checkbox" checked /> 命令反馈使用 Markdown</label>
+                  <label class="checkbox"><input id="feishuCommandMarkdownEnabled" type="checkbox" checked /> 反馈使用markdown</label>
                 </div>
                 <div class="small">需要飞书侧已开通可更新卡片的相关能力；如果权限不足，会自动回退为最终结果消息。</div>
                 <div class="small">只影响 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈，不影响 Codex 原始回复。</div>
-                <div class="small">修改飞书 <code>App ID</code>、<code>App Secret</code>、<code>Domain</code> 后，需要重启 Bridge 让客户端重新初始化；白名单、流式开关、Markdown 开关会即时生效。</div>
+                <div class="small">修改飞书 <code>App ID</code>、<code>App Secret</code>、<code>Domain</code> 后，需要重启 Bridge 让客户端重新初始化；白名单、流式开关、markdown 开关会即时生效。</div>
               </div>
 
               <div class="panel-block">
@@ -1804,7 +1804,7 @@ function renderHtml(): string {
                   <label class="checkbox"><input id="weixinMediaEnabled" type="checkbox" /> 启用图片 / 文件 / 视频入站下载</label>
                 </div>
                 <div class="checkbox-row">
-                  <label class="checkbox"><input id="weixinCommandMarkdownEnabled" type="checkbox" /> 命令反馈使用 Markdown</label>
+                  <label class="checkbox"><input id="weixinCommandMarkdownEnabled" type="checkbox" /> 反馈使用markdown</label>
                 </div>
               </div>
               <div class="small">只影响 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈，不影响 Codex 原始回复。默认关闭。</div>
@@ -2167,9 +2167,9 @@ function renderHtml(): string {
         feishuDomain: '飞书 Domain',
         feishuAllowedUsers: '飞书 Allowed Users',
         feishuStreamingEnabled: '飞书流式响应卡片',
-        feishuCommandMarkdownEnabled: '飞书命令 Markdown',
+        feishuCommandMarkdownEnabled: '飞书反馈markdown',
         weixinMediaEnabled: '微信图片/文件/视频入站下载',
-        weixinCommandMarkdownEnabled: '微信命令 Markdown',
+        weixinCommandMarkdownEnabled: '微信反馈markdown',
       };
 
       const BRIDGE_RESTART_FIELDS = new Set([

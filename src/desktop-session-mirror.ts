@@ -1,37 +1,39 @@
-import type { DesktopSessionEvent } from './desktop-sessions.js';
+import type { DesktopMirrorRecord } from './desktop-sessions.js';
 
 export interface DesktopMirrorCursor {
   initialized: boolean;
   lastEventSignature?: string;
   lastEventTimestamp?: string;
-  lastEventRole?: DesktopSessionEvent['role'];
+  lastEventType?: DesktopMirrorRecord['type'];
+  lastEventRole?: DesktopMirrorRecord['role'];
   lastEventContent?: string;
   lastEventCount: number;
 }
 
 export interface DesktopMirrorDelta {
   nextCursor: DesktopMirrorCursor;
-  deliverableEvents: DesktopSessionEvent[];
+  deliverableRecords: DesktopMirrorRecord[];
   reset: boolean;
 }
 
-function makeCursor(events: DesktopSessionEvent[]): DesktopMirrorCursor {
-  const lastEvent = events.length > 0 ? events[events.length - 1] : undefined;
+function makeCursor(records: DesktopMirrorRecord[]): DesktopMirrorCursor {
+  const lastEvent = records.length > 0 ? records[records.length - 1] : undefined;
   return {
     initialized: true,
     lastEventSignature: lastEvent?.signature,
     lastEventTimestamp: lastEvent?.timestamp,
+    lastEventType: lastEvent?.type,
     lastEventRole: lastEvent?.role,
     lastEventContent: lastEvent?.content,
-    lastEventCount: events.length,
+    lastEventCount: records.length,
   };
 }
 
 export function advanceDesktopMirrorCursor(
   cursor: DesktopMirrorCursor | null | undefined,
-  appendedEvents: DesktopSessionEvent[],
+  appendedRecords: DesktopMirrorRecord[],
 ): DesktopMirrorCursor {
-  if (appendedEvents.length === 0) {
+  if (appendedRecords.length === 0) {
     return cursor
       ? { ...cursor }
       : {
@@ -41,88 +43,91 @@ export function advanceDesktopMirrorCursor(
   }
 
   if (!cursor?.initialized) {
-    return makeCursor(appendedEvents);
+    return makeCursor(appendedRecords);
   }
 
-  const lastEvent = appendedEvents[appendedEvents.length - 1];
+  const lastEvent = appendedRecords[appendedRecords.length - 1];
   return {
     initialized: true,
     lastEventSignature: lastEvent?.signature,
     lastEventTimestamp: lastEvent?.timestamp,
+    lastEventType: lastEvent?.type,
     lastEventRole: lastEvent?.role,
     lastEventContent: lastEvent?.content,
-    lastEventCount: cursor.lastEventCount + appendedEvents.length,
+    lastEventCount: cursor.lastEventCount + appendedRecords.length,
   };
 }
 
 export function filterDuplicateAssistantEvents(
   cursor: DesktopMirrorCursor | null | undefined,
-  events: DesktopSessionEvent[],
-): DesktopSessionEvent[] {
-  if (events.length === 0) return events;
+  records: DesktopMirrorRecord[],
+): DesktopMirrorRecord[] {
+  if (records.length === 0) return records;
   let startIndex = 0;
 
   while (
-    startIndex < events.length
+    startIndex < records.length
+    && cursor?.lastEventType === 'message'
     && cursor?.lastEventRole === 'assistant'
-    && events[startIndex]?.role === 'assistant'
-    && cursor.lastEventContent === events[startIndex]?.content
+    && records[startIndex]?.type === 'message'
+    && records[startIndex]?.role === 'assistant'
+    && cursor.lastEventContent === records[startIndex]?.content
   ) {
     startIndex += 1;
   }
 
-  return startIndex === 0 ? events : events.slice(startIndex);
+  return startIndex === 0 ? records : records.slice(startIndex);
 }
 
-function findLastEventIndex(events: DesktopSessionEvent[], signature: string): number {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (events[index]?.signature === signature) {
+function findLastEventIndex(records: DesktopMirrorRecord[], signature: string): number {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    if (records[index]?.signature === signature) {
       return index;
     }
   }
   return -1;
 }
 
-function collectEventsAfterTimestamp(events: DesktopSessionEvent[], timestamp: string | undefined): DesktopSessionEvent[] {
+function collectEventsAfterTimestamp(records: DesktopMirrorRecord[], timestamp: string | undefined): DesktopMirrorRecord[] {
   if (!timestamp) return [];
-  return events.filter((event) => Boolean(event.timestamp) && event.timestamp > timestamp);
+  return records.filter((event) => Boolean(event.timestamp) && event.timestamp > timestamp);
 }
 
 export function reconcileDesktopMirrorCursor(
   cursor: DesktopMirrorCursor | null | undefined,
-  events: DesktopSessionEvent[],
+  records: DesktopMirrorRecord[],
 ): DesktopMirrorDelta {
-  const nextCursor = makeCursor(events);
+  const nextCursor = makeCursor(records);
 
   if (!cursor?.initialized) {
     return {
       nextCursor,
-      deliverableEvents: [],
+      deliverableRecords: [],
       reset: false,
     };
   }
 
-  if (events.length === 0) {
+  if (records.length === 0) {
     return {
       nextCursor,
-      deliverableEvents: [],
+      deliverableRecords: [],
       reset: cursor.lastEventCount > 0,
     };
   }
 
   if (cursor.lastEventSignature) {
-    const lastSeenIndex = findLastEventIndex(events, cursor.lastEventSignature);
+    const lastSeenIndex = findLastEventIndex(records, cursor.lastEventSignature);
     if (lastSeenIndex === -1) {
-      const recoveredEvents = collectEventsAfterTimestamp(events, cursor.lastEventTimestamp);
+      const recoveredEvents = collectEventsAfterTimestamp(records, cursor.lastEventTimestamp);
       return {
         nextCursor,
-        deliverableEvents: recoveredEvents,
+        deliverableRecords: recoveredEvents,
         reset: true,
       };
     }
     return {
       nextCursor,
-      deliverableEvents: events.slice(lastSeenIndex + 1),
+      deliverableRecords: records.slice(lastSeenIndex + 1),
       reset: false,
     };
   }
@@ -130,23 +135,23 @@ export function reconcileDesktopMirrorCursor(
   if (cursor.lastEventCount === 0) {
     return {
       nextCursor,
-      deliverableEvents: events,
+      deliverableRecords: records,
       reset: false,
     };
   }
 
-  if (events.length < cursor.lastEventCount) {
-    const recoveredEvents = collectEventsAfterTimestamp(events, cursor.lastEventTimestamp);
+  if (records.length < cursor.lastEventCount) {
+    const recoveredEvents = collectEventsAfterTimestamp(records, cursor.lastEventTimestamp);
     return {
       nextCursor,
-      deliverableEvents: recoveredEvents,
+      deliverableRecords: recoveredEvents,
       reset: true,
     };
   }
 
   return {
     nextCursor,
-    deliverableEvents: events.slice(cursor.lastEventCount),
+    deliverableRecords: records.slice(cursor.lastEventCount),
     reset: false,
   };
 }

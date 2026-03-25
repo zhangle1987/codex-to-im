@@ -68,6 +68,12 @@ npm install
 npm run build
 ```
 
+Windows maintenance note:
+
+- The repo includes [patch-codex-sdk-windows-hide.js](D:/codex/Claude-to-IM-skill/scripts/patch-codex-sdk-windows-hide.js), which applies a conservative postinstall patch to `@openai/codex-sdk`.
+- This exists because on Windows the SDK may spawn the bundled Codex CLI without `windowsHide`, causing a black console window to flash for each IM-triggered run.
+- When upgrading `@openai/codex-sdk`, verify that the spawn block still matches; if upstream fixes this natively, remove the patch instead of carrying it forward.
+
 ## Run
 
 Start the local app:
@@ -181,7 +187,7 @@ If you are using `codex-to-im` on your own development machine for real coding w
 
 This is closer to a full-power `code` workflow. It fits a controlled local project, but is not a good default for unknown repositories or higher-risk environments.
 
-The channel pages also expose a “Use Markdown for command feedback” switch:
+The channel pages also expose a “Use Markdown for bridge feedback” switch:
 - enabled by default for Feishu
 - disabled by default for WeChat
 - only affects bridge-generated feedback such as `/h`, `/status`, and `/threads`

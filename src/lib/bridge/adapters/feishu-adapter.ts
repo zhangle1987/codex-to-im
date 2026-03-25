@@ -635,6 +635,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.updateCardContent(chatId, fullText);
   }
 
+  onMirrorStreamStart(chatId: string): void {
+    if (!this.isStreamingEnabled()) return;
+    if (this.activeCards.has(chatId)) return;
+    this.createStreamingCard(chatId, undefined).catch(() => {});
+  }
+
   onToolEvent(chatId: string, tools: ToolCallInfo[]): void {
     if (!this.isStreamingEnabled()) return;
     this.updateToolProgress(chatId, tools);
@@ -667,6 +673,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // If there are inline buttons (permission prompts), send card with action buttons
     if (message.inlineButtons && message.inlineButtons.length > 0) {
       return this.sendPermissionCard(message.address.chatId, text, message.inlineButtons);
+    }
+
+    if (message.parseMode === 'plain') {
+      return this.sendAsPlainText(message.address.chatId, text);
     }
 
     // Rendering strategy (aligned with Openclaw):
@@ -733,6 +743,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     // Final fallback: plain text
+    return this.sendAsPlainText(chatId, text);
+  }
+
+  private async sendAsPlainText(chatId: string, text: string): Promise<SendResult> {
     try {
       const res = await this.restClient!.im.message.create({
         params: { receive_id_type: 'chat_id' },

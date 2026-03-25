@@ -21,16 +21,16 @@ import * as broker from './permission-broker.js';
 import { deliver, deliverRendered } from './delivery-layer.js';
 import { markdownToTelegramChunks } from './markdown/telegram.js';
 import { markdownToDiscordChunks } from './markdown/discord.js';
+import { markdownToPlainText } from './markdown/plain.js';
 import { getBridgeContext } from './context.js';
-import { escapeHtml } from './adapters/telegram-utils.js';
 import {
   getDesktopSessionByThreadId,
   listDesktopSessions,
-  readDesktopSessionEventDeltaByFilePath,
-  readDesktopSessionEventStreamByFilePath,
+  readDesktopSessionMirrorRecordDeltaByFilePath,
+  readDesktopSessionMirrorRecordStreamByFilePath,
   readDesktopSessionMessages,
 } from '../../desktop-sessions.js';
-import type { DesktopSessionEvent } from '../../desktop-sessions.js';
+import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
 import {
   advanceDesktopMirrorCursor,
   filterDuplicateAssistantEvents,
@@ -68,6 +68,10 @@ const MIRROR_POLL_INTERVAL_MS = 2_500;
 const MIRROR_WATCH_DEBOUNCE_MS = 350;
 const MIRROR_EVENT_BATCH_LIMIT = 8;
 const MIRROR_SUPPRESSION_WINDOW_MS = 4_000;
+// Idle timeout after the last desktop event before we flush a buffered turn
+// without seeing task_complete. Keep this conservative to avoid splitting
+// long-running desktop tasks into premature IM notifications.
+const MIRROR_IDLE_TIMEOUT_MS = 1_200_000;
 const AVAILABLE_CODEX_MODELS = listSelectableCodexModels();
 const AVAILABLE_CODEX_MODEL_MAP = new Map(AVAILABLE_CODEX_MODELS.map((model) => [model.slug, model]));
 
@@ -294,7 +298,7 @@ function buildIndexedCommandList(
   return lines.join('\n').trim();
 }
 
-function isCommandMarkdownEnabled(channelType: string): boolean {
+function isFeedbackMarkdownEnabled(channelType: string): boolean {
   const { store } = getBridgeContext();
   if (channelType === 'feishu') {
     return store.getSetting('bridge_feishu_command_markdown_enabled') !== 'false';
@@ -305,8 +309,18 @@ function isCommandMarkdownEnabled(channelType: string): boolean {
   return false;
 }
 
-function getCommandResponseParseMode(channelType: string): 'Markdown' | 'plain' {
-  return isCommandMarkdownEnabled(channelType) ? 'Markdown' : 'plain';
+function getFeedbackParseMode(channelType: string): 'Markdown' | 'plain' {
+  return isFeedbackMarkdownEnabled(channelType)
+    ? 'Markdown'
+    : 'plain';
+}
+
+function renderFeedbackText(text: string, parseMode: 'Markdown' | 'plain'): string {
+  return parseMode === 'Markdown' ? text : markdownToPlainText(text);
+}
+
+function renderFeedbackTextForChannel(channelType: string, text: string): string {
+  return renderFeedbackText(text, getFeedbackParseMode(channelType));
 }
 
 function resolveEffectiveReasoningEffort(session: BridgeSession | null | undefined): string {
@@ -726,8 +740,8 @@ import type { ChannelAddress, SendResult } from './types.js';
 
 /**
  * Render response text and deliver via the appropriate channel format.
- * Telegram: Markdown → HTML chunks via deliverRendered.
- * Other channels: plain text via deliver (no HTML).
+ * Telegram/Discord/Feishu: use native markdown rendering when enabled.
+ * Other channels: fall back to the adapter's plain/markdown handling.
  */
 async function deliverResponse(
   adapter: BaseChannelAdapter,
@@ -736,14 +750,17 @@ async function deliverResponse(
   sessionId: string,
   replyToMessageId?: string,
 ): Promise<SendResult> {
-  if (adapter.channelType === 'telegram') {
+  const parseMode = getFeedbackParseMode(adapter.channelType);
+  const renderedText = renderFeedbackText(responseText, parseMode);
+
+  if (parseMode === 'Markdown' && adapter.channelType === 'telegram') {
     const chunks = markdownToTelegramChunks(responseText, 4096);
     if (chunks.length > 0) {
       return deliverRendered(adapter, address, chunks, { sessionId, replyToMessageId });
     }
     return { ok: true };
   }
-  if (adapter.channelType === 'discord') {
+  if (parseMode === 'Markdown' && adapter.channelType === 'discord') {
     // Discord: native markdown, chunk at 2000 chars with fence repair
     const chunks = markdownToDiscordChunks(responseText, 2000);
     for (let i = 0; i < chunks.length; i++) {
@@ -757,7 +774,7 @@ async function deliverResponse(
     }
     return { ok: true };
   }
-  if (adapter.channelType === 'feishu') {
+  if (parseMode === 'Markdown' && adapter.channelType === 'feishu') {
     // Feishu: pass markdown through for adapter to format as post/card
     return deliver(adapter, {
       address,
@@ -766,11 +783,11 @@ async function deliverResponse(
       replyToMessageId,
     }, { sessionId });
   }
-  // Generic fallback: deliver as plain text (deliver() handles chunking internally)
+  // Generic fallback: let the adapter handle the selected parse mode directly.
   return deliver(adapter, {
     address,
-    text: responseText,
-    parseMode: 'plain',
+    text: parseMode === 'Markdown' ? responseText : renderedText,
+    parseMode,
     replyToMessageId,
   }, { sessionId });
 }
@@ -799,6 +816,26 @@ interface DesktopMirrorSubscription {
   fileMtimeMs: number | null;
   fileIdentity: string | null;
   trailingText: string;
+  pendingTurn: DesktopMirrorTurnState | null;
+}
+
+interface DesktopMirrorTurnState {
+  turnId: string | null;
+  startedAt: string;
+  lastActivityAt: string;
+  lastAssistantText: string | null;
+  lastCommentaryText: string | null;
+  streamedText: string;
+  streamStarted: boolean;
+  toolCalls: Map<string, ToolCallInfo>;
+}
+
+interface FinalizedDesktopMirrorTurn {
+  text: string;
+  signature: string;
+  timestamp: string;
+  status: 'completed' | 'interrupted';
+  role?: 'assistant' | 'user';
 }
 
 interface BridgeManagerState {
@@ -1058,29 +1095,163 @@ function syncMirrorSessionState(sessionId: string): void {
   });
 }
 
-function formatMirrorMessage(threadTitle: string | null, events: DesktopSessionEvent[]): string {
-  const recentEvents = events
-    .filter((event) => event.role !== 'user')
-    .slice(-MIRROR_EVENT_BATCH_LIMIT)
-    .map((event) => event.content.trim())
-    .filter(Boolean);
-
-  if (recentEvents.length === 0) {
-    return '';
-  }
-
-  const title = threadTitle?.trim() || '桌面线程';
-  return `${title} 回复:\n${recentEvents.join('\n\n')}`;
+function formatMirrorMessage(threadTitle: string | null, text: string): string {
+  return formatMirrorMessageForRole(threadTitle, text, 'assistant');
 }
 
-async function deliverMirrorEvents(subscription: DesktopMirrorSubscription, events: DesktopSessionEvent[]): Promise<void> {
-  if (events.length === 0) return;
+function getMirrorAssistantRuntimeLabel(): string {
+  const { store } = getBridgeContext();
+  const runtime = (store.getSetting('bridge_runtime') || 'codex').trim().toLowerCase();
+  return runtime || 'codex';
+}
 
+function buildMirrorHeader(
+  threadTitle: string | null,
+  role: 'assistant' | 'user' = 'assistant',
+  markdown = false,
+): string {
+  const title = threadTitle?.trim() || '桌面线程';
+  const speaker = role === 'user' ? '我' : getMirrorAssistantRuntimeLabel();
+  const plainHeader = `<${title}> ${speaker}:`;
+  const markdownHeader = `&lt;${title}&gt; ${speaker}:`;
+  const header = markdown ? markdownHeader : plainHeader;
+  return markdown ? `**${header}**` : header;
+}
+
+function formatMirrorMessageForRole(
+  threadTitle: string | null,
+  text: string,
+  role: 'assistant' | 'user' = 'assistant',
+  markdown = false,
+): string {
+  const normalized = text.trim();
+  if (!normalized) return '';
+  return `${buildMirrorHeader(threadTitle, role, markdown)}\n\n${normalized}`;
+}
+
+function getMirrorStreamingAdapter(subscription: DesktopMirrorSubscription): BaseChannelAdapter | null {
+  const state = getState();
+  const adapter = state.adapters.get(subscription.channelType);
+  if (!adapter || !adapter.isRunning()) return null;
+  if (subscription.channelType !== 'feishu') return null;
+  if (typeof adapter.onStreamText !== 'function' || typeof adapter.onStreamEnd !== 'function') {
+    return null;
+  }
+  return adapter;
+}
+
+function getMirrorStreamingText(
+  subscription: DesktopMirrorSubscription,
+  turnState: DesktopMirrorTurnState,
+): string {
+  const content = turnState.streamedText.trim();
+  const title = getDesktopThreadTitle(subscription.threadId)?.trim() || '桌面线程';
+  const markdown = getFeedbackParseMode(subscription.channelType) === 'Markdown';
+  return content
+    ? formatMirrorMessageForRole(title, content, 'assistant', markdown)
+    : buildMirrorHeader(title, 'assistant', markdown);
+}
+
+function startMirrorStreaming(
+  subscription: DesktopMirrorSubscription,
+  turnState: DesktopMirrorTurnState,
+): void {
+  const adapter = getMirrorStreamingAdapter(subscription);
+  if (!adapter || turnState.streamStarted) return;
+
+  try {
+    adapter.onMirrorStreamStart?.(subscription.chatId);
+    if (!adapter.onMirrorStreamStart) {
+      adapter.onStreamText?.(subscription.chatId, '');
+    }
+    turnState.streamStarted = true;
+  } catch {
+    // Non-critical best effort only.
+  }
+}
+
+function updateMirrorStreaming(
+  subscription: DesktopMirrorSubscription,
+  turnState: DesktopMirrorTurnState,
+): void {
+  const adapter = getMirrorStreamingAdapter(subscription);
+  if (!adapter) return;
+  startMirrorStreaming(subscription, turnState);
+  const text = renderFeedbackTextForChannel(
+    subscription.channelType,
+    getMirrorStreamingText(subscription, turnState),
+  );
+  if (!text) return;
+  try {
+    adapter.onStreamText?.(subscription.chatId, text);
+  } catch {
+    // Non-critical best effort only.
+  }
+}
+
+function updateMirrorToolProgress(
+  subscription: DesktopMirrorSubscription,
+  turnState: DesktopMirrorTurnState,
+): void {
+  const adapter = getMirrorStreamingAdapter(subscription);
+  if (!adapter || typeof adapter.onToolEvent !== 'function') return;
+  startMirrorStreaming(subscription, turnState);
+  try {
+    adapter.onToolEvent(subscription.chatId, Array.from(turnState.toolCalls.values()));
+  } catch {
+    // Non-critical best effort only.
+  }
+}
+
+function stopMirrorStreaming(
+  subscription: DesktopMirrorSubscription,
+  status: 'completed' | 'interrupted' = 'interrupted',
+): void {
+  const adapter = getMirrorStreamingAdapter(subscription);
+  const pendingTurn = subscription.pendingTurn;
+  if (!adapter || !pendingTurn?.streamStarted || typeof adapter.onStreamEnd !== 'function') return;
+  const text = renderFeedbackTextForChannel(
+    subscription.channelType,
+    getMirrorStreamingText(subscription, pendingTurn),
+  );
+  void adapter.onStreamEnd(subscription.chatId, status, text).catch(() => {});
+}
+
+async function deliverMirrorTurn(
+  subscription: DesktopMirrorSubscription,
+  turn: FinalizedDesktopMirrorTurn,
+): Promise<void> {
   const state = getState();
   const adapter = state.adapters.get(subscription.channelType);
   if (!adapter || !adapter.isRunning()) return;
 
-  const text = formatMirrorMessage(getDesktopThreadTitle(subscription.threadId), events);
+  const title = getDesktopThreadTitle(subscription.threadId)?.trim() || '桌面线程';
+  const responseParseMode = getFeedbackParseMode(subscription.channelType);
+  const markdown = responseParseMode === 'Markdown';
+  const text = turn.text
+    ? renderFeedbackText(
+      formatMirrorMessageForRole(title, turn.text, turn.role || 'assistant', markdown),
+      responseParseMode,
+    )
+    : '';
+  const streamText = text || buildMirrorHeader(title, 'assistant', markdown);
+
+  if (subscription.channelType === 'feishu' && typeof adapter.onStreamEnd === 'function') {
+    try {
+      const finalized = await adapter.onStreamEnd(
+        subscription.chatId,
+        turn.status,
+        streamText,
+      );
+      if (finalized) {
+        subscription.lastDeliveredAt = turn.timestamp || nowIso();
+        return;
+      }
+    } catch (error) {
+      console.warn('[bridge-manager] Mirror stream finalize failed:', error instanceof Error ? error.message : error);
+    }
+  }
+
   if (!text) return;
 
   const response = await deliver(adapter, {
@@ -1089,23 +1260,203 @@ async function deliverMirrorEvents(subscription: DesktopMirrorSubscription, even
       chatId: subscription.chatId,
     },
     text,
-    parseMode: 'plain',
+    parseMode: responseParseMode,
   }, {
     sessionId: subscription.sessionId,
-    dedupKey: `mirror:${subscription.bindingId}:${events[0]?.signature}:${events[events.length - 1]?.signature}`,
+    dedupKey: `mirror:${subscription.bindingId}:${turn.signature}`,
   });
 
   if (!response.ok) {
     throw new Error(response.error || 'mirror delivery failed');
   }
 
-  subscription.lastDeliveredAt = events[events.length - 1]?.timestamp || nowIso();
+  subscription.lastDeliveredAt = turn.timestamp || nowIso();
+}
+
+async function deliverMirrorTurns(
+  subscription: DesktopMirrorSubscription,
+  turns: FinalizedDesktopMirrorTurn[],
+): Promise<void> {
+  for (const turn of turns.slice(-MIRROR_EVENT_BATCH_LIMIT)) {
+    await deliverMirrorTurn(subscription, turn);
+  }
+}
+
+function createMirrorTurnState(timestamp: string, turnId?: string): DesktopMirrorTurnState {
+  const safeTimestamp = timestamp || nowIso();
+  return {
+    turnId: turnId || null,
+    startedAt: safeTimestamp,
+    lastActivityAt: safeTimestamp,
+    lastAssistantText: null,
+    lastCommentaryText: null,
+    streamedText: '',
+    streamStarted: false,
+    toolCalls: new Map(),
+  };
+}
+
+function appendMirrorStreamText(
+  turnState: DesktopMirrorTurnState,
+  chunk: string,
+): void {
+  const normalized = chunk.trim();
+  if (!normalized) return;
+  turnState.streamedText = turnState.streamedText
+    ? `${turnState.streamedText}\n\n${normalized}`
+    : normalized;
+}
+
+function ensureMirrorTurnState(
+  subscription: DesktopMirrorSubscription,
+  record: DesktopMirrorRecord,
+): DesktopMirrorTurnState {
+  if (!subscription.pendingTurn) {
+    subscription.pendingTurn = createMirrorTurnState(record.timestamp, record.turnId);
+    return subscription.pendingTurn;
+  }
+
+  if (!subscription.pendingTurn.turnId && record.turnId) {
+    subscription.pendingTurn.turnId = record.turnId;
+  }
+  if (record.timestamp) {
+    subscription.pendingTurn.lastActivityAt = record.timestamp;
+  }
+  return subscription.pendingTurn;
+}
+
+function finalizeMirrorTurn(
+  subscription: DesktopMirrorSubscription,
+  signature: string,
+  timestamp: string,
+  status: 'completed' | 'interrupted',
+  preferredText?: string,
+): FinalizedDesktopMirrorTurn | null {
+  const pendingTurn = subscription.pendingTurn;
+  subscription.pendingTurn = null;
+  if (!pendingTurn) return null;
+
+  const text = (preferredText || pendingTurn.lastAssistantText || pendingTurn.lastCommentaryText || '').trim();
+  if (!text && pendingTurn.toolCalls.size === 0) return null;
+
+  return {
+    text,
+    signature,
+    timestamp: timestamp || pendingTurn.lastActivityAt || nowIso(),
+    status,
+  };
+}
+
+function consumeMirrorRecords(
+  subscription: DesktopMirrorSubscription,
+  records: DesktopMirrorRecord[],
+): FinalizedDesktopMirrorTurn[] {
+  const finalized: FinalizedDesktopMirrorTurn[] = [];
+
+  for (const record of records) {
+    if (record.type === 'task_started') {
+      const superseded = finalizeMirrorTurn(subscription, `superseded:${record.signature}`, record.timestamp, 'interrupted');
+      if (superseded) finalized.push(superseded);
+      subscription.pendingTurn = createMirrorTurnState(record.timestamp, record.turnId);
+      startMirrorStreaming(subscription, subscription.pendingTurn);
+      continue;
+    }
+
+    if (record.type === 'task_complete') {
+      ensureMirrorTurnState(subscription, record);
+      const completed = finalizeMirrorTurn(subscription, record.signature, record.timestamp, 'completed', record.content);
+      if (completed) finalized.push(completed);
+      continue;
+    }
+
+    if (record.type === 'message' && record.role === 'user') {
+      const text = record.content.trim();
+      if (text) {
+        finalized.push({
+          text,
+          signature: record.signature,
+          timestamp: record.timestamp,
+          status: 'completed',
+          role: 'user',
+        });
+      }
+      continue;
+    }
+
+    if (record.type === 'message') {
+      const pendingTurn = ensureMirrorTurnState(subscription, record);
+      if (record.role === 'assistant') {
+        const text = record.content.trim();
+        if (text) {
+          pendingTurn.lastAssistantText = text;
+          appendMirrorStreamText(pendingTurn, text);
+          updateMirrorStreaming(subscription, pendingTurn);
+        }
+      } else if (record.role === 'commentary') {
+        const text = record.content.trim();
+        if (text) {
+          pendingTurn.lastCommentaryText = text;
+          appendMirrorStreamText(pendingTurn, text);
+          updateMirrorStreaming(subscription, pendingTurn);
+        }
+      }
+      continue;
+    }
+
+    if (record.type === 'tool_started') {
+      const pendingTurn = ensureMirrorTurnState(subscription, record);
+      const toolId = record.toolId || record.signature;
+      const toolName = record.toolName || pendingTurn.toolCalls.get(toolId)?.name || 'tool';
+      pendingTurn.toolCalls.set(toolId, {
+        id: toolId,
+        name: toolName,
+        status: 'running',
+      });
+      updateMirrorToolProgress(subscription, pendingTurn);
+      continue;
+    }
+
+    if (record.type === 'tool_finished') {
+      const pendingTurn = ensureMirrorTurnState(subscription, record);
+      const toolId = record.toolId || record.signature;
+      const existing = pendingTurn.toolCalls.get(toolId);
+      pendingTurn.toolCalls.set(toolId, {
+        id: toolId,
+        name: existing?.name || record.toolName || 'tool',
+        status: record.isError ? 'error' : 'complete',
+      });
+      updateMirrorToolProgress(subscription, pendingTurn);
+    }
+  }
+
+  return finalized;
+}
+
+function flushTimedOutMirrorTurn(
+  subscription: DesktopMirrorSubscription,
+  nowMs = Date.now(),
+): FinalizedDesktopMirrorTurn | null {
+  const pendingTurn = subscription.pendingTurn;
+  if (!pendingTurn?.lastActivityAt) return null;
+  const lastActivityMs = Date.parse(pendingTurn.lastActivityAt);
+  if (!Number.isFinite(lastActivityMs)) return null;
+  if (nowMs - lastActivityMs < MIRROR_IDLE_TIMEOUT_MS) {
+    return null;
+  }
+
+  return finalizeMirrorTurn(
+    subscription,
+    `timeout:${subscription.threadId}:${pendingTurn.turnId || pendingTurn.lastActivityAt}`,
+    pendingTurn.lastActivityAt,
+    'interrupted',
+  );
 }
 
 function removeMirrorSubscription(bindingId: string): void {
   const state = getState();
   const existing = state.mirrorSubscriptions.get(bindingId);
   if (!existing) return;
+  stopMirrorStreaming(existing);
   closeMirrorWatcher(existing);
   state.mirrorSubscriptions.delete(bindingId);
   syncMirrorSessionState(existing.sessionId);
@@ -1150,6 +1501,7 @@ function upsertMirrorSubscription(binding: { id: string; channelType: string; ch
       fileMtimeMs: null,
       fileIdentity: null,
       trailingText: '',
+      pendingTurn: null,
     };
     watchMirrorFile(created, filePath);
     state.mirrorSubscriptions.set(binding.id, created);
@@ -1167,12 +1519,16 @@ function upsertMirrorSubscription(binding: { id: string; channelType: string; ch
   existing.filePath = filePath;
   existing.status = filePath ? 'watching' : 'stale';
   if (threadChanged) {
+    stopMirrorStreaming(existing);
     existing.cursor = { initialized: false, lastEventCount: 0 };
     existing.lastDeliveredAt = session.mirror_last_event_at || null;
     existing.dirty = true;
+    existing.pendingTurn = null;
     resetMirrorReadState(existing);
   } else if (filePathChanged) {
+    stopMirrorStreaming(existing);
     existing.dirty = true;
+    existing.pendingTurn = null;
     resetMirrorReadState(existing);
   }
   watchMirrorFile(existing, filePath);
@@ -1247,7 +1603,7 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
     return;
   }
 
-  let deliverableEvents: DesktopSessionEvent[] = [];
+  let deliverableRecords: DesktopMirrorRecord[] = [];
 
   const requiresFullRecover = !subscription.cursor.initialized
     || subscription.fileOffset === 0
@@ -1262,22 +1618,22 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
 
   if (requiresFullRecover) {
     const previousCursor = subscription.cursor;
-    const events = readDesktopSessionEventStreamByFilePath(subscription.filePath);
-    const delta = reconcileDesktopMirrorCursor(subscription.cursor, events);
+    const records = readDesktopSessionMirrorRecordStreamByFilePath(subscription.filePath);
+    const delta = reconcileDesktopMirrorCursor(subscription.cursor, records);
     subscription.cursor = delta.nextCursor;
-    deliverableEvents = filterDuplicateAssistantEvents(previousCursor, delta.deliverableEvents);
+    deliverableRecords = filterDuplicateAssistantEvents(previousCursor, delta.deliverableRecords);
     subscription.trailingText = '';
     subscription.fileOffset = snapshot.size;
   } else if (snapshot.size > subscription.fileOffset || subscription.trailingText) {
     const previousCursor = subscription.cursor;
-    const delta = readDesktopSessionEventDeltaByFilePath(
+    const delta = readDesktopSessionMirrorRecordDeltaByFilePath(
       subscription.filePath,
       subscription.fileOffset,
       snapshot.size,
       subscription.trailingText,
     );
-    deliverableEvents = filterDuplicateAssistantEvents(previousCursor, delta.events);
-    subscription.cursor = advanceDesktopMirrorCursor(subscription.cursor, delta.events);
+    deliverableRecords = filterDuplicateAssistantEvents(previousCursor, delta.records);
+    subscription.cursor = advanceDesktopMirrorCursor(subscription.cursor, delta.records);
     subscription.trailingText = delta.trailingText;
     subscription.fileOffset = delta.nextOffset;
   }
@@ -1287,18 +1643,26 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
   subscription.fileIdentity = snapshot.identity;
   subscription.dirty = false;
 
-  if (deliverableEvents.length === 0) {
-    syncMirrorSessionState(subscription.sessionId);
-    return;
-  }
-
   if (getState().activeTasks.has(subscription.sessionId) || isMirrorSuppressed(subscription.sessionId)) {
     syncMirrorSessionState(subscription.sessionId);
     return;
   }
 
+  const finalizedTurns = deliverableRecords.length > 0
+    ? consumeMirrorRecords(subscription, deliverableRecords)
+    : [];
+  const timedOutTurn = flushTimedOutMirrorTurn(subscription);
+  if (timedOutTurn) {
+    finalizedTurns.push(timedOutTurn);
+  }
+
+  if (finalizedTurns.length === 0) {
+    syncMirrorSessionState(subscription.sessionId);
+    return;
+  }
+
   try {
-    await deliverMirrorEvents(subscription, deliverableEvents);
+    await deliverMirrorTurns(subscription, finalizedTurns);
   } catch (error) {
     subscription.dirty = true;
     console.warn('[bridge-manager] Mirror delivery failed:', error instanceof Error ? error.message : error);
@@ -1703,7 +2067,7 @@ async function handleMessage(
       const confirmMsg: OutboundMessage = {
         address: msg.address,
         text: 'Permission response recorded.',
-        parseMode: getCommandResponseParseMode(adapter.channelType),
+        parseMode: getFeedbackParseMode(adapter.channelType),
       };
       await deliver(adapter, confirmMsg);
     }
@@ -1727,7 +2091,7 @@ async function handleMessage(
       await deliver(adapter, {
         address: msg.address,
         text: rawData.userVisibleError,
-        parseMode: getCommandResponseParseMode(adapter.channelType),
+        parseMode: getFeedbackParseMode(adapter.channelType),
         replyToMessageId: msg.messageId,
       });
     } else if (rawData?.imageDownloadFailed || rawData?.attachmentDownloadFailed) {
@@ -1735,7 +2099,7 @@ async function handleMessage(
       await deliver(adapter, {
         address: msg.address,
         text: `Failed to download ${rawData.failedCount ?? 1} ${failureLabel}. Please try sending again.`,
-        parseMode: getCommandResponseParseMode(adapter.channelType),
+        parseMode: getFeedbackParseMode(adapter.channelType),
         replyToMessageId: msg.messageId,
       });
     }
@@ -1775,14 +2139,14 @@ async function handleMessage(
           await deliver(adapter, {
             address: msg.address,
             text: `${label}: recorded.`,
-            parseMode: getCommandResponseParseMode(adapter.channelType),
+            parseMode: getFeedbackParseMode(adapter.channelType),
             replyToMessageId: msg.messageId,
           });
         } else {
           await deliver(adapter, {
             address: msg.address,
             text: `Permission not found or already resolved.`,
-            parseMode: getCommandResponseParseMode(adapter.channelType),
+            parseMode: getFeedbackParseMode(adapter.channelType),
             replyToMessageId: msg.messageId,
           });
         }
@@ -1794,7 +2158,7 @@ async function handleMessage(
         await deliver(adapter, {
           address: msg.address,
           text: `Multiple pending permissions (${pendingLinks.length}). Please use the full command:\n/perm allow|allow_session|deny <id>`,
-          parseMode: getCommandResponseParseMode(adapter.channelType),
+          parseMode: getFeedbackParseMode(adapter.channelType),
           replyToMessageId: msg.messageId,
         });
         ack();
@@ -1913,7 +2277,8 @@ async function handleMessage(
   const toolCallTracker = new Map<string, ToolCallInfo>();
 
   const onStreamCardText = hasStreamingCards ? (fullText: string) => {
-    try { adapter.onStreamText!(msg.address.chatId, fullText); } catch { /* non-critical */ }
+    const rendered = renderFeedbackTextForChannel(adapter.channelType, fullText);
+    try { adapter.onStreamText!(msg.address.chatId, rendered); } catch { /* non-critical */ }
   } : undefined;
 
   const onToolEvent = hasStreamingCards ? (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
@@ -1961,7 +2326,11 @@ async function handleMessage(
     if (hasStreamingCards && adapter.onStreamEnd) {
       try {
         const status = result.hasError ? 'error' : 'completed';
-        cardFinalized = await adapter.onStreamEnd(msg.address.chatId, status, result.responseText);
+        cardFinalized = await adapter.onStreamEnd(
+          msg.address.chatId,
+          status,
+          renderFeedbackTextForChannel(adapter.channelType, result.responseText),
+        );
       } catch (err) {
         console.warn('[bridge-manager] Card finalize failed:', err instanceof Error ? err.message : err);
       }
@@ -1974,13 +2343,13 @@ async function handleMessage(
         await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
       }
     } else if (result.hasError) {
-      const errorResponse: OutboundMessage = {
-        address: msg.address,
-        text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
-        parseMode: 'HTML',
-        replyToMessageId: msg.messageId,
-      };
-      await deliver(adapter, errorResponse);
+      await deliverResponse(
+        adapter,
+        msg.address,
+        `**Error:** ${result.errorMessage}`,
+        binding.codepilotSessionId,
+        msg.messageId,
+      );
     }
 
     // Persist the actual SDK session ID for future resume.
@@ -2051,14 +2420,14 @@ async function handleCommand(
     await deliver(adapter, {
       address: msg.address,
       text: `Command rejected: invalid input detected.`,
-      parseMode: getCommandResponseParseMode(adapter.channelType),
+      parseMode: getFeedbackParseMode(adapter.channelType),
       replyToMessageId: msg.messageId,
     });
     return;
   }
 
   let response = '';
-  let responseParseMode: 'HTML' | 'Markdown' | 'plain' = getCommandResponseParseMode(adapter.channelType);
+  let responseParseMode: 'Markdown' | 'plain' = getFeedbackParseMode(adapter.channelType);
   const currentBinding = store.getChannelBinding(msg.address.channelType, msg.address.chatId);
 
   switch (command) {
@@ -2666,7 +3035,7 @@ async function handleCommand(
     }
 
     case '/help':
-      responseParseMode = getCommandResponseParseMode(adapter.channelType);
+      responseParseMode = getFeedbackParseMode(adapter.channelType);
       response = [
         '**命令速览**',
         '',
@@ -2747,4 +3116,7 @@ export const _testOnly = {
   formatRuntimeStatus,
   formatMirrorStatus,
   formatMirrorMessage,
+  formatMirrorMessageForRole,
+  consumeMirrorRecords,
+  flushTimedOutMirrorTurn,
 };
