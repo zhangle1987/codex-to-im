@@ -816,6 +816,7 @@ interface DesktopMirrorSubscription {
   fileMtimeMs: number | null;
   fileIdentity: string | null;
   trailingText: string;
+  bufferedRecords: DesktopMirrorRecord[];
   pendingTurn: DesktopMirrorTurnState | null;
 }
 
@@ -850,11 +851,18 @@ interface BridgeManagerState {
   activeTasks: Map<string, AbortController>;
   mirrorSubscriptions: Map<string, DesktopMirrorSubscription>;
   mirrorSyncInFlight: boolean;
-  mirrorSuppressUntil: Map<string, number>;
+  mirrorSuppressUntil: Map<string, MirrorSuppressionState>;
   queuedCounts: Map<string, number>;
   /** Per-session processing chains for concurrency control */
   sessionLocks: Map<string, Promise<void>>;
   autoStartChecked: boolean;
+}
+
+interface MirrorSuppressionState {
+  until: number;
+  promptText: string | null;
+  awaitingPromptMatch: boolean;
+  droppingTurn: boolean;
 }
 
 function getState(): BridgeManagerState {
@@ -973,19 +981,100 @@ function formatMirrorStatus(session: BridgeSession | null | undefined): string {
   return '未监听';
 }
 
-function markMirrorSuppressed(sessionId: string, durationMs = MIRROR_SUPPRESSION_WINDOW_MS): void {
-  getState().mirrorSuppressUntil.set(sessionId, Date.now() + durationMs);
+function normalizeMirrorPromptText(text: string): string {
+  return text.replace(/\r\n/g, '\n').trim();
+}
+
+function beginMirrorSuppression(sessionId: string, promptText: string): void {
+  getState().mirrorSuppressUntil.set(sessionId, {
+    until: Number.POSITIVE_INFINITY,
+    promptText: normalizeMirrorPromptText(promptText) || null,
+    awaitingPromptMatch: true,
+    droppingTurn: false,
+  });
+}
+
+function settleMirrorSuppression(sessionId: string, durationMs = MIRROR_SUPPRESSION_WINDOW_MS): void {
+  const state = getState();
+  const existing = state.mirrorSuppressUntil.get(sessionId);
+  if (existing) {
+    existing.until = Date.now() + durationMs;
+    return;
+  }
+  state.mirrorSuppressUntil.set(sessionId, {
+    until: Date.now() + durationMs,
+    promptText: null,
+    awaitingPromptMatch: false,
+    droppingTurn: false,
+  });
+}
+
+function getMirrorSuppressionState(sessionId: string): MirrorSuppressionState | null {
+  const state = getState();
+  const suppression = state.mirrorSuppressUntil.get(sessionId);
+  if (!suppression) return null;
+  if (suppression.until <= Date.now()) {
+    state.mirrorSuppressUntil.delete(sessionId);
+    return null;
+  }
+  return suppression;
 }
 
 function isMirrorSuppressed(sessionId: string): boolean {
-  const state = getState();
-  const until = state.mirrorSuppressUntil.get(sessionId);
-  if (!until) return false;
-  if (until <= Date.now()) {
-    state.mirrorSuppressUntil.delete(sessionId);
-    return false;
+  return getMirrorSuppressionState(sessionId) !== null;
+}
+
+function filterSuppressedMirrorRecords(
+  sessionId: string,
+  records: DesktopMirrorRecord[],
+): DesktopMirrorRecord[] {
+  const suppression = getMirrorSuppressionState(sessionId);
+  if (!suppression || records.length === 0) return records;
+
+  const filtered: DesktopMirrorRecord[] = [];
+
+  for (const record of records) {
+    const normalizedContent = record.type === 'message'
+      ? normalizeMirrorPromptText(record.content || '')
+      : '';
+
+    if (suppression.droppingTurn) {
+      if (record.type === 'message' && record.role === 'user') {
+        if (suppression.promptText && normalizedContent === suppression.promptText) {
+          continue;
+        }
+        filtered.push(record);
+        continue;
+      }
+
+      if (record.type === 'task_complete') {
+        suppression.droppingTurn = false;
+        suppression.awaitingPromptMatch = false;
+        suppression.promptText = null;
+        continue;
+      }
+
+      continue;
+    }
+
+    if (suppression.awaitingPromptMatch) {
+      if (record.type === 'message' && record.role === 'user') {
+        if (suppression.promptText && normalizedContent === suppression.promptText) {
+          suppression.awaitingPromptMatch = false;
+          suppression.droppingTurn = true;
+          continue;
+        }
+        filtered.push(record);
+        continue;
+      }
+
+      continue;
+    }
+
+    filtered.push(record);
   }
-  return true;
+
+  return filtered;
 }
 
 interface MirrorFileSnapshot {
@@ -1000,6 +1089,7 @@ function resetMirrorReadState(subscription: DesktopMirrorSubscription): void {
   subscription.fileMtimeMs = null;
   subscription.fileIdentity = null;
   subscription.trailingText = '';
+  subscription.bufferedRecords = [];
 }
 
 function statMirrorFile(filePath: string): MirrorFileSnapshot | null {
@@ -1452,6 +1542,27 @@ function flushTimedOutMirrorTurn(
   );
 }
 
+function hasPendingMirrorWork(subscription: DesktopMirrorSubscription): boolean {
+  return subscription.bufferedRecords.length > 0 || subscription.pendingTurn !== null;
+}
+
+function consumeBufferedMirrorTurns(
+  subscription: DesktopMirrorSubscription,
+  nowMs = Date.now(),
+): FinalizedDesktopMirrorTurn[] {
+  const bufferedRecords = subscription.bufferedRecords;
+  subscription.bufferedRecords = [];
+
+  const finalizedTurns = bufferedRecords.length > 0
+    ? consumeMirrorRecords(subscription, bufferedRecords)
+    : [];
+  const timedOutTurn = flushTimedOutMirrorTurn(subscription, nowMs);
+  if (timedOutTurn) {
+    finalizedTurns.push(timedOutTurn);
+  }
+  return finalizedTurns;
+}
+
 function removeMirrorSubscription(bindingId: string): void {
   const state = getState();
   const existing = state.mirrorSubscriptions.get(bindingId);
@@ -1501,6 +1612,7 @@ function upsertMirrorSubscription(binding: { id: string; channelType: string; ch
       fileMtimeMs: null,
       fileIdentity: null,
       trailingText: '',
+      bufferedRecords: [],
       pendingTurn: null,
     };
     watchMirrorFile(created, filePath);
@@ -1598,7 +1710,7 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
     && subscription.fileIdentity === snapshot.identity
     && subscription.fileSize === snapshot.size
     && subscription.fileMtimeMs === snapshot.mtimeMs;
-  if (unchanged) {
+  if (unchanged && !hasPendingMirrorWork(subscription)) {
     syncMirrorSessionState(subscription.sessionId);
     return;
   }
@@ -1643,18 +1755,19 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
   subscription.fileIdentity = snapshot.identity;
   subscription.dirty = false;
 
+  if (deliverableRecords.length > 0) {
+    const filteredRecords = filterSuppressedMirrorRecords(subscription.sessionId, deliverableRecords);
+    if (filteredRecords.length > 0) {
+      subscription.bufferedRecords.push(...filteredRecords);
+    }
+  }
+
   if (getState().activeTasks.has(subscription.sessionId) || isMirrorSuppressed(subscription.sessionId)) {
     syncMirrorSessionState(subscription.sessionId);
     return;
   }
 
-  const finalizedTurns = deliverableRecords.length > 0
-    ? consumeMirrorRecords(subscription, deliverableRecords)
-    : [];
-  const timedOutTurn = flushTimedOutMirrorTurn(subscription);
-  if (timedOutTurn) {
-    finalizedTurns.push(timedOutTurn);
-  }
+  const finalizedTurns = consumeBufferedMirrorTurns(subscription);
 
   if (finalizedTurns.length === 0) {
     syncMirrorSessionState(subscription.sessionId);
@@ -2204,7 +2317,7 @@ async function handleMessage(
   const taskAbort = new AbortController();
   const state = getState();
   state.activeTasks.set(binding.codepilotSessionId, taskAbort);
-  markMirrorSuppressed(binding.codepilotSessionId);
+  beginMirrorSuppression(binding.codepilotSessionId, text || (hasAttachments ? 'Describe this image.' : ''));
   syncSessionRuntimeState(binding.codepilotSessionId);
 
   // ── Streaming preview setup ──────────────────────────────────
@@ -2380,7 +2493,7 @@ async function handleMessage(
       } catch { /* best effort */ }
     }
 
-    markMirrorSuppressed(binding.codepilotSessionId);
+    settleMirrorSuppression(binding.codepilotSessionId);
     state.activeTasks.delete(binding.codepilotSessionId);
     syncSessionRuntimeState(binding.codepilotSessionId);
     // Notify adapter that message processing ended
@@ -3118,5 +3231,9 @@ export const _testOnly = {
   formatMirrorMessage,
   formatMirrorMessageForRole,
   consumeMirrorRecords,
+  consumeBufferedMirrorTurns,
   flushTimedOutMirrorTurn,
+  filterSuppressedMirrorRecords,
+  beginMirrorSuppression,
+  settleMirrorSuppression,
 };

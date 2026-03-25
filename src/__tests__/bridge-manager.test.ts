@@ -470,6 +470,123 @@ describe('bridge-manager status formatting', () => {
     assert.equal(subscription.pendingTurn, null);
   });
 
+  it('drains buffered mirror records after a busy window ends', () => {
+    const subscription = {
+      pendingTurn: null,
+      threadId: 'thread-1',
+      bufferedRecords: [
+        {
+          signature: 'user-1',
+          type: 'message',
+          role: 'user',
+          content: 'desktop prompt',
+          timestamp: '2026-03-25T08:00:00.000Z',
+        },
+      ],
+    } as { pendingTurn: unknown; threadId: string; bufferedRecords: unknown[] };
+
+    const finalized = _testOnly.consumeBufferedMirrorTurns(subscription as any);
+
+    assert.deepEqual(finalized, [
+      {
+        text: 'desktop prompt',
+        signature: 'user-1',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        status: 'completed',
+        role: 'user',
+      },
+    ]);
+    assert.deepEqual(subscription.bufferedRecords, []);
+    assert.equal(subscription.pendingTurn, null);
+  });
+
+  it('checks buffered pending turns for timeout even when no new file data arrived', () => {
+    const subscription = {
+      threadId: 'thread-1',
+      bufferedRecords: [],
+      pendingTurn: {
+        turnId: 'turn-1',
+        startedAt: '2026-03-25T08:00:00.000Z',
+        lastActivityAt: '2026-03-25T08:00:00.000Z',
+        lastAssistantText: 'stale answer',
+        lastCommentaryText: null,
+        streamedText: 'stale answer',
+        streamStarted: false,
+        toolCalls: new Map(),
+      },
+    } as { pendingTurn: unknown; threadId: string; bufferedRecords: unknown[] };
+
+    const finalized = _testOnly.consumeBufferedMirrorTurns(
+      subscription as any,
+      Date.parse('2026-03-25T08:20:01.000Z'),
+    );
+
+    assert.deepEqual(finalized, [
+      {
+        text: 'stale answer',
+        signature: 'timeout:thread-1:turn-1',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        status: 'interrupted',
+      },
+    ]);
+    assert.deepEqual(subscription.bufferedRecords, []);
+    assert.equal(subscription.pendingTurn, null);
+  });
+
+  it('suppresses IM-originated mirror records while preserving later desktop user input', () => {
+    const sessionId = 'session-self-echo';
+    _testOnly.beginMirrorSuppression(sessionId, '来自 IM 的问题');
+
+    const filtered = _testOnly.filterSuppressedMirrorRecords(sessionId, [
+      {
+        signature: 'start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'user-self',
+        type: 'message',
+        role: 'user',
+        content: '来自 IM 的问题',
+        timestamp: '2026-03-25T08:00:01.000Z',
+      },
+      {
+        signature: 'assistant-self',
+        type: 'message',
+        role: 'assistant',
+        content: '来自 IM 的回复',
+        timestamp: '2026-03-25T08:00:02.000Z',
+      },
+      {
+        signature: 'user-desktop',
+        type: 'message',
+        role: 'user',
+        content: '来自桌面的新消息',
+        timestamp: '2026-03-25T08:00:03.000Z',
+      },
+      {
+        signature: 'complete',
+        type: 'task_complete',
+        role: 'assistant',
+        content: '来自 IM 的回复',
+        timestamp: '2026-03-25T08:00:04.000Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.deepEqual(filtered, [
+      {
+        signature: 'user-desktop',
+        type: 'message',
+        role: 'user',
+        content: '来自桌面的新消息',
+        timestamp: '2026-03-25T08:00:03.000Z',
+      },
+    ]);
+  });
+
   it('flushes a buffered mirror turn after the idle timeout', () => {
     const subscription = {
       threadId: 'thread-1',
