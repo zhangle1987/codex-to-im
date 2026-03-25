@@ -130,6 +130,7 @@ Useful commands:
 - `/` / `/status` shows the current session
 - `/h` / `/help` shows help
 - `/t` / `/threads` lists recent desktop threads, and `/t 1` / `/thread 1` binds the first one
+- `/n` / `/new` creates a new thread in the current formal session directory; these IM-created threads are only guaranteed to continue inside IM and will not automatically appear in the Codex Desktop thread list
 - `/n proj1` / `/new proj1` creates a new project session under the default workspace root
 - `/m` / `/mode` shows or changes the current mode; options: `code` / `plan` / `ask`
 - `/r` / `/reasoning` shows or changes the current reasoning effort; options: `1|2|3|4|5`
@@ -156,7 +157,7 @@ So character-by-character text streaming is not guaranteed in the current implem
 
 If creating a new session fails with `Not inside a trusted directory`, either:
 
-- change the default working directory to a trusted Git repo, or
+- switch to a trusted project with `/new /absolute/path` or `/new proj1`, or
 - enable `Allow Codex outside trusted Git repos` in the basic settings and restart the bridge
 
 The configuration page also includes Codex runtime controls:

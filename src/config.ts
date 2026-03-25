@@ -8,7 +8,6 @@ export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhig
 export interface Config {
   runtime: 'claude' | 'codex' | 'auto';
   enabledChannels: string[];
-  defaultWorkDir: string;
   defaultWorkspaceRoot?: string;
   defaultModel?: string;
   defaultMode: string;
@@ -148,8 +147,7 @@ export function loadConfig(): Config {
   return {
     runtime,
     enabledChannels: splitCsv(env.get("CTI_ENABLED_CHANNELS")) ?? ["feishu"],
-    defaultWorkDir: expandHomePath(env.get("CTI_DEFAULT_WORKDIR")) || process.cwd(),
-    defaultWorkspaceRoot: expandHomePath(env.get("CTI_DEFAULT_WORKSPACE_ROOT")) || DEFAULT_WORKSPACE_ROOT,
+    defaultWorkspaceRoot: expandHomePath(env.get("CTI_DEFAULT_WORKSPACE_ROOT")) || undefined,
     defaultModel: env.get("CTI_DEFAULT_MODEL") || undefined,
     defaultMode: env.get("CTI_DEFAULT_MODE") || "code",
     historyMessageLimit: parsePositiveInt(env.get("CTI_HISTORY_MESSAGE_LIMIT")) ?? 8,
@@ -212,7 +210,6 @@ export function saveConfig(config: Config): void {
     "CTI_ENABLED_CHANNELS",
     config.enabledChannels.join(",")
   );
-  out += formatEnvLine("CTI_DEFAULT_WORKDIR", config.defaultWorkDir);
   out += formatEnvLine("CTI_DEFAULT_WORKSPACE_ROOT", config.defaultWorkspaceRoot);
   if (config.defaultModel) out += formatEnvLine("CTI_DEFAULT_MODEL", config.defaultModel);
   out += formatEnvLine("CTI_DEFAULT_MODE", config.defaultMode);
@@ -388,10 +385,9 @@ export function configToSettings(config: Config): Map<string, string> {
     m.set("bridge_weixin_cdn_base_url", config.weixinCdnBaseUrl);
 
   // ── Defaults ──
-  // Upstream keys: bridge_default_work_dir, bridge_default_workspace_root,
+  // Upstream keys: bridge_default_workspace_root,
   // bridge_default_model, default_model, bridge_codex_sandbox_mode,
   // bridge_codex_reasoning_effort
-  m.set("bridge_default_work_dir", config.defaultWorkDir);
   if (config.defaultWorkspaceRoot) {
     m.set("bridge_default_workspace_root", config.defaultWorkspaceRoot);
   }

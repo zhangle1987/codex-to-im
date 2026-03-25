@@ -2,8 +2,9 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import crypto from 'node:crypto';
 import net from 'node:net';
 import os from 'node:os';
+import fs from 'node:fs';
 
-import { CTI_HOME, configToSettings, loadConfig, saveConfig, type Config } from './config.js';
+import { CTI_HOME, DEFAULT_WORKSPACE_ROOT, configToSettings, loadConfig, saveConfig, type Config } from './config.js';
 import { PendingPermissions } from './permission-gateway.js';
 import { CodexProvider } from './codex-provider.js';
 import { getCodexSessionsRoot, listDesktopSessions } from './desktop-sessions.js';
@@ -29,11 +30,14 @@ import {
 import { JsonFileStore } from './store.js';
 import { runWeixinLogin } from './weixin-login.js';
 import { listWeixinAccounts } from './weixin-store.js';
+import { listSelectableCodexModels, readConfiguredCodexModel } from './codex-models.js';
 
 let port = 4781;
 const serverStartTime = new Date().toISOString();
 const supportedChannels = ['feishu', 'weixin'] as const;
 const AUTH_COOKIE_NAME = 'cti_ui_auth';
+const availableCodexModels = listSelectableCodexModels();
+const availableCodexModelSlugs = new Set(availableCodexModels.map((model) => model.slug));
 
 function parsePreferredPort(): number {
   const raw = Number(process.env.CTI_UI_PORT || '4781');
@@ -230,9 +234,10 @@ function configToPayload(config: Config) {
   return {
     runtime: config.runtime,
     enabledChannels: config.enabledChannels,
-    defaultWorkDir: config.defaultWorkDir,
     defaultWorkspaceRoot: config.defaultWorkspaceRoot || '',
     defaultModel: config.defaultModel || '',
+    codexDefaultModel: readConfiguredCodexModel() || '',
+    availableModels: availableCodexModels,
     defaultMode: config.defaultMode,
     historyMessageLimit: config.historyMessageLimit ?? 8,
     codexSkipGitRepoCheck: config.codexSkipGitRepoCheck === true,
@@ -254,6 +259,9 @@ function configToPayload(config: Config) {
 
 function mergeConfig(payload: Record<string, unknown>): Config {
   const current = loadConfig();
+  const rawDefaultModel = typeof payload.defaultModel === 'string'
+    ? payload.defaultModel.trim()
+    : undefined;
   const requestedChannels = Array.isArray(payload.enabledChannels)
     ? payload.enabledChannels.filter((value): value is string => typeof value === 'string')
     : current.enabledChannels;
@@ -267,9 +275,14 @@ function mergeConfig(payload: Record<string, unknown>): Config {
     ...current,
     runtime: payload.runtime === 'claude' || payload.runtime === 'auto' ? payload.runtime : 'codex',
     enabledChannels: requestedChannels.filter((channel) => supportedChannels.includes(channel as typeof supportedChannels[number])),
-    defaultWorkDir: asString(payload.defaultWorkDir) || current.defaultWorkDir || process.cwd(),
     defaultWorkspaceRoot: asString(payload.defaultWorkspaceRoot),
-    defaultModel: asString(payload.defaultModel),
+    defaultModel: rawDefaultModel === undefined
+      ? current.defaultModel
+      : rawDefaultModel === ''
+        ? undefined
+        : availableCodexModelSlugs.has(rawDefaultModel)
+          ? rawDefaultModel
+          : current.defaultModel,
     defaultMode: payload.defaultMode === 'plan' || payload.defaultMode === 'ask' ? payload.defaultMode : 'code',
     historyMessageLimit: asPositiveInt(payload.historyMessageLimit) || current.historyMessageLimit || 8,
     codexSkipGitRepoCheck: payload.codexSkipGitRepoCheck === true,
@@ -340,12 +353,14 @@ async function testCodexConnection(config: Config): Promise<{ ok: boolean; messa
   const provider = new CodexProvider(new PendingPermissions());
   const abortController = new AbortController();
   const timeout = setTimeout(() => abortController.abort(), 30_000);
+  const workingDirectory = config.defaultWorkspaceRoot || DEFAULT_WORKSPACE_ROOT;
+  fs.mkdirSync(workingDirectory, { recursive: true });
 
   try {
     const stream = provider.streamChat({
       prompt: 'Reply with the single word OK.',
       sessionId: `ui-test-${Date.now()}`,
-      workingDirectory: config.defaultWorkDir,
+      workingDirectory,
       permissionMode: 'plan',
       abortController,
     });
@@ -1532,7 +1547,7 @@ function renderHtml(): string {
           <div class="page-header">
             <div>
               <h1 class="page-title">配置</h1>
-              <p class="page-copy">这里维护本地默认工作目录、运行模式和全局行为开关。</p>
+              <p class="page-copy">这里维护默认工作空间、运行模式和全局行为开关。</p>
             </div>
           </div>
 
@@ -1540,7 +1555,7 @@ function renderHtml(): string {
             <div class="panel-header">
               <div>
                 <h2>基础配置</h2>
-                <p>保存后会写入本地配置目录。默认目录、默认工作空间、Sandbox、思考级别等会在下一次请求生效；通道启停会自动同步；只有少数运行时配置需要重启 Bridge。</p>
+                <p>保存后会写入本地配置目录。未绑定聊天会先进入临时草稿线程；默认工作空间、Sandbox、思考级别等会在下一次请求生效；通道启停会自动同步；只有少数运行时配置需要重启 Bridge。</p>
               </div>
               <div class="toolbar">
                 <button class="primary" id="saveConfigBtn">保存配置</button>
@@ -1571,18 +1586,14 @@ function renderHtml(): string {
                 </label>
               </div>
               <label>
-                默认工作目录
-                <input id="defaultWorkDir" placeholder="D:\\workspace\\project" />
-              </label>
-              <label>
                 默认工作空间
                 <input id="defaultWorkspaceRoot" placeholder="留空时使用 ~/cx2im" />
               </label>
-              <label>
-                默认模型
-                <input id="defaultModel" placeholder="留空则使用 runtime 默认模型" />
-              </label>
-              <div class="field-row">
+              <div class="field-row triple">
+                <label>
+                  默认模型
+                  <select id="defaultModel"></select>
+                </label>
                 <label>
                   Codex 文件系统权限
                   <select id="codexSandboxMode">
@@ -1602,7 +1613,7 @@ function renderHtml(): string {
                   </select>
                 </label>
               </div>
-              <div class="small">“默认工作目录”用于新会话默认 cwd；“默认工作空间”用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。</div>
+              <div class="small">未绑定的 IM 聊天会先进入临时草稿线程（等同 <code>/t 0</code>）；“默认工作空间”只用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。默认模型候选项来自启动时读取的 Codex 模型缓存：隐藏模型不会展示，CLI only 模型会标成“仅 IM / CLI”。留空则继续跟随 Codex 当前默认模型。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。</div>
               <div class="small">当前需要重启 Bridge 的配置：<code>Runtime</code>、<code>自动批准工具权限</code>、<code>允许在未信任 Git 目录运行 Codex</code>、飞书 <code>App ID</code>/<code>App Secret</code>/<code>Domain</code>。</div>
               <div class="checkbox-row">
                 <label class="checkbox"><input id="channelFeishu" type="checkbox" checked /> 启用飞书</label>
@@ -1668,8 +1679,8 @@ function renderHtml(): string {
                   <div class="command-item"><div class="command-col-command"><code>/h</code></div><div class="command-col-original"><code>/help</code></div><div class="command-col-desc">查看帮助。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t</code></div><div class="command-col-original"><code>/threads</code></div><div class="command-col-desc">列出最近桌面会话。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t &lt;序号&gt;</code></div><div class="command-col-original"><code>/thread &lt;序号&gt;</code></div><div class="command-col-desc">按序号接管桌面会话。</div></div>
-                  <div class="command-item"><div class="command-col-command"><code>/n [绝对路径 | 项目名]</code></div><div class="command-col-original"><code>/new [绝对路径 | 项目名]</code></div><div class="command-col-desc">新建会话；相对项目名会在“默认工作空间”下创建目录。</div></div>
-                  <div class="command-item"><div class="command-col-command"><code>直接发送文本</code></div><div class="command-col-original">—</div><div class="command-col-desc">继续当前已绑定会话。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/n [绝对路径 | 项目名]</code></div><div class="command-col-original"><code>/new [绝对路径 | 项目名]</code></div><div class="command-col-desc">不带参数时在当前正式会话目录下新建线程；相对项目名会在“默认工作空间”下创建目录；当前若是临时草稿线程则会报错。通过 IM 创建的新线程当前只保证在 IM 中可继续，不会自动出现在 Codex Desktop 会话列表中。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>直接发送文本</code></div><div class="command-col-original">—</div><div class="command-col-desc">继续当前已绑定会话；未绑定时会自动进入临时草稿线程。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/his</code></div><div class="command-col-original"><code>/history</code></div><div class="command-col-desc">查看当前会话整理后的摘要。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/his raw</code></div><div class="command-col-original"><code>/history raw</code></div><div class="command-col-desc">查看最近 N 条原始消息。</div></div>
                 </div>
@@ -1681,6 +1692,7 @@ function renderHtml(): string {
                   <div class="command-list-head"><div>命令</div><div>原始命令</div><div>说明</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/m</code></div><div class="command-col-original"><code>/mode</code></div><div class="command-col-desc">查看当前模式；可选 <code>code</code>、<code>plan</code>、<code>ask</code>。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/r</code></div><div class="command-col-original"><code>/reasoning</code></div><div class="command-col-desc">查看当前思考级别；可选 <code>1=minimal</code>、<code>2=low</code>、<code>3=medium</code>、<code>4=high</code>、<code>5=xhigh</code>。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/model [slug|default]</code></div><div class="command-col-original"><code>/model [slug|default]</code></div><div class="command-col-desc">查看或切换当前 IM 会话使用的模型；CLI only 模型会标注“仅 IM / CLI”，共享桌面线程只允许查看不允许切换。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0</code></div><div class="command-col-original"><code>/thread 0</code></div><div class="command-col-desc">切换到当前聊天的临时草稿线程。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0 reset</code></div><div class="command-col-original"><code>/thread 0 reset</code></div><div class="command-col-desc">丢弃当前草稿上下文并重建一条新的草稿线程。</div></div>
                   <div class="command-item"><div class="command-col-command">—</div><div class="command-col-original"><code>/stop</code></div><div class="command-col-desc">停止当前任务。</div></div>
@@ -1838,6 +1850,7 @@ function renderHtml(): string {
     <script>
       const state = {
         config: null,
+        availableModels: [],
         uiAccess: null,
         bridgeStatus: null,
         desktopSessions: [],
@@ -1855,6 +1868,44 @@ function renderHtml(): string {
           .replaceAll('<', '&lt;')
           .replaceAll('>', '&gt;')
           .replaceAll('"', '&quot;');
+      }
+
+      function renderDefaultModelOptions(config) {
+        const options = Array.isArray(config && config.availableModels) ? config.availableModels : [];
+        state.availableModels = options;
+
+        const select = document.getElementById('defaultModel');
+        const currentValue = config && typeof config.defaultModel === 'string' ? config.defaultModel : '';
+        const codexDefaultModel = config && typeof config.codexDefaultModel === 'string' ? config.codexDefaultModel : '';
+        const items = [];
+        const seen = new Set();
+
+        items.push(
+          '<option value="">' + escapeHtml(
+            codexDefaultModel
+              ? '跟随 Codex 默认模型（当前 ' + codexDefaultModel + '）'
+              : '跟随 Codex 默认模型'
+          ) + '</option>'
+        );
+
+        for (const model of options) {
+          if (!model || typeof model.slug !== 'string' || !model.slug) continue;
+          if (seen.has(model.slug)) continue;
+          seen.add(model.slug);
+          const label = model.slug + (model.supportedInApi === false ? '（仅 IM / CLI）' : '');
+          items.push(
+            '<option value="' + escapeHtml(model.slug) + '">' + escapeHtml(label) + '</option>'
+          );
+        }
+
+        if (currentValue && !seen.has(currentValue)) {
+          items.push(
+            '<option value="' + escapeHtml(currentValue) + '">当前配置值（已不可用）：' + escapeHtml(currentValue) + '</option>'
+          );
+        }
+
+        select.innerHTML = items.join('');
+        select.value = currentValue;
       }
 
       function shortId(value) {
@@ -1927,7 +1978,6 @@ function renderHtml(): string {
           runtime: document.getElementById('runtime').value,
           defaultMode: document.getElementById('defaultMode').value,
           historyMessageLimit: document.getElementById('historyMessageLimit').value,
-          defaultWorkDir: document.getElementById('defaultWorkDir').value,
           defaultWorkspaceRoot: document.getElementById('defaultWorkspaceRoot').value,
           defaultModel: document.getElementById('defaultModel').value,
           codexSkipGitRepoCheck: document.getElementById('codexSkipGitRepoCheck').checked,
@@ -2102,7 +2152,6 @@ function renderHtml(): string {
       const CONFIG_FIELD_LABELS = {
         runtime: 'Runtime',
         enabledChannels: '通道启用状态',
-        defaultWorkDir: '默认工作目录',
         defaultWorkspaceRoot: '默认工作空间',
         defaultModel: '默认模型',
         defaultMode: '默认模式',
@@ -2137,7 +2186,6 @@ function renderHtml(): string {
       ]);
 
       const IMMEDIATE_FIELDS = new Set([
-        'defaultWorkDir',
         'defaultWorkspaceRoot',
         'defaultModel',
         'defaultMode',
@@ -2547,9 +2595,8 @@ function renderHtml(): string {
         document.getElementById('runtime').value = config.runtime || 'codex';
         document.getElementById('defaultMode').value = config.defaultMode || 'code';
         document.getElementById('historyMessageLimit').value = String(config.historyMessageLimit || 8);
-        document.getElementById('defaultWorkDir').value = config.defaultWorkDir || '';
         document.getElementById('defaultWorkspaceRoot').value = config.defaultWorkspaceRoot || '';
-        document.getElementById('defaultModel').value = config.defaultModel || '';
+        renderDefaultModelOptions(config);
         document.getElementById('codexSkipGitRepoCheck').checked = config.codexSkipGitRepoCheck === true;
         document.getElementById('codexSandboxMode').value = config.codexSandboxMode || 'workspace-write';
         document.getElementById('codexReasoningEffort').value = config.codexReasoningEffort || 'medium';

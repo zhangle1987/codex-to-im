@@ -11,7 +11,6 @@ const DATA_DIR = path.join(CTI_HOME, 'data');
 function makeSettings(): Map<string, string> {
   return new Map([
     ['remote_bridge_enabled', 'true'],
-    ['bridge_default_work_dir', '/tmp/test-cwd'],
     ['bridge_default_model', 'test-model'],
     ['bridge_default_mode', 'code'],
   ]);

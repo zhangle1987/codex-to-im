@@ -7,7 +7,7 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, ToolCallInfo } from './types.js';
+import type { BridgeStatus, ChannelBinding, InboundMessage, OutboundMessage, StreamingPreviewState, ToolCallInfo } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import type { BridgeMessage, BridgeSession, LLMProvider, PermissionLinkRecord, StreamChatParams } from './host.js';
@@ -44,15 +44,23 @@ import {
   sanitizeInput,
   validateMode,
 } from './security/validators.js';
-import { CTI_HOME, DEFAULT_WORKSPACE_ROOT } from '../../config.js';
+import { DEFAULT_WORKSPACE_ROOT } from '../../config.js';
+import {
+  cleanupHiddenSessions,
+  getInternalScratchDir,
+  getOrCreateDraftSession,
+  isSessionExpired,
+  makeHistorySummarySessionName,
+  resetDraftSession as resetDraftSessionForStore,
+} from '../../internal-sessions.js';
+import {
+  isCliOnlyCodexModel,
+  listSelectableCodexModels,
+  readConfiguredCodexModel,
+} from '../../codex-models.js';
 
 const GLOBAL_KEY = '__bridge_manager__';
-const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
 const HISTORY_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_HIDDEN_DRAFT_SESSIONS = 20;
-const INTERNAL_SESSION_ROOT = path.join(CTI_HOME, 'runtime', 'internal-sessions');
-const DRAFT_SESSION_PREFIX = 'Draft';
-const HISTORY_SESSION_PREFIX = 'History Summary';
 const REASONING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 const MODE_OPTIONS_TEXT = '可选：`code`（直接执行，默认） `plan`（先分析再行动） `ask`（轻对话 / 草稿）';
 const REASONING_OPTIONS_TEXT = '可选：`1=minimal` `2=low` `3=medium` `4=high` `5=xhigh`';
@@ -60,6 +68,8 @@ const MIRROR_POLL_INTERVAL_MS = 2_500;
 const MIRROR_WATCH_DEBOUNCE_MS = 350;
 const MIRROR_EVENT_BATCH_LIMIT = 8;
 const MIRROR_SUPPRESSION_WINDOW_MS = 4_000;
+const AVAILABLE_CODEX_MODELS = listSelectableCodexModels();
+const AVAILABLE_CODEX_MODEL_MAP = new Map(AVAILABLE_CODEX_MODELS.map((model) => [model.slug, model]));
 
 // ── Streaming preview helpers ──────────────────────────────────
 
@@ -177,10 +187,6 @@ function getSessionDisplayName(session: BridgeSession | null | undefined, fallba
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function ensureDirectory(dirPath: string): void {
-  fs.mkdirSync(dirPath, { recursive: true });
 }
 
 function getWorkspaceRoot(): string {
@@ -331,20 +337,31 @@ function resolveEffectiveSandboxMode(): string {
   return 'workspace-write';
 }
 
-function isSessionExpired(session: BridgeSession | null | undefined): boolean {
-  if (!session?.expires_at) return false;
-  const expiresAt = Date.parse(session.expires_at);
-  return Number.isFinite(expiresAt) && expiresAt <= Date.now();
+function resolveDisplayedModel(
+  binding: ChannelBinding | null | undefined,
+  session: BridgeSession | null | undefined,
+  configuredDefaultModel?: string | null,
+  codexDefaultModel?: string | null,
+): string {
+  return binding?.model
+    || session?.model
+    || configuredDefaultModel
+    || codexDefaultModel
+    || 'default';
 }
 
-function sanitizePathSlug(raw: string): string {
-  return raw.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'scratch';
+function formatDisplayedModel(model: string): string {
+  const metadata = AVAILABLE_CODEX_MODEL_MAP.get(model);
+  return metadata && isCliOnlyCodexModel(metadata)
+    ? `${model}（仅 IM / CLI）`
+    : model;
 }
 
-function getInternalScratchDir(kind: 'draft' | 'history_summary', key: string): string {
-  const dir = path.join(INTERNAL_SESSION_ROOT, kind, sanitizePathSlug(key));
-  ensureDirectory(dir);
-  return dir;
+function getAvailableModelChoicesText(): string {
+  if (AVAILABLE_CODEX_MODELS.length === 0) {
+    return '当前没有可用模型缓存；请检查 `~/.codex/models_cache.json`，然后重启 Bridge。';
+  }
+  return `可选模型：${AVAILABLE_CODEX_MODELS.map((model) => formatDisplayedModel(model.slug)).join('、')}`;
 }
 
 function resolveNewWorkingDirectory(rawArgs: string): { ok: true; workDir: string } | { ok: false; message: string } {
@@ -390,72 +407,43 @@ function resolveNewWorkingDirectory(rawArgs: string): { ok: true; workDir: strin
   return { ok: true, workDir: validated };
 }
 
+function resolveNewSessionWorkingDirectory(
+  rawArgs: string,
+  binding: ChannelBinding | null,
+  session: BridgeSession | null | undefined,
+): { ok: true; workDir: string } | { ok: false; message: string } {
+  const trimmed = rawArgs.trim();
+  if (trimmed) {
+    return resolveNewWorkingDirectory(trimmed);
+  }
+
+  if (!binding || !session) {
+    return {
+      ok: false,
+      message: '当前聊天还没有绑定正式会话。请先用 `/t 1` 接管，或使用 `/new proj1` / `/new 绝对路径` 创建项目会话。',
+    };
+  }
+
+  if (session.session_type === 'draft' || session.session_type === 'history_summary') {
+    return {
+      ok: false,
+      message: '当前不是正式工作会话。无参 `/new` 只能基于当前正式会话的目录创建新线程；请先切回正式会话，或使用 `/new proj1` / `/new 绝对路径`。',
+    };
+  }
+
+  const validated = validateWorkingDirectory(session.working_directory || binding.workingDirectory || '');
+  if (!validated) {
+    return {
+      ok: false,
+      message: '当前会话没有有效的工作目录。请改用 `/new proj1` 或 `/new 绝对路径`。',
+    };
+  }
+
+  return { ok: true, workDir: validated };
+}
+
 function ensureWorkingDirectoryExists(workDir: string): void {
-  ensureDirectory(workDir);
-}
-
-function makeDraftSessionName(address: { channelType: string; chatId: string }): string {
-  return `${DRAFT_SESSION_PREFIX}:${address.channelType}:${address.chatId}`;
-}
-
-function makeHistorySummarySessionName(parentSessionId: string): string {
-  return `${HISTORY_SESSION_PREFIX}:${parentSessionId}`;
-}
-
-function cleanupHiddenSessions(): void {
-  const { store } = getBridgeContext();
-  const bindings = store.listChannelBindings();
-  const boundSessionIds = new Set(bindings.map((binding) => binding.codepilotSessionId));
-  const hiddenSessions = store.listSessions().filter((session) => session.hidden === true);
-
-  for (const session of hiddenSessions) {
-    if (isSessionExpired(session) && !boundSessionIds.has(session.id)) {
-      store.deleteSession(session.id);
-    }
-  }
-
-  const draftSessions = store.listSessions()
-    .filter((session) => session.hidden === true && session.session_type === 'draft' && !boundSessionIds.has(session.id))
-    .sort((a, b) => Date.parse(b.updated_at || b.created_at || '') - Date.parse(a.updated_at || a.created_at || ''));
-
-  for (const session of draftSessions.slice(MAX_HIDDEN_DRAFT_SESSIONS)) {
-    store.deleteSession(session.id);
-  }
-}
-
-function getOrCreateDraftSession(address: { channelType: string; chatId: string }): BridgeSession {
-  const { store } = getBridgeContext();
-  cleanupHiddenSessions();
-  const expectedName = makeDraftSessionName(address);
-  const existing = store.listSessions().find((session) =>
-    session.hidden === true
-    && session.session_type === 'draft'
-    && session.name === expectedName
-    && !isSessionExpired(session)
-  );
-
-  if (existing) {
-    store.updateSession(existing.id, {
-      preferred_mode: 'ask',
-      expires_at: new Date(Date.now() + DRAFT_TTL_MS).toISOString(),
-    });
-    return store.getSession(existing.id) || existing;
-  }
-
-  const scratchDir = getInternalScratchDir('draft', `${address.channelType}-${address.chatId}`);
-  return store.createSession(
-    expectedName,
-    store.getSetting('bridge_default_model') || '',
-    undefined,
-    scratchDir,
-    'ask',
-    {
-      hidden: true,
-      sessionType: 'draft',
-      expiresAt: new Date(Date.now() + DRAFT_TTL_MS).toISOString(),
-      reasoningEffort: 'low',
-    },
-  );
+  fs.mkdirSync(workDir, { recursive: true });
 }
 
 function getPendingPermissionLinksForCurrentSession(
@@ -470,18 +458,12 @@ function getPendingPermissionLinksForCurrentSession(
 
 function resetDraftSession(address: { channelType: string; chatId: string }): BridgeSession {
   const { store } = getBridgeContext();
-  const expectedName = makeDraftSessionName(address);
-  for (const session of store.listSessions()) {
-    if (session.hidden === true && session.session_type === 'draft' && session.name === expectedName) {
-      store.deleteSession(session.id);
-    }
-  }
-  return getOrCreateDraftSession(address);
+  return resetDraftSessionForStore(store, address);
 }
 
 function getOrCreateHistorySummarySession(parentSession: BridgeSession): BridgeSession {
   const { store } = getBridgeContext();
-  cleanupHiddenSessions();
+  cleanupHiddenSessions(store);
   const existing = store.listSessions().find((session) =>
     session.hidden === true
     && session.session_type === 'history_summary'
@@ -2096,7 +2078,15 @@ async function handleCommand(
       break;
 
     case '/new': {
-      // Abort any running task on the current session before creating a new one
+      const currentSession = currentBinding
+        ? store.getSession(currentBinding.codepilotSessionId)
+        : null;
+      const resolved = resolveNewSessionWorkingDirectory(args, currentBinding, currentSession);
+      if (!resolved.ok) {
+        response = resolved.message;
+        break;
+      }
+
       if (currentBinding) {
         const st = getState();
         const oldTask = st.activeTasks.get(currentBinding.codepilotSessionId);
@@ -2107,16 +2097,8 @@ async function handleCommand(
         }
       }
 
-      let workDir: string | undefined;
-      if (args) {
-        const resolved = resolveNewWorkingDirectory(args);
-        if (!resolved.ok) {
-          response = resolved.message;
-          break;
-        }
-        workDir = resolved.workDir;
-        ensureWorkingDirectoryExists(workDir);
-      }
+      const workDir = resolved.workDir;
+      ensureWorkingDirectoryExists(workDir);
       const binding = router.createBinding(msg.address, workDir);
       const session = store.getSession(binding.codepilotSessionId);
       response = buildCommandFields(
@@ -2126,7 +2108,10 @@ async function handleCommand(
           ['目录', formatCommandPath(binding.workingDirectory)],
           ['模式', binding.mode],
         ],
-        ['接下来直接发送文本即可继续。'],
+        [
+          args.trim() ? '接下来直接发送文本即可继续。' : '已在当前工作目录下新建一个线程。接下来直接发送文本即可继续。',
+          '这是 IM 侧线程，当前只保证在 IM 中可继续；不会自动出现在 Codex Desktop 会话列表中。',
+        ],
         responseParseMode === 'Markdown',
       );
       break;
@@ -2212,9 +2197,9 @@ async function handleCommand(
 
     case '/thread': {
       if (args === '0' || args === '0 reset') {
-        const draftSession = args === '0 reset'
-          ? resetDraftSession(msg.address)
-          : getOrCreateDraftSession(msg.address);
+          const draftSession = args === '0 reset'
+            ? resetDraftSession(msg.address)
+            : getOrCreateDraftSession(store, msg.address);
         const binding = router.bindToSession(msg.address, draftSession.id);
         if (!binding) {
           response = '草稿线程切换失败。';
@@ -2425,12 +2410,104 @@ async function handleCommand(
       break;
     }
 
+    case '/model': {
+      const binding = currentBinding || router.resolve(msg.address);
+      const session = store.getSession(binding.codepilotSessionId);
+      if (!session) {
+        response = '当前会话不存在。';
+        break;
+      }
+
+      if (!args) {
+        const currentModel = resolveDisplayedModel(
+          binding,
+          session,
+          store.getSetting('default_model'),
+          readConfiguredCodexModel(),
+        );
+        response = buildCommandFields(
+          '当前模型',
+          [['模型', formatDisplayedModel(currentModel)]],
+          [
+            getAvailableModelChoicesText(),
+            binding.sdkSessionId
+              ? '当前是共享桌面线程，只支持查看模型；如需切换，请先用 `/new` 新建一个 IM 会话线程。'
+              : '发送 `/model gpt-5.4` 可切换；发送 `/model default` 可回退到默认模型。',
+            '模型切换只影响后续从 IM 发起的 Codex CLI 请求。',
+          ],
+          responseParseMode === 'Markdown',
+        );
+        break;
+      }
+
+      if (binding.sdkSessionId) {
+        response = '当前是共享桌面线程，不支持直接切换模型。请先用 `/new` 新建一个线程，再执行 `/model ...`。';
+        break;
+      }
+
+      const requestedModel = args.trim();
+      if (requestedModel === 'default') {
+        store.updateSessionModel(session.id, '');
+        router.updateBinding(binding.id, { model: '' });
+        const updatedBinding = router.resolve(msg.address);
+        const updatedSession = store.getSession(updatedBinding.codepilotSessionId);
+        const currentModel = resolveDisplayedModel(
+          updatedBinding,
+          updatedSession,
+          store.getSetting('default_model'),
+          readConfiguredCodexModel(),
+        );
+        response = buildCommandFields(
+          '已恢复默认模型',
+          [['模型', formatDisplayedModel(currentModel)]],
+          ['后续从 IM 发起的 Codex CLI 请求会跟随默认模型。'],
+          responseParseMode === 'Markdown',
+        );
+        break;
+      }
+
+      const selectedModel = AVAILABLE_CODEX_MODEL_MAP.get(requestedModel) || null;
+      if (!selectedModel) {
+        response = buildCommandFields(
+          '模型用法',
+          [['命令', '`/model <slug>`']],
+          [
+            getAvailableModelChoicesText(),
+            '发送 `/model default` 可回退到默认模型。',
+          ],
+          responseParseMode === 'Markdown',
+        );
+        break;
+      }
+
+      store.updateSessionModel(session.id, selectedModel.slug);
+      router.updateBinding(binding.id, { model: selectedModel.slug });
+      response = buildCommandFields(
+        '已更新模型',
+        [['模型', formatDisplayedModel(selectedModel.slug)]],
+        [
+          '后续从 IM 发起的 Codex CLI 请求会使用这个模型。',
+          ...(isCliOnlyCodexModel(selectedModel)
+            ? ['这是 CLI only 模型，只能在 IM -> Codex CLI 调用中使用，Codex Desktop 不支持。']
+            : []),
+        ],
+        responseParseMode === 'Markdown',
+      );
+      break;
+    }
+
     case '/status': {
       const binding = router.resolve(msg.address);
       const session = store.getSession(binding.codepilotSessionId);
       const threadTitle = getDesktopThreadTitle(binding.sdkSessionId);
       const sandboxMode = resolveEffectiveSandboxMode();
       const reasoningEffort = resolveEffectiveReasoningEffort(session);
+      const currentModel = resolveDisplayedModel(
+        binding,
+        session,
+        store.getSetting('default_model'),
+        readConfiguredCodexModel(),
+      );
       const sessionKind = session?.session_type === 'draft'
         ? '临时草稿线程'
         : session?.session_type === 'history_summary'
@@ -2442,7 +2519,7 @@ async function handleCommand(
           ['标题', threadTitle || getSessionDisplayName(session, binding.workingDirectory)],
           ['目录', formatCommandPath(binding.workingDirectory)],
           ['模式', binding.mode],
-          ['模型', binding.model || 'default'],
+          ['当前模型', formatDisplayedModel(currentModel)],
           ['类型', sessionKind],
           ['运行状态', formatRuntimeStatus(session)],
           ['共享镜像', formatMirrorStatus(session)],
@@ -2450,9 +2527,11 @@ async function handleCommand(
           ['思考级别', formatReasoningEffort(reasoningEffort)],
         ],
         [
-          binding.sdkSessionId
-            ? '当前聊天已绑定到一条共享会话，直接发送消息即可继续。'
-            : '当前聊天还没有绑定桌面会话。可先发送 `/t`，再用 `/t 1` 接管。',
+            binding.sdkSessionId
+              ? '当前聊天已绑定到一条共享会话，直接发送消息即可继续。'
+            : session?.session_type === 'draft'
+              ? '当前聊天正在使用临时草稿线程（等同 `/t 0`）。可直接发送消息，或用 `/t` / `/new proj1` / `/new 绝对路径` 切换到正式会话。'
+              : '当前聊天还没有绑定桌面会话。可先发送 `/t`，再用 `/t 1` 接管。',
         ],
         responseParseMode === 'Markdown',
       );
@@ -2596,12 +2675,15 @@ async function handleCommand(
         '- `/h` 帮助',
         '- `/t` 最近桌面会话',
         '- `/t 1` 接管第 1 条会话',
-        '- `/n proj1` 新建会话',
+        '- `/n` 在当前工作目录下新建线程（仅保证 IM 可继续，不会自动出现在桌面会话列表）',
+        '- `/n proj1` 在默认工作空间下新建项目会话',
+        '- 直接发文本：继续当前会话；未绑定时进入临时草稿线程',
         '- `/his` 历史摘要',
         '',
         '**设置**',
         '- `/m` 查看模式；可用 `code | plan | ask`',
         '- `/r` 查看思考级别；可用 `1 | 2 | 3 | 4 | 5`',
+        '- `/model` 查看当前模型；`/model gpt-5.4` 可切换，`/model default` 回退到默认模型',
         '- `/t 0` 临时草稿线程',
         '- `/t 0 reset` 重置草稿线程',
         '- `/stop` 停止当前任务',
@@ -2657,8 +2739,11 @@ export function computeSdkSessionUpdate(
 export const _testOnly = {
   handleMessage,
   resolveNewWorkingDirectory,
+  resolveNewSessionWorkingDirectory,
   resolveCommandAlias,
   normalizeReasoningEffort,
+  resolveDisplayedModel,
+  formatDisplayedModel,
   formatRuntimeStatus,
   formatMirrorStatus,
   formatMirrorMessage,

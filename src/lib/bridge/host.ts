@@ -236,6 +236,7 @@ export interface StreamChatParams {
   sessionId: string;
   sdkSessionId?: string;
   model?: string;
+  forceModel?: boolean;
   sandboxMode?: CodexSandboxMode;
   modelReasoningEffort?: CodexReasoningEffort;
   systemPrompt?: string;

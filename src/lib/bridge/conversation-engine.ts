@@ -256,6 +256,7 @@ export async function processMessage(
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,
       model: effectiveModel,
+      forceModel: !binding.sdkSessionId && Boolean(effectiveModel),
       sandboxMode,
       modelReasoningEffort,
       systemPrompt: session?.system_prompt || undefined,

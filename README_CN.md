@@ -130,6 +130,7 @@ codex-to-im stop
 - `/` / `/status` 查看当前会话
 - `/h` / `/help` 查看帮助
 - `/t` / `/threads` 查看最近桌面会话，`/t 1` / `/thread 1` 接管第 1 条
+- `/n` / `/new` 在当前正式会话目录下新建线程；这类线程当前只保证在 IM 中可继续，不会自动出现在 Codex Desktop 会话列表中
 - `/n proj1` / `/new proj1` 在默认工作空间下新建项目会话
 - `/m` / `/mode` 查看或切换模式，可选 `code` / `plan` / `ask`
 - `/r` / `/reasoning` 查看或切换思考级别，可选 `1|2|3|4|5`
@@ -156,7 +157,7 @@ codex-to-im stop
 
 如果新建会话时报 `Not inside a trusted directory`，可以：
 
-- 把默认工作目录改成一个你已经信任的 Git 仓库
+- 用 `/new /绝对路径` 或 `/new proj1` 切到一个你已经信任的项目目录
 - 或在基础配置里打开“允许在未信任 Git 目录运行 Codex”，然后重启 Bridge
 
 当前配置页新增了几项和 Codex 运行行为直接相关的配置：

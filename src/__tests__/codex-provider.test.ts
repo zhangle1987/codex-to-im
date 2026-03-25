@@ -338,45 +338,36 @@ describe('CodexProvider', () => {
     assert.equal(startCalls, 0, 'Should not start a fresh thread when an in-memory Codex thread exists');
   });
 
-  it('passes model only when CTI_CODEX_PASS_MODEL=true', async () => {
-    const old = process.env.CTI_CODEX_PASS_MODEL;
-    process.env.CTI_CODEX_PASS_MODEL = 'true';
-    try {
-      const { CodexProvider } = await import('../codex-provider.js');
-      const { PendingPermissions } = await import('../permission-gateway.js');
-      const provider = new CodexProvider(new PendingPermissions());
+  it('passes model only when forceModel=true', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
 
-      let capturedStartOptions: Record<string, unknown> | undefined;
-      const mockThread = {
-        runStreamed: () => ({
-          events: (async function* () {
-            yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
-          })(),
-        }),
-      };
-      (provider as any).sdk = { Codex: class { constructor() {} } };
-      (provider as any).codex = {
-        startThread: (opts: Record<string, unknown>) => {
-          capturedStartOptions = opts;
-          return mockThread;
-        },
-      };
+    let capturedStartOptions: Record<string, unknown> | undefined;
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
+        })(),
+      }),
+    };
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: (opts: Record<string, unknown>) => {
+        capturedStartOptions = opts;
+        return mockThread;
+      },
+    };
 
-      const stream = provider.streamChat({
-        prompt: 'hello',
-        sessionId: 'model-forward-session',
-        model: 'gpt-5-codex',
-      });
-      await collectStream(stream);
+    const stream = provider.streamChat({
+      prompt: 'hello',
+      sessionId: 'model-forward-session',
+      model: 'gpt-5-codex',
+      forceModel: true,
+    });
+    await collectStream(stream);
 
-      assert.equal(capturedStartOptions?.model, 'gpt-5-codex');
-    } finally {
-      if (old === undefined) {
-        delete process.env.CTI_CODEX_PASS_MODEL;
-      } else {
-        process.env.CTI_CODEX_PASS_MODEL = old;
-      }
-    }
+    assert.equal(capturedStartOptions?.model, 'gpt-5-codex');
   });
 
   it('passes skipGitRepoCheck only when CTI_CODEX_SKIP_GIT_REPO_CHECK=true', async () => {

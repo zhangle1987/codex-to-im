@@ -92,8 +92,6 @@ export function bindStoreToSdkSession(
   }
 
   const workingDirectory = opts?.workingDirectory
-    || store.getSetting('bridge_default_work_dir')
-    || process.env.HOME
     || '';
   const model = opts?.model || store.getSetting('bridge_default_model') || '';
   const baseName = opts?.displayName

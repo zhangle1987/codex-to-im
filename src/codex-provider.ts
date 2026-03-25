@@ -51,11 +51,6 @@ function toApprovalPolicy(permissionMode?: string): string {
   }
 }
 
-/** Whether to forward bridge model to Codex CLI. Default: false (use Codex current/default model). */
-function shouldPassModelToCodex(): boolean {
-  return process.env.CTI_CODEX_PASS_MODEL === 'true';
-}
-
 /** Allow Codex to run outside a trusted Git repository when explicitly enabled. */
 function shouldSkipGitRepoCheck(): boolean {
   return process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK === 'true';
@@ -151,12 +146,11 @@ export class CodexProvider implements LLMProvider {
             let savedThreadId = inMemoryThreadId || params.sdkSessionId || undefined;
 
             const approvalPolicy = toApprovalPolicy(params.permissionMode);
-            const passModel = shouldPassModelToCodex();
             const sandboxMode = normalizeSandboxMode(params.sandboxMode);
             const modelReasoningEffort = normalizeReasoningEffort(params.modelReasoningEffort);
 
             const threadOptions: Record<string, unknown> = {
-              ...(passModel && params.model ? { model: params.model } : {}),
+              ...(params.forceModel && params.model ? { model: params.model } : {}),
               ...(params.workingDirectory ? { workingDirectory: params.workingDirectory } : {}),
               ...(shouldSkipGitRepoCheck() ? { skipGitRepoCheck: true } : {}),
               sandboxMode,

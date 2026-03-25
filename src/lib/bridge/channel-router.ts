@@ -8,6 +8,7 @@
 import type { ChannelAddress, ChannelBinding, ChannelType } from './types.js';
 import { getBridgeContext } from './context.js';
 import { bindStoreToSdkSession, bindStoreToSession } from '../../session-bindings.js';
+import { getOrCreateDraftSession } from '../../internal-sessions.js';
 
 /**
  * Resolve an inbound address to a ChannelBinding.
@@ -27,28 +28,26 @@ export function resolve(address: ChannelAddress): ChannelBinding {
 }
 
 /**
- * Create a new binding with a fresh CodePilot session.
+ * Create a new binding.
+ * Without a working directory it starts in the hidden draft thread (/t 0).
+ * With a working directory it creates a regular visible code session.
  */
 export function createBinding(
   address: ChannelAddress,
   workingDirectory?: string,
 ): ChannelBinding {
   const { store } = getBridgeContext();
-  const defaultCwd = workingDirectory
-    || store.getSetting('bridge_default_work_dir')
-    || process.env.HOME
-    || '';
-  const defaultModel = store.getSetting('bridge_default_model') || '';
   const defaultProviderId = store.getSetting('bridge_default_provider_id') || '';
-
-  const displayName = address.displayName || address.chatId;
-  const session = store.createSession(
-    `Bridge: ${displayName}`,
-    defaultModel,
-    undefined,
-    defaultCwd,
-    'code',
-  );
+  const defaultModel = store.getSetting('bridge_default_model') || '';
+  const session = workingDirectory
+    ? store.createSession(
+        `Bridge: ${address.displayName || address.chatId}`,
+        defaultModel,
+        undefined,
+        workingDirectory,
+        'code',
+      )
+    : getOrCreateDraftSession(store, address);
 
   if (defaultProviderId) {
     store.updateSessionProviderId(session.id, defaultProviderId);
@@ -59,9 +58,9 @@ export function createBinding(
     chatId: address.chatId,
     codepilotSessionId: session.id,
     sdkSessionId: '',
-    workingDirectory: defaultCwd,
-    model: defaultModel,
-    mode: session.preferred_mode || 'code',
+    workingDirectory: session.working_directory,
+    model: session.model,
+    mode: session.preferred_mode || (workingDirectory ? 'code' : 'ask'),
   });
 }
 

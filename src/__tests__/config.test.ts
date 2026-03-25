@@ -30,7 +30,6 @@ describe('configToSettings', () => {
   const base: Config = {
     runtime: 'claude',
     enabledChannels: [],
-    defaultWorkDir: '/tmp/test',
     defaultMode: 'code',
   };
 
@@ -157,9 +156,8 @@ describe('configToSettings', () => {
     assert.equal(m.has('bridge_qq_max_image_size'), false);
   });
 
-  it('maps workdir and mode, omits model when not set', () => {
+  it('maps mode and omits model when not set', () => {
     const m = configToSettings(base);
-    assert.equal(m.get('bridge_default_work_dir'), '/tmp/test');
     assert.equal(m.has('bridge_default_model'), false);
     assert.equal(m.has('default_model'), false);
     assert.equal(m.get('bridge_default_mode'), 'code');
@@ -232,7 +230,6 @@ describe('loadConfig/saveConfig round-trip', () => {
     const m = configToSettings({
       runtime: 'claude',
       enabledChannels: [],
-      defaultWorkDir: process.cwd(),
       defaultMode: 'code',
     });
     assert.equal(m.get('bridge_telegram_enabled'), 'false');
