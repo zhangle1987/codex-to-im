@@ -20,6 +20,7 @@
     "codex-to-im": "dist/cli.mjs"
   },
   "scripts": {
+    "postinstall": "node scripts/patch-codex-sdk-windows-hide.js",
     "build": "node scripts/build.js",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/main.ts",
