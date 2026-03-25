@@ -11,6 +11,10 @@ const common = {
     // breaks that path resolution.
     '@anthropic-ai/claude-agent-sdk',
     '@openai/codex-sdk',
+    // Keep large IM SDKs external so global/local npm installs resolve them
+    // from node_modules instead of inflating daemon.mjs.
+    '@larksuiteoapi/node-sdk',
+    'discord.js',
     // discord.js optional native deps
     'bufferutil', 'utf-8-validate', 'zlib-sync', 'erlpack',
     // Node.js built-ins
