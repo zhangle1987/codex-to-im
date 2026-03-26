@@ -1,14 +1,16 @@
 {
   "name": "codex-to-im",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "Installable Codex-to-IM bridge with local setup UI and background service",
   "license": "MIT",
   "type": "module",
   "files": [
     "dist/",
+    "agents/",
     "docs/",
     "references/",
     "scripts/",
+    "SKILL.md",
     "LICENSE",
     "README.md",
     "README_CN.md",

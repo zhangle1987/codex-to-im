@@ -64,10 +64,20 @@ export interface OutboundMessage {
   text: string;
   /** Parse mode for the text */
   parseMode?: 'HTML' | 'Markdown' | 'plain';
+  /** Optional local artifacts to upload and send through the channel. */
+  attachments?: OutboundAttachment[];
   /** Inline keyboard buttons */
   inlineButtons?: InlineButton[][];
   /** If replying to a specific message */
   replyToMessageId?: string;
+}
+
+/** A local artifact that the bridge should send back to the IM channel. */
+export interface OutboundAttachment {
+  kind: 'image' | 'file';
+  path: string;
+  caption?: string;
+  name?: string;
 }
 
 /** Inline keyboard button for permission prompts */

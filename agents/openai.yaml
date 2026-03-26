@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex to IM"
+  short_description: "Help Codex send local files back to IM chats"
+  default_prompt: "Use $codex-to-im when you need to send a generated image or file back to the current Codex-to-IM chat."

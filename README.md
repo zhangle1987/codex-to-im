@@ -10,6 +10,8 @@ The product is no longer centered around a Codex skill. The main path is:
 4. Start the bridge in the background
 5. Bind real desktop Codex threads to Feishu or Weixin chats
 
+Optional: if you want Codex to know it can send local files or images back to IM without relying on bridge-injected prompt text, install the bundled `codex-to-im` skill from the workbench.
+
 ## Project Origin
 
 The current codebase is a consolidated continuation of two earlier repositories:

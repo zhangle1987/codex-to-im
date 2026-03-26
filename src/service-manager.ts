@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -304,6 +305,43 @@ export async function stopUiServer(): Promise<UiServerStatus> {
 export function writeUiServerStatus(status: UiServerStatus): void {
   ensureDirs();
   fs.writeFileSync(uiStatusFile, JSON.stringify(status, null, 2), 'utf-8');
+}
+
+export async function installCodexIntegration(): Promise<{ targetDir: string; method: 'junction' | 'copy' | 'existing' }> {
+  const sourceSkill = path.join(packageRoot, 'SKILL.md');
+  if (!fs.existsSync(sourceSkill)) {
+    throw new Error(`SKILL.md not found at ${sourceSkill}`);
+  }
+
+  const skillsDir = path.join(os.homedir(), '.codex', 'skills');
+  const targetDir = path.join(skillsDir, 'codex-to-im');
+  fs.mkdirSync(skillsDir, { recursive: true });
+
+  if (fs.existsSync(targetDir)) {
+    return { targetDir, method: 'existing' };
+  }
+
+  try {
+    fs.symlinkSync(packageRoot, targetDir, process.platform === 'win32' ? 'junction' : 'dir');
+    return { targetDir, method: 'junction' };
+  } catch {
+    fs.cpSync(packageRoot, targetDir, {
+      recursive: true,
+      filter: (source) => {
+        const relative = path.relative(packageRoot, source);
+        if (!relative) return true;
+        if (relative === '.git' || relative.startsWith(`.git${path.sep}`)) return false;
+        if (relative === 'node_modules' || relative.startsWith(`node_modules${path.sep}`)) return false;
+        return true;
+      },
+    });
+    return { targetDir, method: 'copy' };
+  }
+}
+
+export function isCodexIntegrationInstalled(): boolean {
+  const targetDir = path.join(os.homedir(), '.codex', 'skills', 'codex-to-im');
+  return fs.existsSync(path.join(targetDir, 'SKILL.md'));
 }
 
 export function openBrowser(url: string): void {

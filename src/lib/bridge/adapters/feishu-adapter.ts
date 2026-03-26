@@ -16,10 +16,13 @@
  */
 
 import crypto from 'crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import type {
   ChannelType,
   InboundMessage,
+  OutboundAttachment,
   OutboundMessage,
   SendResult,
 } from '../types.js';
@@ -120,6 +123,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private activeCards = new Map<string, FeishuCardState>();
   /** In-flight card creation promises per chatId — prevents duplicate creation. */
   private cardCreatePromises = new Map<string, Promise<boolean>>();
+  /** Cached tenant token for upload APIs. */
+  private tenantTokenCache:
+    | { token: string; expiresAt: number; appId: string; appSecret: string; domain: string }
+    | null = null;
 
   private isStreamingEnabled(): boolean {
     return getBridgeContext().store.getSetting('bridge_feishu_streaming_enabled') !== 'false';
@@ -658,6 +665,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { ok: false, error: 'Feishu client not initialized' };
     }
 
+    if (message.attachments && message.attachments.length > 0) {
+      return this.sendAttachments(message.address.chatId, message.attachments, message.replyToMessageId);
+    }
+
     let text = message.text;
 
     // Convert HTML to markdown for Feishu rendering (e.g. command responses)
@@ -686,6 +697,189 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return this.sendAsCard(message.address.chatId, text);
     }
     return this.sendAsPost(message.address.chatId, text);
+  }
+
+  private getOpenApiBaseUrl(): string {
+    const configured = (getBridgeContext().store.getSetting('bridge_feishu_domain') || '').trim().replace(/\/+$/, '');
+    if (configured.startsWith('http://') || configured.startsWith('https://')) {
+      return configured;
+    }
+    if (configured.toLowerCase() === 'lark') {
+      return 'https://open.larksuite.com';
+    }
+    return 'https://open.feishu.cn';
+  }
+
+  private async getTenantAccessToken(): Promise<string> {
+    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id') || '';
+    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret') || '';
+    const domain = this.getOpenApiBaseUrl();
+    if (!appId || !appSecret) {
+      throw new Error('Feishu App ID / App Secret not configured');
+    }
+
+    const now = Date.now();
+    if (
+      this.tenantTokenCache
+      && this.tenantTokenCache.appId === appId
+      && this.tenantTokenCache.appSecret === appSecret
+      && this.tenantTokenCache.domain === domain
+      && this.tenantTokenCache.expiresAt > now + 60_000
+    ) {
+      return this.tenantTokenCache.token;
+    }
+
+    const response = await fetch(`${domain}/open-apis/auth/v3/tenant_access_token/internal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app_id: appId,
+        app_secret: appSecret,
+      }),
+    });
+    const data = await response.json() as {
+      code?: number;
+      msg?: string;
+      tenant_access_token?: string;
+      expire?: number;
+    };
+    if (!response.ok || data.code !== 0 || !data.tenant_access_token) {
+      throw new Error(data.msg || `tenant_access_token failed: HTTP ${response.status}`);
+    }
+
+    this.tenantTokenCache = {
+      token: data.tenant_access_token,
+      expiresAt: now + Math.max(60, Number(data.expire || 7200)) * 1000,
+      appId,
+      appSecret,
+      domain,
+    };
+    return data.tenant_access_token;
+  }
+
+  private async sendAttachments(
+    chatId: string,
+    attachments: OutboundAttachment[],
+    replyToMessageId?: string,
+  ): Promise<SendResult> {
+    let lastMessageId: string | undefined;
+
+    for (const attachment of attachments) {
+      const result = await this.sendAttachment(chatId, attachment, replyToMessageId);
+      if (!result.ok) return result;
+      lastMessageId = result.messageId;
+    }
+
+    return { ok: true, messageId: lastMessageId };
+  }
+
+  private async sendAttachment(
+    chatId: string,
+    attachment: OutboundAttachment,
+    replyToMessageId?: string,
+  ): Promise<SendResult> {
+    if (!fs.existsSync(attachment.path)) {
+      return { ok: false, error: `Attachment not found: ${attachment.path}` };
+    }
+
+    try {
+      if (attachment.kind === 'image') {
+        const imageKey = await this.uploadImage(attachment);
+        return await this.sendStructuredMessage(
+          chatId,
+          'image',
+          JSON.stringify({ image_key: imageKey }),
+          replyToMessageId,
+        );
+      }
+
+      const fileKey = await this.uploadFile(attachment);
+      return await this.sendStructuredMessage(
+        chatId,
+        'file',
+        JSON.stringify({ file_key: fileKey }),
+        replyToMessageId,
+      );
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : 'Attachment send failed' };
+    }
+  }
+
+  private async uploadImage(attachment: OutboundAttachment): Promise<string> {
+    const token = await this.getTenantAccessToken();
+    const fileName = attachment.name || path.basename(attachment.path) || 'image.png';
+    const form = new FormData();
+    form.set('image_type', 'message');
+    form.set('image', new Blob([fs.readFileSync(attachment.path)]), fileName);
+
+    const response = await fetch(`${this.getOpenApiBaseUrl()}/open-apis/im/v1/images`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const data = await response.json() as {
+      code?: number;
+      msg?: string;
+      data?: { image_key?: string };
+    };
+    if (!response.ok || data.code !== 0 || !data.data?.image_key) {
+      throw new Error(data.msg || `image upload failed: HTTP ${response.status}`);
+    }
+    return data.data.image_key;
+  }
+
+  private async uploadFile(attachment: OutboundAttachment): Promise<string> {
+    const token = await this.getTenantAccessToken();
+    const fileName = attachment.name || path.basename(attachment.path) || 'attachment.bin';
+    const form = new FormData();
+    form.set('file_type', 'stream');
+    form.set('file_name', fileName);
+    form.set('file', new Blob([fs.readFileSync(attachment.path)]), fileName);
+
+    const response = await fetch(`${this.getOpenApiBaseUrl()}/open-apis/im/v1/files`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const data = await response.json() as {
+      code?: number;
+      msg?: string;
+      data?: { file_key?: string };
+    };
+    if (!response.ok || data.code !== 0 || !data.data?.file_key) {
+      throw new Error(data.msg || `file upload failed: HTTP ${response.status}`);
+    }
+    return data.data.file_key;
+  }
+
+  private async sendStructuredMessage(
+    chatId: string,
+    msgType: 'image' | 'file',
+    content: string,
+    replyToMessageId?: string,
+  ): Promise<SendResult> {
+    try {
+      const res = replyToMessageId
+        ? await this.restClient!.im.message.reply({
+          path: { message_id: replyToMessageId },
+          data: { msg_type: msgType, content },
+        })
+        : await this.restClient!.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chatId,
+            msg_type: msgType,
+            content,
+          },
+        });
+
+      if (res?.data?.message_id) {
+        return { ok: true, messageId: res.data.message_id };
+      }
+      return { ok: false, error: res?.msg || `${msgType} send failed` };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : `${msgType} send failed` };
+    }
   }
 
   /**

@@ -18,6 +18,8 @@ import {
 import {
   getBridgeLogs,
   getBridgeStatus,
+  installCodexIntegration,
+  isCodexIntegrationInstalled,
   getPackageRoot,
   getUiServerStatus,
   getUiServerUrl,
@@ -1754,6 +1756,10 @@ function renderHtml(): string {
               <div class="status-value" id="bridgeStatus">-</div>
             </div>
             <div class="status-card">
+              <strong>Codex Skill</strong>
+              <div class="status-value" id="integrationStatus">-</div>
+            </div>
+            <div class="status-card">
               <strong>Runtime</strong>
               <div class="status-value" id="runtimeStatus">-</div>
             </div>
@@ -1790,6 +1796,14 @@ function renderHtml(): string {
               <div class="panel-block">
                 <p class="panel-subtitle">当前能力</p>
                 <div class="notice">已接通：保存配置、后台启停、飞书凭据测试、微信扫码、Codex 连接测试、桌面会话发现、IM 绑定查看与网页侧切换。</div>
+              </div>
+
+              <div class="panel-block">
+                <p class="panel-subtitle">可选 Codex Skill</p>
+                <div class="notice">bridge 不再注入发送附件的提示词。需要让 Codex 知道“可以把本地图片/文件回发到 IM”时，请安装这个可选 skill。</div>
+                <div class="actions" style="margin-top: 12px;">
+                  <button id="installIntegrationBtn">安装可选 Codex Skill</button>
+                </div>
               </div>
 
               <div class="message" id="opsMessage"></div>
@@ -3074,6 +3088,7 @@ function renderHtml(): string {
         fillForm(config);
         const runningChannelText = runningChannels().length ? ' · ' + runningChannels().join(', ') : '';
         document.getElementById('bridgeStatus').textContent = status.bridge.running ? 'Running' + runningChannelText : 'Stopped';
+        document.getElementById('integrationStatus').textContent = status.codexIntegrationInstalled ? '已安装' : '未安装';
         document.getElementById('runtimeStatus').textContent = config.runtime || 'codex';
         document.getElementById('homeStatus').textContent = status.home;
         document.getElementById('overviewHomeStatus').textContent = status.home;
@@ -3308,6 +3323,16 @@ function renderHtml(): string {
         }
       });
 
+      document.getElementById('installIntegrationBtn').addEventListener('click', async () => {
+        try {
+          const result = await api('/api/install-codex-integration', { method: 'POST' });
+          showMessage('opsMessage', 'success', '可选 Codex Skill 已处理：' + result.method + ' -> ' + result.targetDir);
+          await loadStatus();
+        } catch (error) {
+          showMessage('opsMessage', 'error', error.message);
+        }
+      });
+
       document.getElementById('refreshLogsBtn').addEventListener('click', async () => {
         try {
           await loadLogs();
@@ -3517,6 +3542,7 @@ const server = http.createServer(async (request, response) => {
         uiAccess: buildUiAccessInfo(port, config, request),
         home: CTI_HOME,
         packageRoot: getPackageRoot(),
+        codexIntegrationInstalled: isCodexIntegrationInstalled(),
         weixin: {
           linkedAccounts: getWeixinAccountsPayload(),
         },
@@ -3572,6 +3598,12 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === 'POST' && url.pathname === '/api/test/codex') {
       const result = await testCodexConnection(loadConfig());
+      json(response, 200, result);
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/install-codex-integration') {
+      const result = await installCodexIntegration();
       json(response, 200, result);
       return;
     }

@@ -9,15 +9,19 @@
 import fs from 'fs';
 import path from 'path';
 import type { ChannelBinding } from './types.js';
+import type { OutboundAttachment } from './types.js';
 import type {
   BridgeSession,
   FileAttachment,
+  MessageContentBlock,
   SSEEvent,
   TokenUsage,
-  MessageContentBlock,
 } from './host.js';
 import { getBridgeContext } from './context.js';
 import crypto from 'crypto';
+import {
+  parseOutboundArtifacts,
+} from './outbound-artifacts.js';
 
 export interface PermissionRequestInfo {
   permissionRequestId: string;
@@ -48,6 +52,7 @@ export type OnToolEvent = (toolId: string, toolName: string, status: 'running' |
 
 export interface ConversationResult {
   responseText: string;
+  outboundAttachments: OutboundAttachment[];
   tokenUsage: TokenUsage | null;
   hasError: boolean;
   errorMessage: string;
@@ -151,6 +156,7 @@ export async function processMessage(
   if (!lockAcquired) {
     return {
       responseText: '',
+      outboundAttachments: [],
       tokenUsage: null,
       hasError: true,
       errorMessage: 'Session is busy processing another request',
@@ -212,7 +218,6 @@ export async function processMessage(
     const promptText = attachmentSupplement
       ? (text.trim() ? `${text}\n\n${attachmentSupplement}` : attachmentSupplement)
       : text;
-
     // Resolve provider
     let resolvedProvider: import('./host.js').BridgeApiProvider | undefined;
     const providerId = session?.provider_id || '';
@@ -305,6 +310,7 @@ async function consumeStream(
   const seenToolResultIds = new Set<string>();
   const permissionRequests: PermissionRequestInfo[] = [];
   let capturedSdkSessionId: string | null = null;
+  const outboundAttachments: OutboundAttachment[] = [];
 
   try {
     while (true) {
@@ -457,6 +463,13 @@ async function consumeStream(
 
     // Save assistant message
     if (contentBlocks.length > 0) {
+      for (const block of contentBlocks) {
+        if (block.type !== 'text') continue;
+        const parsed = parseOutboundArtifacts(block.text);
+        block.text = parsed.cleanText;
+        outboundAttachments.push(...parsed.attachments);
+      }
+
       const hasToolBlocks = contentBlocks.some(
         (b) => b.type === 'tool_use' || b.type === 'tool_result'
       );
@@ -482,6 +495,7 @@ async function consumeStream(
 
     return {
       responseText,
+      outboundAttachments,
       tokenUsage,
       hasError,
       errorMessage,
@@ -514,6 +528,7 @@ async function consumeStream(
 
     return {
       responseText: '',
+      outboundAttachments: [],
       tokenUsage,
       hasError: true,
       errorMessage: isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error'),

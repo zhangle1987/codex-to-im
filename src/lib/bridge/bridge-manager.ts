@@ -7,7 +7,17 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, ChannelBinding, InboundMessage, OutboundMessage, StreamingPreviewState, ToolCallInfo } from './types.js';
+import type {
+  BridgeStatus,
+  ChannelAddress,
+  ChannelBinding,
+  InboundMessage,
+  OutboundAttachment,
+  OutboundMessage,
+  SendResult,
+  StreamingPreviewState,
+  ToolCallInfo,
+} from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import type { BridgeMessage, BridgeSession, LLMProvider, PermissionLinkRecord, StreamChatParams } from './host.js';
@@ -22,6 +32,10 @@ import { deliver, deliverRendered } from './delivery-layer.js';
 import { markdownToTelegramChunks } from './markdown/telegram.js';
 import { markdownToDiscordChunks } from './markdown/discord.js';
 import { markdownToPlainText } from './markdown/plain.js';
+import {
+  stripOutboundArtifactBlocksForStreaming,
+  supportsOutboundArtifacts,
+} from './outbound-artifacts.js';
 import { getBridgeContext } from './context.js';
 import {
   getDesktopSessionByThreadId,
@@ -736,20 +750,20 @@ function flushPreview(
 
 // ── Channel-aware rendering dispatch ──────────────────────────
 
-import type { ChannelAddress, SendResult } from './types.js';
-
 /**
  * Render response text and deliver via the appropriate channel format.
  * Telegram/Discord/Feishu: use native markdown rendering when enabled.
  * Other channels: fall back to the adapter's plain/markdown handling.
  */
-async function deliverResponse(
+async function deliverTextResponse(
   adapter: BaseChannelAdapter,
   address: ChannelAddress,
   responseText: string,
   sessionId: string,
   replyToMessageId?: string,
 ): Promise<SendResult> {
+  if (!responseText.trim()) return { ok: true };
+
   const parseMode = getFeedbackParseMode(adapter.channelType);
   const renderedText = renderFeedbackText(responseText, parseMode);
 
@@ -790,6 +804,64 @@ async function deliverResponse(
     parseMode,
     replyToMessageId,
   }, { sessionId });
+}
+
+async function deliverResponse(
+  adapter: BaseChannelAdapter,
+  address: ChannelAddress,
+  responseText: string,
+  sessionId: string,
+  replyToMessageId?: string,
+  attachments: OutboundAttachment[] = [],
+): Promise<SendResult> {
+  let lastResult: SendResult = { ok: true };
+
+  if (responseText.trim()) {
+    lastResult = await deliverTextResponse(adapter, address, responseText, sessionId, replyToMessageId);
+    if (!lastResult.ok) return lastResult;
+  }
+
+  for (const attachment of attachments) {
+    if (attachment.caption) {
+      const captionResult = await deliverTextResponse(adapter, address, attachment.caption, sessionId, replyToMessageId);
+      if (!captionResult.ok) return captionResult;
+      lastResult = captionResult;
+    }
+
+    if (!supportsOutboundArtifacts(adapter.channelType)) {
+      lastResult = await deliverTextResponse(
+        adapter,
+        address,
+        `生成了一个本地${attachment.kind === 'image' ? '图片' : '文件'}，但当前通道暂不支持直接发送：${attachment.path}`,
+        sessionId,
+        replyToMessageId,
+      );
+      if (!lastResult.ok) return lastResult;
+      continue;
+    }
+
+    const attachmentResult = await deliver(adapter, {
+      address,
+      text: '',
+      parseMode: 'plain',
+      attachments: [attachment],
+      replyToMessageId,
+    }, { sessionId });
+
+    if (!attachmentResult.ok) {
+      return deliverTextResponse(
+        adapter,
+        address,
+        `附件发送失败：${attachment.path}\n${attachmentResult.error || '未知错误'}`,
+        sessionId,
+        replyToMessageId,
+      );
+    }
+
+    lastResult = attachmentResult;
+  }
+
+  return lastResult;
 }
 
 interface AdapterMeta {
@@ -2342,11 +2414,12 @@ async function handleMessage(
     const ps = previewState!;
     const cfg = streamCfg!;
     if (ps.degraded) return;
+    const sanitizedText = stripOutboundArtifactBlocksForStreaming(fullText);
 
     // Truncate to maxChars + ellipsis
-    ps.pendingText = fullText.length > cfg.maxChars
-      ? fullText.slice(0, cfg.maxChars) + '...'
-      : fullText;
+    ps.pendingText = sanitizedText.length > cfg.maxChars
+      ? sanitizedText.slice(0, cfg.maxChars) + '...'
+      : sanitizedText;
 
     const delta = ps.pendingText.length - ps.lastSentText.length;
     const elapsed = Date.now() - ps.lastSentAt;
@@ -2390,7 +2463,10 @@ async function handleMessage(
   const toolCallTracker = new Map<string, ToolCallInfo>();
 
   const onStreamCardText = hasStreamingCards ? (fullText: string) => {
-    const rendered = renderFeedbackTextForChannel(adapter.channelType, fullText);
+    const rendered = renderFeedbackTextForChannel(
+      adapter.channelType,
+      stripOutboundArtifactBlocksForStreaming(fullText),
+    );
     try { adapter.onStreamText!(msg.address.chatId, rendered); } catch { /* non-critical */ }
   } : undefined;
 
@@ -2451,10 +2527,16 @@ async function handleMessage(
 
     // Send response text — render via channel-appropriate format.
     // Skip if streaming card was finalized (content already in card).
-    if (result.responseText) {
-      if (!cardFinalized) {
-        await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
-      }
+    if (result.responseText || result.outboundAttachments.length > 0) {
+      const textToDeliver = cardFinalized ? '' : result.responseText;
+      await deliverResponse(
+        adapter,
+        msg.address,
+        textToDeliver,
+        binding.codepilotSessionId,
+        msg.messageId,
+        result.outboundAttachments,
+      );
     } else if (result.hasError) {
       await deliverResponse(
         adapter,
@@ -2462,6 +2544,7 @@ async function handleMessage(
         `**Error:** ${result.errorMessage}`,
         binding.codepilotSessionId,
         msg.messageId,
+        [],
       );
     }
 
