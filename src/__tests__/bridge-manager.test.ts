@@ -197,6 +197,38 @@ describe('bridge-manager resolveCommandAlias', () => {
     assert.equal(_testOnly.normalizeReasoningEffort('xhigh'), 'xhigh');
     assert.equal(_testOnly.normalizeReasoningEffort('9'), null);
   });
+
+  it('surfaces binding conflict errors to the user', () => {
+    const message = _testOnly.toUserVisibleBindingError(
+      new Error('该会话已绑定到飞书聊天 oc_xxx。一个会话只能绑定一个聊天。'),
+      '切换失败。',
+    );
+    assert.equal(message, '该会话已绑定到飞书聊天 oc_xxx。一个会话只能绑定一个聊天。');
+  });
+
+  it('falls back to the default binding error message for unknown failures', () => {
+    const message = _testOnly.toUserVisibleBindingError('boom', '切换失败。');
+    assert.equal(message, '切换失败。');
+  });
+
+  it('formats chat labels with display names when available', () => {
+    const label = _testOnly.formatBindingChatLabel({
+      channelType: 'feishu',
+      chatId: 'oc_xxx',
+      chatDisplayName: '张乐',
+    } as never);
+    assert.equal(label, '飞书 聊天 张乐');
+  });
+
+  it('maps unexpected /history failures to a user-visible hint', () => {
+    const message = _testOnly.toUserVisibleCommandError('/history', new Error('boom'));
+    assert.equal(message, '整理历史失败，请稍后重试；也可以发送 /history raw 查看原始记录。');
+  });
+
+  it('falls back to a generic user-visible error for other commands', () => {
+    const message = _testOnly.toUserVisibleCommandError('/model', new Error('boom'));
+    assert.equal(message, '/model 执行失败，请稍后重试。');
+  });
 });
 
 describe('bridge-manager status formatting', () => {

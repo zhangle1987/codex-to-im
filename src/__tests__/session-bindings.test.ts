@@ -28,10 +28,11 @@ describe('session-bindings uniqueness', () => {
 
     const first = bindStoreToSession(store, 'feishu', 'oc_a', session.id);
     assert.ok(first);
+    store.updateChannelBinding(first.id, { chatDisplayName: '张乐' });
 
     assert.throws(
       () => bindStoreToSession(store, 'feishu', 'oc_b', session.id),
-      /一个会话只能绑定一个聊天/,
+      /飞书 聊天 张乐。一个会话只能绑定一个聊天/,
     );
   });
 

@@ -43,6 +43,10 @@ function formatChannelLabel(channelType: string): string {
   return channelType === 'weixin' ? '微信' : channelType === 'feishu' ? '飞书' : channelType;
 }
 
+function formatBindingChatTarget(binding: ChannelBinding): string {
+  return binding.chatDisplayName?.trim() || binding.chatId;
+}
+
 function findConflictingBinding(
   store: BridgeStore,
   current: { channelType: string; chatId: string },
@@ -73,7 +77,7 @@ function assertBindingTargetAvailable(
   if (!conflict) return;
 
   throw new Error(
-    `该会话已绑定到 ${formatChannelLabel(conflict.channelType)} 聊天 ${conflict.chatId}。一个会话只能绑定一个聊天。`,
+    `该会话已绑定到 ${formatChannelLabel(conflict.channelType)} 聊天 ${formatBindingChatTarget(conflict)}。一个会话只能绑定一个聊天。`,
   );
 }
 

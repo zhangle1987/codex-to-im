@@ -337,6 +337,41 @@ function renderFeedbackTextForChannel(channelType: string, text: string): string
   return renderFeedbackText(text, getFeedbackParseMode(channelType));
 }
 
+function toUserVisibleBindingError(error: unknown, fallback: string): string {
+  if (error instanceof Error) {
+    const message = error.message?.trim();
+    if (message) return message;
+  }
+  return fallback;
+}
+
+function formatBindingChatLabel(binding: Pick<ChannelBinding, 'channelType' | 'chatId' | 'chatDisplayName'>): string {
+  const channelLabel = binding.channelType === 'weixin'
+    ? '微信'
+    : binding.channelType === 'feishu'
+      ? '飞书'
+      : binding.channelType;
+  const chatLabel = binding.chatDisplayName?.trim() || binding.chatId;
+  return `${channelLabel} 聊天 ${chatLabel}`;
+}
+
+function toUserVisibleCommandError(command: string, error: unknown): string {
+  if (error instanceof Error) {
+    const message = error.message?.trim();
+    if (message && /一个会话只能绑定一个聊天|已绑定到/.test(message)) {
+      return message;
+    }
+  }
+
+  if (command === '/history') {
+    return '整理历史失败，请稍后重试；也可以发送 /history raw 查看原始记录。';
+  }
+  if (command === '/new') {
+    return '新建会话失败。请检查目录是否可写，或改用 /new 绝对路径。';
+  }
+  return `${command} 执行失败，请稍后重试。`;
+}
+
 function resolveEffectiveReasoningEffort(session: BridgeSession | null | undefined): string {
   const { store } = getBridgeContext();
   const configured = session?.reasoning_effort || store.getSetting('bridge_codex_reasoning_effort');
@@ -2359,7 +2394,21 @@ async function handleMessage(
 
   // Check for IM commands (before sanitization — commands are validated individually)
   if (rawText.startsWith('/')) {
-    await handleCommand(adapter, msg, rawText);
+    const parts = rawText.split(/\s+/);
+    const rawCommand = parts[0].split('@')[0].toLowerCase();
+    const args = parts.slice(1).join(' ').trim();
+    const resolvedCommand = resolveCommandAlias(rawCommand, args);
+    try {
+      await handleCommand(adapter, msg, rawText);
+    } catch (error) {
+      console.error(`[bridge-manager] Command failed: ${resolvedCommand}`, error);
+      await deliver(adapter, {
+        address: msg.address,
+        text: toUserVisibleCommandError(resolvedCommand, error),
+        parseMode: getFeedbackParseMode(adapter.channelType),
+        replyToMessageId: msg.messageId,
+      });
+    }
     ack();
     return;
   }
@@ -2693,10 +2742,16 @@ async function handleCommand(
       if (prefersThreadList) {
         const threadPick = resolveByIndexOrPrefix(args, displayedThreads, (session) => session.threadId);
         if (threadPick.match) {
-          const importedBinding = router.bindToSdkSession(msg.address, threadPick.match.threadId, {
-            workingDirectory: threadPick.match.cwd,
-            displayName: threadPick.match.title,
-          });
+          let importedBinding: ReturnType<typeof router.bindToSdkSession>;
+          try {
+            importedBinding = router.bindToSdkSession(msg.address, threadPick.match.threadId, {
+              workingDirectory: threadPick.match.cwd,
+              displayName: threadPick.match.title,
+            });
+          } catch (error) {
+            response = toUserVisibleBindingError(error, '绑定桌面会话失败。');
+            break;
+          }
           const session = store.getSession(importedBinding.codepilotSessionId);
           response = buildCommandFields(
             '已绑定桌面会话',
@@ -2718,7 +2773,13 @@ async function handleCommand(
         break;
       }
       if (sessionPick.match) {
-        const binding = router.bindToSession(msg.address, sessionPick.match.id);
+        let binding: ReturnType<typeof router.bindToSession>;
+        try {
+          binding = router.bindToSession(msg.address, sessionPick.match.id);
+        } catch (error) {
+          response = toUserVisibleBindingError(error, '切换会话失败。');
+          break;
+        }
         if (binding) {
           response = buildCommandFields(
             '已切换会话（兼容命令）',
@@ -2743,10 +2804,16 @@ async function handleCommand(
         break;
       }
 
-      const importedBinding = router.bindToSdkSession(msg.address, threadPick.match.threadId, {
-        workingDirectory: threadPick.match.cwd,
-        displayName: threadPick.match.title,
-      });
+      let importedBinding: ReturnType<typeof router.bindToSdkSession>;
+      try {
+        importedBinding = router.bindToSdkSession(msg.address, threadPick.match.threadId, {
+          workingDirectory: threadPick.match.cwd,
+          displayName: threadPick.match.title,
+        });
+      } catch (error) {
+        response = toUserVisibleBindingError(error, '绑定桌面会话失败。');
+        break;
+      }
       const importedSession = store.getSession(importedBinding.codepilotSessionId);
       response = buildCommandFields(
         '已绑定桌面会话',
@@ -2802,10 +2869,16 @@ async function handleCommand(
       if (!threadPick.match) {
         if (validateSessionId(args)) {
           const desktop = getDesktopSessionByThreadId(args);
-          const binding = router.bindToSdkSession(msg.address, args, desktop ? {
-            workingDirectory: desktop.cwd,
-            displayName: desktop.title,
-          } : undefined);
+          let binding: ReturnType<typeof router.bindToSdkSession>;
+          try {
+            binding = router.bindToSdkSession(msg.address, args, desktop ? {
+              workingDirectory: desktop.cwd,
+              displayName: desktop.title,
+            } : undefined);
+          } catch (error) {
+            response = toUserVisibleBindingError(error, '切换桌面会话失败。');
+            break;
+          }
           const session = store.getSession(binding.codepilotSessionId);
           response = buildCommandFields(
             '已切换到桌面会话',
@@ -2821,10 +2894,16 @@ async function handleCommand(
         response = '没有找到对应的桌面会话。先发送 `/t` 查看最近会话，再用 `/t 1` 接管。';
         break;
       }
-      const binding = router.bindToSdkSession(msg.address, threadPick.match.threadId, {
-        workingDirectory: threadPick.match.cwd,
-        displayName: threadPick.match.title,
-      });
+      let binding: ReturnType<typeof router.bindToSdkSession>;
+      try {
+        binding = router.bindToSdkSession(msg.address, threadPick.match.threadId, {
+          workingDirectory: threadPick.match.cwd,
+          displayName: threadPick.match.title,
+        });
+      } catch (error) {
+        response = toUserVisibleBindingError(error, '切换桌面会话失败。');
+        break;
+      }
       response = buildCommandFields(
         '已切换到桌面会话',
         [
@@ -2876,7 +2955,13 @@ async function handleCommand(
         response = '没有找到对应的内部会话。先发送 /sessions 查看可选项。';
         break;
       }
-      const binding = router.bindToSession(msg.address, sessionPick.match.id);
+      let binding: ReturnType<typeof router.bindToSession>;
+      try {
+        binding = router.bindToSession(msg.address, sessionPick.match.id);
+      } catch (error) {
+        response = toUserVisibleBindingError(error, '切换会话失败。');
+        break;
+      }
       if (!binding) {
         response = '切换失败，该会话不存在。';
         break;
@@ -3239,7 +3324,7 @@ async function handleCommand(
       response = buildCommandFields(
         '已解绑当前聊天',
         [
-          ['聊天', msg.address.chatId],
+          ['聊天', formatBindingChatLabel(currentBinding)],
         ],
         [
           '这个聊天已释放当前会话绑定。',
@@ -3327,9 +3412,12 @@ export const _testOnly = {
   resolveNewWorkingDirectory,
   resolveNewSessionWorkingDirectory,
   resolveCommandAlias,
+  toUserVisibleBindingError,
+  toUserVisibleCommandError,
   normalizeReasoningEffort,
   resolveDisplayedModel,
   formatDisplayedModel,
+  formatBindingChatLabel,
   formatRuntimeStatus,
   formatMirrorStatus,
   formatMirrorMessage,
