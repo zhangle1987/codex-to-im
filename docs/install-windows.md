@@ -20,7 +20,6 @@
 - 运行方式：本地 Node.js detached 子进程，不依赖当前命令窗口常驻
 - 配置目录：`%USERPROFILE%\\.codex-to-im\\`
 - 兼容目录：如果机器上已有旧数据，会回落到 `%USERPROFILE%\\.claude-to-im\\`
-- 可选增强：可安装一层轻量 Codex 集成到 `%USERPROFILE%\\.codex\\skills\\codex-to-im`
 
 这意味着当前推荐的部署方式不是“clone 仓库后让用户手动跑脚本”，而是：
 
@@ -222,7 +221,7 @@ codex-to-im stop
 - “通道”页里可以分别控制“反馈使用 Markdown”：
   - 飞书默认开启
   - 微信默认关闭
-  - 只影响 `/h`、`/status`、`/threads` 这类系统反馈，不影响 Codex 原始回复
+  - 影响通过 bridge 发送到通道的文本反馈，包括普通回复、共享桌面线程镜像以及 `/h`、`/status`、`/threads` 这类系统反馈
 - IM 里也支持一组短命令别名：
 - `/` / `/status` 当前会话
 - `/h` / `/help` 帮助
@@ -264,29 +263,7 @@ codex-to-im stop
 
 所以安装或排查时，需要先确认当前实际使用的是哪一个 home 目录。
 
-## 8. 可选 Codex 集成
-
-这一步不是必须的。
-
-只有在你希望：
-
-- 从 Codex 里直接打开 `codex-to-im`
-- 或保留“共享当前会话到飞书”的轻入口
-
-时，才需要安装。
-
-当前可以通过本地工作台里的按钮安装到：
-
-```text
-%USERPROFILE%\.codex\skills\codex-to-im
-```
-
-安装后，它只保留两个动作：
-
-- `open codex-to-im`
-- `share current session to Feishu`
-
-## 9. 安装给别的主机时的建议
+## 8. 安装给别的主机时的建议
 
 ### 9.1 飞书
 
@@ -312,16 +289,15 @@ codex-to-im stop
 3. 每台目标机执行 `npm install -g codex-to-im`
 4. 每台机器各自完成本地登录、配置和通道测试
 
-## 10. 当前限制
+## 9. 当前限制
 
 当前版本有几个需要提前说明的点：
 
 - 默认不是 Windows Service，而是本地 detached 进程
 - 机器重启后，不会自动恢复，需要再次运行 `codex-to-im`
-- 可选 Codex 集成不是主安装路径
 - 当前主路径是“本地工作台 + IM 配置 + Bridge 启动”
 
-## 10.1 Windows 上的更新方式
+## 9.1 Windows 上的更新方式
 
 如果后台 UI 或 bridge 仍在运行，Windows 可能会锁住 `%APPDATA%\\npm\\node_modules\\codex-to-im`，导致：
 
@@ -338,7 +314,7 @@ npm update -g codex-to-im
 codex-to-im
 ```
 
-## 11. 发布方注意事项
+## 10. 发布方注意事项
 
 如果你要把这个包发布到 npm，当前实现要求：
 

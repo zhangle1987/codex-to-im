@@ -9,7 +9,7 @@ import { PendingPermissions } from './permission-gateway.js';
 import { CodexProvider } from './codex-provider.js';
 import { getCodexSessionsRoot, listDesktopSessions } from './desktop-sessions.js';
 import {
-  getChannelBindingSummaries,
+  type BindingSummary,
   listBindingSummaries,
   listBindingTargetOptions,
   removeBinding,
@@ -21,8 +21,6 @@ import {
   getPackageRoot,
   getUiServerStatus,
   getUiServerUrl,
-  installCodexIntegration,
-  isCodexIntegrationInstalled,
   restartBridge,
   startBridge,
   stopBridge,
@@ -39,6 +37,17 @@ const supportedChannels = ['feishu', 'weixin'] as const;
 const AUTH_COOKIE_NAME = 'cti_ui_auth';
 const availableCodexModels = listSelectableCodexModels();
 const availableCodexModelSlugs = new Set(availableCodexModels.map((model) => model.slug));
+const FEISHU_CHAT_LABEL_TTL_MS = 5 * 60 * 1000;
+const feishuChatLabelCache = new Map<string, { label: string; userId?: string; expiresAt: number }>();
+let feishuTenantTokenCache:
+  | {
+      appId: string;
+      appSecret: string;
+      domain: string;
+      token: string;
+      expiresAt: number;
+    }
+  | null = null;
 
 function parsePreferredPort(): number {
   const raw = Number(process.env.CTI_UI_PORT || '4781');
@@ -347,6 +356,181 @@ async function validateFeishuCredentials(config: Config): Promise<{ ok: boolean;
   return {
     ok: false,
     message: data.msg || `飞书校验失败，HTTP ${response.status}`,
+  };
+}
+
+function getFeishuDomain(config: Config): string {
+  return (config.feishuDomain || 'https://open.feishu.cn').replace(/\/+$/, '');
+}
+
+async function getFeishuTenantAccessToken(config: Config): Promise<string | null> {
+  if (!config.feishuAppId || !config.feishuAppSecret) return null;
+
+  const domain = getFeishuDomain(config);
+  const now = Date.now();
+  if (
+    feishuTenantTokenCache
+    && feishuTenantTokenCache.appId === config.feishuAppId
+    && feishuTenantTokenCache.appSecret === config.feishuAppSecret
+    && feishuTenantTokenCache.domain === domain
+    && feishuTenantTokenCache.expiresAt > now + 60_000
+  ) {
+    return feishuTenantTokenCache.token;
+  }
+
+  const response = await fetch(`${domain}/open-apis/auth/v3/tenant_access_token/internal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      app_id: config.feishuAppId,
+      app_secret: config.feishuAppSecret,
+    }),
+  });
+
+  const data = await response.json() as {
+    code?: number;
+    msg?: string;
+    tenant_access_token?: string;
+    expire?: number;
+  };
+  if (!response.ok || data.code !== 0 || !data.tenant_access_token) {
+    return null;
+  }
+
+  feishuTenantTokenCache = {
+    appId: config.feishuAppId,
+    appSecret: config.feishuAppSecret,
+    domain,
+    token: data.tenant_access_token,
+    expiresAt: now + Math.max(60, Number(data.expire || 7200)) * 1000,
+  };
+  return data.tenant_access_token;
+}
+
+async function resolveFeishuBindingDisplay(
+  config: Config,
+  binding: BindingSummary,
+): Promise<Pick<BindingSummary, 'chatDisplayName' | 'chatUserId'>> {
+  if (binding.channelType !== 'feishu') {
+    return {
+      chatDisplayName: binding.chatDisplayName,
+      chatUserId: binding.chatUserId,
+    };
+  }
+
+  const cached = feishuChatLabelCache.get(binding.chatId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return {
+      chatDisplayName: cached.label,
+      chatUserId: cached.userId || binding.chatUserId,
+    };
+  }
+
+  const token = await getFeishuTenantAccessToken(config);
+  if (!token) {
+    return {
+      chatDisplayName: binding.chatDisplayName,
+      chatUserId: binding.chatUserId,
+    };
+  }
+
+  const domain = getFeishuDomain(config);
+  try {
+    const chatResponse = await fetch(
+      `${domain}/open-apis/im/v1/chats/${encodeURIComponent(binding.chatId)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    const chatData = await chatResponse.json() as {
+      code?: number;
+      data?: {
+        name?: string;
+        owner_id?: string;
+        chat_mode?: string;
+      };
+    };
+
+    const chatName = asString(chatData.data?.name);
+    const ownerId = asString(chatData.data?.owner_id) || binding.chatUserId;
+    if (chatResponse.ok && chatData.code === 0 && chatName) {
+      feishuChatLabelCache.set(binding.chatId, {
+        label: chatName,
+        userId: ownerId,
+        expiresAt: Date.now() + FEISHU_CHAT_LABEL_TTL_MS,
+      });
+      return {
+        chatDisplayName: chatName,
+        chatUserId: ownerId,
+      };
+    }
+
+    if (ownerId) {
+      const userResponse = await fetch(
+        `${domain}/open-apis/contact/v3/users/${encodeURIComponent(ownerId)}?user_id_type=open_id`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      const userData = await userResponse.json() as {
+        code?: number;
+        data?: {
+          user?: {
+            name?: string;
+            nickname?: string;
+          };
+        };
+      };
+      const userName = asString(userData.data?.user?.name) || asString(userData.data?.user?.nickname);
+      if (userResponse.ok && userData.code === 0 && userName) {
+        feishuChatLabelCache.set(binding.chatId, {
+          label: userName,
+          userId: ownerId,
+          expiresAt: Date.now() + FEISHU_CHAT_LABEL_TTL_MS,
+        });
+        return {
+          chatDisplayName: userName,
+          chatUserId: ownerId,
+        };
+      }
+    }
+  } catch {
+    // Best effort: keep raw chat id if lookup fails.
+  }
+
+  return {
+    chatDisplayName: binding.chatDisplayName,
+    chatUserId: binding.chatUserId,
+  };
+}
+
+async function buildBindingsPayload(store: JsonFileStore, config: Config) {
+  const bindings = listBindingSummaries(store);
+  const enriched = await Promise.all(bindings.map(async (binding) => {
+    const resolved = await resolveFeishuBindingDisplay(config, binding);
+    if (
+      binding.channelType === 'feishu'
+      && (
+        resolved.chatDisplayName !== binding.chatDisplayName
+        || resolved.chatUserId !== binding.chatUserId
+      )
+      && (resolved.chatDisplayName || resolved.chatUserId)
+    ) {
+      store.updateChannelBinding(binding.id, {
+        chatDisplayName: resolved.chatDisplayName,
+        chatUserId: resolved.chatUserId,
+      });
+    }
+    return {
+      ...binding,
+      chatDisplayName: resolved.chatDisplayName || binding.chatDisplayName,
+      chatUserId: resolved.chatUserId || binding.chatUserId,
+    };
+  }));
+
+  return {
+    bindings: enriched,
+    channels: {
+      feishu: enriched.filter((binding) => binding.channelType === 'feishu'),
+      weixin: enriched.filter((binding) => binding.channelType === 'weixin'),
+    },
+    options: listBindingTargetOptions(store, 12),
   };
 }
 
@@ -1570,10 +1754,6 @@ function renderHtml(): string {
               <div class="status-value" id="bridgeStatus">-</div>
             </div>
             <div class="status-card">
-              <strong>Codex 集成</strong>
-              <div class="status-value" id="integrationStatus">-</div>
-            </div>
-            <div class="status-card">
               <strong>Runtime</strong>
               <div class="status-value" id="runtimeStatus">-</div>
             </div>
@@ -1610,14 +1790,6 @@ function renderHtml(): string {
               <div class="panel-block">
                 <p class="panel-subtitle">当前能力</p>
                 <div class="notice">已接通：保存配置、后台启停、飞书凭据测试、微信扫码、Codex 连接测试、桌面会话发现、IM 绑定查看与网页侧切换。</div>
-              </div>
-
-              <div class="panel-block">
-                <p class="panel-subtitle">可选 Codex 集成</p>
-                <div class="notice">主流程不依赖这层集成。只有当你想在 Codex 里直接打开 codex-to-im，或者保留一个“共享当前会话到飞书”的轻入口时，才需要安装它。</div>
-                <div class="actions" style="margin-top: 12px;">
-                  <button id="installIntegrationBtn">安装可选 Codex 集成</button>
-                </div>
               </div>
 
               <div class="message" id="opsMessage"></div>
@@ -1912,7 +2084,7 @@ function renderHtml(): string {
                   <label class="checkbox"><input id="feishuCommandMarkdownEnabled" type="checkbox" checked /> 反馈使用markdown</label>
                 </div>
                 <div class="small">需要飞书侧已开通可更新卡片的相关能力；如果权限不足，会自动回退为最终结果消息。</div>
-                <div class="small">只影响 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈，不影响 Codex 原始回复。</div>
+                <div class="small">影响通过 bridge 发送到飞书的文本反馈，包括普通回复、共享桌面线程镜像和 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈。</div>
                 <div class="small">修改飞书 <code>App ID</code>、<code>App Secret</code>、<code>Domain</code> 后，需要重启 Bridge 让客户端重新初始化；白名单、流式开关、markdown 开关会即时生效。</div>
               </div>
 
@@ -1952,7 +2124,7 @@ function renderHtml(): string {
                   <label class="checkbox"><input id="weixinCommandMarkdownEnabled" type="checkbox" /> 反馈使用markdown</label>
                 </div>
               </div>
-              <div class="small">只影响 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈，不影响 Codex 原始回复。默认关闭。</div>
+              <div class="small">影响通过 bridge 发送到微信的文本反馈，包括普通回复、共享桌面线程镜像和 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈。默认关闭。</div>
               <div class="panel-block">
                 <p class="panel-subtitle">通道状态</p>
                 <div class="small" id="weixinRuntimeMeta">正在加载…</div>
@@ -2116,7 +2288,7 @@ function renderHtml(): string {
       }
 
       function bindingTabLabel(binding) {
-        return binding.chatId || binding.id;
+        return binding.chatDisplayName || binding.chatId || binding.id;
       }
 
       function ensureActiveBinding(channelType, bindings) {
@@ -2133,12 +2305,13 @@ function renderHtml(): string {
         return ''
           + '<article class="binding-item" data-binding-id="' + escapeHtml(binding.id) + '">'
           +   '<div class="binding-head">'
-          +     '<div class="binding-title">' + escapeHtml(binding.chatId) + '</div>'
+          +     '<div class="binding-title">' + escapeHtml(binding.chatDisplayName || binding.chatId) + '</div>'
           +     '<div class="actions">'
           +       '<div class="small">' + escapeHtml(binding.mode) + '</div>'
           +       '<button type="button" data-action="unbind-binding" data-binding-id="' + escapeHtml(binding.id) + '">解绑当前聊天</button>'
           +     '</div>'
           +   '</div>'
+          +   '<div class="binding-detail">聊天 ID：<code>' + escapeHtml(binding.chatId) + '</code></div>'
           +   '<div class="binding-detail">当前会话：<code>' + escapeHtml(binding.currentSessionId.slice(0, 8)) + '...</code> · ' + escapeHtml(binding.currentSessionName) + '</div>'
           +   '<div class="binding-detail">当前目标：' + escapeHtml(binding.currentTargetLabel || '未绑定') + '</div>'
           +   '<div class="binding-detail">当前 thread：<code>' + escapeHtml(binding.currentThreadId || 'not-shared') + '</code></div>'
@@ -2555,7 +2728,7 @@ function renderHtml(): string {
       }
 
       function formatBindingAccount(binding) {
-        return channelLabel(binding.channelType) + ' · ' + binding.chatId;
+        return channelLabel(binding.channelType) + ' · ' + (binding.chatDisplayName || binding.chatId);
       }
 
       function bindingRuntimeText(binding) {
@@ -2901,7 +3074,6 @@ function renderHtml(): string {
         fillForm(config);
         const runningChannelText = runningChannels().length ? ' · ' + runningChannels().join(', ') : '';
         document.getElementById('bridgeStatus').textContent = status.bridge.running ? 'Running' + runningChannelText : 'Stopped';
-        document.getElementById('integrationStatus').textContent = status.codexIntegrationInstalled ? '已安装' : '未安装';
         document.getElementById('runtimeStatus').textContent = config.runtime || 'codex';
         document.getElementById('homeStatus').textContent = status.home;
         document.getElementById('overviewHomeStatus').textContent = status.home;
@@ -3111,16 +3283,6 @@ function renderHtml(): string {
         } catch (error) {
           showMessage('opsMessage', 'error', error.message);
           await loadLogs();
-        }
-      });
-
-      document.getElementById('installIntegrationBtn').addEventListener('click', async () => {
-        try {
-          const result = await api('/api/install-codex-integration', { method: 'POST' });
-          showMessage('opsMessage', 'success', '可选 Codex 集成已处理：' + result.method + ' -> ' + result.targetDir);
-          await loadStatus();
-        } catch (error) {
-          showMessage('opsMessage', 'error', error.message);
         }
       });
 
@@ -3355,7 +3517,6 @@ const server = http.createServer(async (request, response) => {
         uiAccess: buildUiAccessInfo(port, config, request),
         home: CTI_HOME,
         packageRoot: getPackageRoot(),
-        codexIntegrationInstalled: isCodexIntegrationInstalled(),
         weixin: {
           linkedAccounts: getWeixinAccountsPayload(),
         },
@@ -3381,14 +3542,7 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === 'GET' && url.pathname === '/api/bindings') {
       const store = createUiStore();
-      json(response, 200, {
-        bindings: listBindingSummaries(store),
-        channels: {
-          feishu: getChannelBindingSummaries(store, 'feishu'),
-          weixin: getChannelBindingSummaries(store, 'weixin'),
-        },
-        options: listBindingTargetOptions(store, 12),
-      });
+      json(response, 200, await buildBindingsPayload(store, config));
       return;
     }
 
@@ -3454,12 +3608,7 @@ const server = http.createServer(async (request, response) => {
       json(response, 200, {
         ok: true,
         updated,
-        bindings: listBindingSummaries(store),
-        channels: {
-          feishu: getChannelBindingSummaries(store, 'feishu'),
-          weixin: getChannelBindingSummaries(store, 'weixin'),
-        },
-        options: listBindingTargetOptions(store, 12),
+        ...(await buildBindingsPayload(store, loadConfig())),
       });
       return;
     }
@@ -3476,19 +3625,8 @@ const server = http.createServer(async (request, response) => {
       removeBinding(store, bindingId);
       json(response, 200, {
         ok: true,
-        bindings: listBindingSummaries(store),
-        channels: {
-          feishu: getChannelBindingSummaries(store, 'feishu'),
-          weixin: getChannelBindingSummaries(store, 'weixin'),
-        },
-        options: listBindingTargetOptions(store, 12),
+        ...(await buildBindingsPayload(store, loadConfig())),
       });
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/install-codex-integration') {
-      const result = await installCodexIntegration();
-      json(response, 200, result);
       return;
     }
 

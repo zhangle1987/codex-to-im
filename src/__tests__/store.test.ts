@@ -60,6 +60,8 @@ describe('JsonFileStore', () => {
     const b1 = store.upsertChannelBinding({
       channelType: 'telegram',
       chatId: '123',
+      chatUserId: 'user-1',
+      chatDisplayName: 'Alice',
       codepilotSessionId: 'sess-1',
       workingDirectory: '/tmp',
       model: 'model-1',
@@ -68,11 +70,14 @@ describe('JsonFileStore', () => {
     assert.ok(b1.id);
     assert.equal(b1.channelType, 'telegram');
     assert.equal(b1.chatId, '123');
+    assert.equal(b1.chatUserId, 'user-1');
+    assert.equal(b1.chatDisplayName, 'Alice');
 
     // Upsert same channel+chat should update
     const b2 = store.upsertChannelBinding({
       channelType: 'telegram',
       chatId: '123',
+      chatDisplayName: 'Alice Cooper',
       codepilotSessionId: 'sess-2',
       workingDirectory: '/tmp/new',
       model: 'model-2',
@@ -81,6 +86,8 @@ describe('JsonFileStore', () => {
     assert.equal(b2.id, b1.id);
     assert.equal(b2.codepilotSessionId, 'sess-2');
     assert.equal(b2.mode, 'ask');
+    assert.equal(b2.chatUserId, 'user-1');
+    assert.equal(b2.chatDisplayName, 'Alice Cooper');
   });
 
   it('upsertChannelBinding uses default mode from settings', () => {

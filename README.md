@@ -10,8 +10,6 @@ The product is no longer centered around a Codex skill. The main path is:
 4. Start the bridge in the background
 5. Bind real desktop Codex threads to Feishu or Weixin chats
 
-`SKILL.md` is still kept in the repo, but only as an optional Codex integration entry.
-
 ## Project Origin
 
 The current codebase is a consolidated continuation of two earlier repositories:
@@ -19,7 +17,7 @@ The current codebase is a consolidated continuation of two earlier repositories:
 - `Claude-to-IM`
 - `Claude-to-IM-skill`
 
-`codex-to-im` is based on those two projects and has been reworked toward a single-package local app, shared-thread workflow, and optional Codex integration model.
+`codex-to-im` is based on those two projects and has been reworked toward a single-package local app and shared-thread workflow.
 
 Windows host installation guide: [docs/install-windows.md](D:/codex/Claude-to-IM-skill/docs/install-windows.md)
 
@@ -31,7 +29,6 @@ Windows host installation guide: [docs/install-windows.md](D:/codex/Claude-to-IM
 - Weixin QR login flow
 - Desktop session discovery from `~/.codex/sessions`
 - Web-side binding updates for IM chats
-- Optional Codex integration for opening `codex-to-im` or entering the Feishu handoff flow
 
 ## Install
 
@@ -190,8 +187,7 @@ This is closer to a full-power `code` workflow. It fits a controlled local proje
 The channel pages also expose a “Use Markdown for bridge feedback” switch:
 - enabled by default for Feishu
 - disabled by default for WeChat
-- only affects bridge-generated feedback such as `/h`, `/status`, and `/threads`
-- does not affect raw Codex replies
+- affects text sent through the bridge, including normal replies, shared-thread mirror messages, and system feedback such as `/h`, `/status`, and `/threads`
 
 ## Update
 
@@ -205,23 +201,6 @@ npm update -g codex-to-im
 codex-to-im
 ```
 
-## Optional Codex Integration
-
-The repo still includes a lightweight optional integration under `SKILL.md`.
-
-It is not required for the product to work.
-
-If installed into `~/.codex/skills/codex-to-im`, it should only be used for two actions:
-
-- Open `codex-to-im`
-- Open the Feishu session-sharing entry for the current workflow
-
-You can install that optional integration from the web UI, or with:
-
-```bash
-bash scripts/install-codex.sh --link
-```
-
 ## Repo Layout
 
 - `src/ui-server.ts` — local workbench UI and HTTP API
@@ -229,7 +208,6 @@ bash scripts/install-codex.sh --link
 - `src/desktop-sessions.ts` — desktop thread discovery from Codex session files
 - `src/session-bindings.ts` — binding summaries and web-side binding updates
 - `src/lib/bridge/` — bridge runtime and IM channel routing
-- `SKILL.md` — optional Codex integration only
 - `docs/` — PRD and shared-thread design docs
 
 ## Development
@@ -246,6 +224,5 @@ Current product direction:
 - Standalone local app first
 - Web workbench first
 - Shared Codex thread model first
-- Codex integration is optional, not the primary installation path
 
 [中文文档](README_CN.md)

@@ -10,8 +10,6 @@
 4. 在后台启动 bridge
 5. 把真实的桌面 Codex thread 绑定到飞书或微信聊天
 
-仓库里仍然保留了 `SKILL.md`，但它只是一个可选的 Codex 集成入口，不再是产品本体。
-
 ## 项目来源
 
 当前这套代码是在两个早期仓库的基础上整理和改造出来的：
@@ -19,7 +17,7 @@
 - `Claude-to-IM`
 - `Claude-to-IM-skill`
 
-现在的 `codex-to-im` 是在这两个工程基础上继续演进的单包版本，重点调整成了本地应用、共享 thread 和可选 Codex 集成的形态。
+现在的 `codex-to-im` 是在这两个工程基础上继续演进的单包版本，重点调整成了本地应用和共享 thread 的形态。
 
 Windows 主机安装说明见：[docs/install-windows.md](D:/codex/Claude-to-IM-skill/docs/install-windows.md)
 
@@ -31,7 +29,6 @@ Windows 主机安装说明见：[docs/install-windows.md](D:/codex/Claude-to-IM-
 - 微信扫码登录
 - 从 `~/.codex/sessions` 发现桌面会话
 - 在网页中查看和切换 IM 绑定
-- 可选的 Codex 集成，仅用于打开 `codex-to-im` 或进入飞书共享入口
 
 ## 安装
 
@@ -189,8 +186,7 @@ codex-to-im stop
 通道页还支持“反馈使用 Markdown”开关：
 - 飞书默认开启
 - 微信默认关闭
-- 只影响 `/h`、`/status`、`/threads` 这类 bridge 自己生成的反馈
-- 不影响 Codex 原始回复内容
+- 影响通过 bridge 发送到通道的文本反馈，包括普通回复、共享桌面线程镜像以及 `/h`、`/status`、`/threads` 这类系统反馈
 
 ## 更新
 
@@ -204,23 +200,6 @@ npm update -g codex-to-im
 codex-to-im
 ```
 
-## 可选 Codex 集成
-
-仓库里仍然保留了一个很薄的可选集成，定义在 `SKILL.md`。
-
-它不是必需的。
-
-如果你把它装到 `~/.codex/skills/codex-to-im`，它只保留两个动作：
-
-- 打开 `codex-to-im`
-- 打开“共享当前会话到飞书”的入口
-
-你可以在 Web UI 中安装这层可选集成，也可以手动执行：
-
-```bash
-bash scripts/install-codex.sh --link
-```
-
 ## 仓库结构
 
 - `src/ui-server.ts` — 本地工作台 UI 和 HTTP API
@@ -228,7 +207,6 @@ bash scripts/install-codex.sh --link
 - `src/desktop-sessions.ts` — 从 Codex 会话文件发现桌面 thread
 - `src/session-bindings.ts` — 绑定摘要与网页侧切换
 - `src/lib/bridge/` — bridge 运行时与 IM 路由
-- `SKILL.md` — 可选 Codex 集成，不是主产品
 - `docs/` — PRD 与共享 thread 技术设计
 
 ## 开发
@@ -243,6 +221,5 @@ npm run build
 - 先做独立本地应用
 - 先做 Web 工作台
 - 先做共享 Codex thread
-- Codex 集成是可选增强，不是主安装路径
 
 [English](README.md)

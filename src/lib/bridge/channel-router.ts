@@ -20,7 +20,20 @@ export function resolve(address: ChannelAddress): ChannelBinding {
   if (existing) {
     // Verify the linked session still exists; if not, create a new one
     const session = store.getSession(existing.codepilotSessionId);
-    if (session) return existing;
+    if (session) {
+      const updates: Partial<ChannelBinding> = {};
+      if (address.userId && address.userId !== existing.chatUserId) {
+        updates.chatUserId = address.userId;
+      }
+      if (address.displayName && address.displayName !== existing.chatDisplayName) {
+        updates.chatDisplayName = address.displayName;
+      }
+      if (Object.keys(updates).length > 0) {
+        store.updateChannelBinding(existing.id, updates);
+        return store.getChannelBinding(address.channelType, address.chatId) || { ...existing, ...updates };
+      }
+      return existing;
+    }
     // Session was deleted — recreate
     return createBinding(address);
   }
@@ -56,6 +69,8 @@ export function createBinding(
   return store.upsertChannelBinding({
     channelType: address.channelType,
     chatId: address.chatId,
+    chatUserId: address.userId,
+    chatDisplayName: address.displayName,
     codepilotSessionId: session.id,
     sdkSessionId: '',
     workingDirectory: session.working_directory,

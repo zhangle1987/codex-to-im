@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -305,41 +304,6 @@ export async function stopUiServer(): Promise<UiServerStatus> {
 export function writeUiServerStatus(status: UiServerStatus): void {
   ensureDirs();
   fs.writeFileSync(uiStatusFile, JSON.stringify(status, null, 2), 'utf-8');
-}
-
-function copyRecursive(source: string, target: string): void {
-  const stat = fs.statSync(source);
-  if (stat.isDirectory()) {
-    fs.mkdirSync(target, { recursive: true });
-    for (const entry of fs.readdirSync(source)) {
-      copyRecursive(path.join(source, entry), path.join(target, entry));
-    }
-    return;
-  }
-  fs.copyFileSync(source, target);
-}
-
-export async function installCodexIntegration(): Promise<{ targetDir: string; method: 'junction' | 'copy' | 'existing' }> {
-  const skillsDir = path.join(os.homedir(), '.codex', 'skills');
-  const targetDir = path.join(skillsDir, 'codex-to-im');
-  fs.mkdirSync(skillsDir, { recursive: true });
-
-  if (fs.existsSync(targetDir)) {
-    return { targetDir, method: 'existing' };
-  }
-
-  try {
-    fs.symlinkSync(packageRoot, targetDir, process.platform === 'win32' ? 'junction' : 'dir');
-    return { targetDir, method: 'junction' };
-  } catch {
-    copyRecursive(packageRoot, targetDir);
-    return { targetDir, method: 'copy' };
-  }
-}
-
-export function isCodexIntegrationInstalled(): boolean {
-  const targetDir = path.join(os.homedir(), '.codex', 'skills', 'codex-to-im');
-  return fs.existsSync(path.join(targetDir, 'SKILL.md'));
 }
 
 export function openBrowser(url: string): void {

@@ -23,6 +23,8 @@ export interface BindingSummary {
   id: string;
   channelType: string;
   chatId: string;
+  chatUserId?: string;
+  chatDisplayName?: string;
   mode: ChannelBinding['mode'];
   model: string;
   workingDirectory: string;
@@ -201,6 +203,8 @@ export function listBindingSummaries(store: BridgeStore): BindingSummary[] {
       id: binding.id,
       channelType: binding.channelType,
       chatId: binding.chatId,
+      chatUserId: binding.chatUserId,
+      chatDisplayName: binding.chatDisplayName,
       mode: binding.mode,
       model: binding.model,
       workingDirectory: binding.workingDirectory,

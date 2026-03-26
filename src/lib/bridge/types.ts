@@ -91,6 +91,8 @@ export interface ChannelBinding {
   id: string;
   channelType: ChannelType;
   chatId: string;
+  chatUserId?: string;
+  chatDisplayName?: string;
   /** CodePilot session ID this chat is bound to */
   codepilotSessionId: string;
   /** SDK session ID for resume (cached from last conversation) */

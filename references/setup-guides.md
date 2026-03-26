@@ -261,19 +261,12 @@ If you don't have the openid yet, leave this field empty. You can add it later v
 
 Weixin does **not** use a static bot token in `config.env`.
 
-Instead, run the local QR helper from the local app directory or optional Codex integration directory:
+Instead, run the local QR helper from the local app directory:
 
 - Repo checkout or app install:
 
 ```bash
 cd /path/to/codex-to-im
-npm run weixin:login
-```
-
-- Optional Codex integration install:
-
-```bash
-cd ~/.codex/skills/codex-to-im
 npm run weixin:login
 ```
 

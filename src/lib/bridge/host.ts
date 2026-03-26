@@ -147,6 +147,8 @@ export interface OutboundRefInput {
 export interface UpsertChannelBindingInput {
   channelType: string;
   chatId: string;
+  chatUserId?: string;
+  chatDisplayName?: string;
   codepilotSessionId: string;
   sdkSessionId?: string;
   workingDirectory: string;
