@@ -1,7 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildLocalAttachmentPromptSupplement } from '../lib/bridge/conversation-engine.js';
+import {
+  buildConversationPromptText,
+  buildLocalAttachmentPromptSupplement,
+} from '../lib/bridge/conversation-engine.js';
 
 describe('buildLocalAttachmentPromptSupplement', () => {
   it('returns an empty string when only images are present', () => {
@@ -43,5 +46,21 @@ describe('buildLocalAttachmentPromptSupplement', () => {
     assert.match(result, /demo\.mp4/);
     assert.match(result, /video\/mp4/);
     assert.match(result, /extract frames or audio only when needed/i);
+  });
+
+  it('builds the effective conversation prompt including non-image attachment guidance', () => {
+    const result = buildConversationPromptText('请帮我总结附件', [
+      {
+        id: 'pdf-1',
+        name: 'report.pdf',
+        type: 'application/pdf',
+        size: 40960,
+        filePath: 'D:\\work\\.codepilot-uploads\\report.pdf',
+      },
+    ]);
+
+    assert.match(result, /^请帮我总结附件\n\nAttached local files:/);
+    assert.match(result, /report\.pdf/);
+    assert.match(result, /D:\\work\\\.codepilot-uploads\\report\.pdf/);
   });
 });

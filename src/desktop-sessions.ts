@@ -47,6 +47,7 @@ export interface DesktopMirrorRecordDelta {
   records: DesktopMirrorRecord[];
   nextOffset: number;
   trailingText: string;
+  nextTurnId: string | null;
 }
 
 interface SessionMetaLine {
@@ -88,6 +89,14 @@ interface SessionEventLine {
     type?: string;
     message?: string;
     last_agent_message?: string;
+    turn_id?: string;
+  };
+}
+
+interface TurnContextLine {
+  timestamp?: string;
+  type?: string;
+  payload?: {
     turn_id?: string;
   };
 }
@@ -516,12 +525,16 @@ function readFileUtf8Range(filePath: string, startOffset: number, endOffset: num
   }
 }
 
-function isSessionEventLine(line: SessionMessageLine | SessionEventLine): line is SessionEventLine {
+function isSessionEventLine(line: SessionMessageLine | SessionEventLine | TurnContextLine): line is SessionEventLine {
   return line.type === 'event_msg';
 }
 
-function isSessionMessageLine(line: SessionMessageLine | SessionEventLine): line is SessionMessageLine {
+function isSessionMessageLine(line: SessionMessageLine | SessionEventLine | TurnContextLine): line is SessionMessageLine {
   return line.type === 'response_item';
+}
+
+function isTurnContextLine(line: SessionMessageLine | SessionEventLine | TurnContextLine): line is TurnContextLine {
+  return line.type === 'turn_context';
 }
 
 export function listDesktopSessions(limit?: number): DesktopSessionSummary[] {
@@ -650,8 +663,9 @@ function pushDesktopSessionEvent(
 
 function pushDesktopMirrorRecord(
   records: DesktopMirrorRecord[],
-  parsed: SessionMessageLine | SessionEventLine,
+  parsed: SessionMessageLine | SessionEventLine | TurnContextLine,
   rawLine: string,
+  activeTurnId: string | null,
 ): void {
   if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_started') {
     records.push({
@@ -673,6 +687,7 @@ function pushDesktopMirrorRecord(
       role: 'user',
       content: text,
       timestamp: parsed.timestamp || '',
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
     });
     return;
   }
@@ -698,6 +713,7 @@ function pushDesktopMirrorRecord(
       role: parsed.payload.phase === 'commentary' ? 'commentary' : 'assistant',
       content: parsed.payload.phase === 'commentary' ? text.replace(/^\[commentary\]\n/, '') : text,
       timestamp: parsed.timestamp || '',
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
     });
     return;
   }
@@ -711,6 +727,7 @@ function pushDesktopMirrorRecord(
       type: 'tool_started',
       content: '',
       timestamp: parsed.timestamp || '',
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
       toolId,
       toolName,
     });
@@ -724,6 +741,7 @@ function pushDesktopMirrorRecord(
       type: 'tool_finished',
       content: normalizeFreeText(parsed.payload.output || ''),
       timestamp: parsed.timestamp || '',
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
       toolId,
       isError: parsed.payload.is_error === true,
     });
@@ -778,6 +796,7 @@ function parseDesktopMirrorRecordText(
   content: string,
   leadingText = '',
   flushTrailingText = false,
+  initialTurnId: string | null = null,
 ): DesktopMirrorRecordDelta {
   const combined = `${leadingText}${content}`;
   if (!combined) {
@@ -785,6 +804,7 @@ function parseDesktopMirrorRecordText(
       records: [],
       nextOffset: 0,
       trailingText: '',
+      nextTurnId: initialTurnId,
     };
   }
 
@@ -796,25 +816,45 @@ function parseDesktopMirrorRecordText(
     trailingText = '';
   }
   const records: DesktopMirrorRecord[] = [];
+  let activeTurnId = initialTurnId;
 
   for (const line of rawLines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    let parsed: SessionMessageLine | SessionEventLine;
+    let parsed: SessionMessageLine | SessionEventLine | TurnContextLine;
     try {
-      parsed = JSON.parse(trimmed) as SessionMessageLine | SessionEventLine;
+      parsed = JSON.parse(trimmed) as SessionMessageLine | SessionEventLine | TurnContextLine;
     } catch {
       continue;
     }
 
-    pushDesktopMirrorRecord(records, parsed, trimmed);
+    if (isTurnContextLine(parsed)) {
+      activeTurnId = parsed.payload?.turn_id || activeTurnId;
+      continue;
+    }
+
+    if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_started') {
+      const eventPayload = parsed.payload as SessionEventLine['payload'];
+      activeTurnId = eventPayload?.turn_id || activeTurnId;
+    }
+
+    pushDesktopMirrorRecord(records, parsed, trimmed, activeTurnId);
+
+    if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_complete') {
+      const eventPayload = parsed.payload as SessionEventLine['payload'];
+      const completedTurnId = eventPayload?.turn_id || activeTurnId;
+      if (!completedTurnId || completedTurnId === activeTurnId) {
+        activeTurnId = null;
+      }
+    }
   }
 
   return {
     records,
     nextOffset: 0,
     trailingText,
+    nextTurnId: activeTurnId,
   };
 }
 
@@ -882,6 +922,7 @@ export function readDesktopSessionMirrorRecordDeltaByFilePath(
   startOffset: number,
   endOffset: number,
   trailingText = '',
+  currentTurnId: string | null = null,
 ): DesktopMirrorRecordDelta {
   let content = '';
   try {
@@ -891,14 +932,16 @@ export function readDesktopSessionMirrorRecordDeltaByFilePath(
       records: [],
       nextOffset: startOffset,
       trailingText,
+      nextTurnId: currentTurnId,
     };
   }
 
-  const parsed = parseDesktopMirrorRecordText(content, trailingText);
+  const parsed = parseDesktopMirrorRecordText(content, trailingText, false, currentTurnId);
   return {
     records: parsed.records,
     nextOffset: Math.max(startOffset, endOffset),
     trailingText: parsed.trailingText,
+    nextTurnId: parsed.nextTurnId,
   };
 }
 

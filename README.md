@@ -1,230 +1,157 @@
 # Codex-to-IM
 
-`codex-to-im` is a local bridge app that connects Codex desktop sessions to IM channels such as Feishu/Lark and Weixin.
+[English](README_EN.md)
 
-The product is no longer centered around a Codex skill. The main path is:
+`codex-to-im` 是一个本地桥接应用，用来把 Codex 接到飞书、微信等 IM 通道中使用。
 
-1. Install `codex-to-im`
-2. Open the local web workbench
-3. Configure IM channels
-4. Start the bridge in the background
-5. Bind real desktop Codex threads to Feishu or Weixin chats
+它的主路径不是“改造 Codex 本体”，而是：
 
-Optional: if you want Codex to know it can send local files or images back to IM without relying on bridge-injected prompt text, install the bundled `codex-to-im` skill from the workbench.
+1. 在本机启动一个 Web 工作台和 bridge
+2. 配置飞书或微信
+3. 把桌面里的 Codex 会话接到 IM
+4. 在 IM 中继续对话、切线程、查看状态
 
-## Project Origin
+## 核心能力
 
-The current codebase is a consolidated continuation of two earlier repositories:
+- 共享桌面线程：把 Codex Desktop 中正在使用的 thread 绑定到 IM，在 IM 中继续同一条会话。
+- IM 远程操作：支持查看当前状态、切线程、新建线程、切模式、切思考级别、切模型、停止当前任务、查看历史等常用命令。
+- 本地 Web 工作台：集中完成配置、通道登录、日志查看、会话管理和绑定管理。
+- 飞书流式卡片：飞书侧支持流式展示共享线程回复，也支持工具进度展示。
+- 附件回传：支持把本地图片或文件发回到飞书；如果需要让 Codex 主动使用这个能力，可以安装仓库附带的 `codex-to-im` skill。
+- 本地优先：服务、配置、日志和 bridge 都运行在本机，可选开启局域网访问 Web 控制台。
 
-- `Claude-to-IM`
-- `Claude-to-IM-skill`
+## 支持的通道
 
-`codex-to-im` is based on those two projects and has been reworked toward a single-package local app and shared-thread workflow.
+- 飞书：支持 bot 配置、连通性测试、共享线程、流式卡片、图片和文件发送。
+- 微信：支持扫码登录、共享线程和文本反馈。
 
-Windows host installation guide: [docs/install-windows.md](D:/codex/Claude-to-IM-skill/docs/install-windows.md)
+## 快速开始
 
-## What It Includes
-
-- Local background bridge service
-- Local web workbench for configuration, testing, logs, and bindings
-- Feishu credential setup and connectivity testing
-- Weixin QR login flow
-- Desktop session discovery from `~/.codex/sessions`
-- Web-side binding updates for IM chats
-
-## Install
-
-### Prerequisites
+### 依赖
 
 - Node.js 20+
-- If you use the `codex` or `auto` runtime, complete Codex authentication under the same OS user account
+- 当前系统用户下可用的 Codex 登录态或 API 凭据
 
-`codex-to-im` now ships with the required `@openai/codex-sdk` / Codex CLI platform dependency, so you do not need to install a separate global Codex CLI just to run the bridge.
+满足以下任一条件即可：
 
-You still need Codex credentials to be available for the current user. Any of these is sufficient:
+- 已登录 Codex Desktop App
+- 已登录 Codex CLI
+- 已配置 `CTI_CODEX_API_KEY`、`CODEX_API_KEY` 或 `OPENAI_API_KEY`
 
-- a logged-in Codex Desktop App
-- an existing Codex CLI login state
-- `CTI_CODEX_API_KEY`, `CODEX_API_KEY`, or `OPENAI_API_KEY`
-
-If the machine does not have any Codex login state yet, the simplest path is still to install the global CLI once and log in:
-
-```bash
-npm install -g @openai/codex
-codex auth login
-```
-
-### Global install
+### 安装
 
 ```bash
 npm install -g codex-to-im
 ```
 
-### Local development
-
-```bash
-npm install
-npm run build
-```
-
-Windows maintenance note:
-
-- The repo includes [patch-codex-sdk-windows-hide.js](D:/codex/Claude-to-IM-skill/scripts/patch-codex-sdk-windows-hide.js), which applies a conservative postinstall patch to `@openai/codex-sdk`.
-- This exists because on Windows the SDK may spawn the bundled Codex CLI without `windowsHide`, causing a black console window to flash for each IM-triggered run.
-- When upgrading `@openai/codex-sdk`, verify that the spawn block still matches; if upstream fixes this natively, remove the patch instead of carrying it forward.
-
-## Run
-
-Start the local app:
+### 启动
 
 ```bash
 codex-to-im
 ```
 
-This launches the local workbench and opens it in your browser.
-
-By default the workbench runs at:
+默认会打开本地工作台：
 
 ```text
 http://127.0.0.1:4781
 ```
 
-If that port is already occupied, the app automatically finds an available local port and prints the actual address to the terminal when starting.
-
-By default, the web workbench only accepts local access.
-
-If you want to open it from your phone or another device on the same LAN, enable `允许局域网访问 Web 控制台` in the `配置` page. When enabled:
-
-- the workbench shows detected LAN URLs
-- the workbench displays an access token
-- LAN devices see a login page before they can view or modify settings
-- you can also copy a ready-to-use login link that includes `?token=...`
-
-If you forget the current address, run:
+如果想查看当前地址或运行状态：
 
 ```bash
 codex-to-im url
-```
-
-Check the current local service state:
-
-```bash
 codex-to-im status
 ```
 
-Stop the background UI and bridge:
+如果要停止本地 UI 和 bridge：
 
 ```bash
 codex-to-im stop
 ```
 
-## Main Workflow
+## 典型使用方式
 
-1. Open the workbench
-2. Fill in Feishu credentials or trigger Weixin QR login
-3. Save config and test connectivity
-4. Start the bridge
-5. Open the desktop sessions section
-6. Bind a Feishu or Weixin chat to the target thread
-7. Continue the same Codex thread from IM
+### 1. 接管桌面线程
 
-If LAN access is enabled, the easiest path is to copy the LAN login link from the local workbench and open it on your phone or another device on the same network.
+在 Web 工作台里配置好飞书或微信后，启动 bridge。  
+然后在 IM 中发送：
 
-Useful commands:
-
-- `/` / `/status` shows the current session
-- `/h` / `/help` shows help
-- `/t` / `/threads` lists recent desktop threads, and `/t 1` / `/thread 1` binds the first one
-- `/n` / `/new` creates a new thread in the current formal session directory; these IM-created threads are only guaranteed to continue inside IM and will not automatically appear in the Codex Desktop thread list
-- `/n proj1` / `/new proj1` creates a new project session under the default workspace root
-- `/m` / `/mode` shows or changes the current mode; options: `code` / `plan` / `ask`
-- `/r` / `/reasoning` shows or changes the current reasoning effort; options: `1|2|3|4|5`
-- `/his` / `/history` shows the summarized history, and `/his raw` / `/history raw` shows raw history
-- `/t 0` / `/thread 0` enters a temporary draft thread that does not pollute the main work thread
-- `1 / 2 / 3` or `/perm ...` handles permission prompts
-- N is configurable in the web workbench under the basic settings panel
-- The workbench command guide shows both short commands and compatible original commands
-
-If you enable Feishu streaming response cards, the Feishu app must have the required permissions published first, at minimum:
-
-- `cardkit:card:write`
-- `cardkit:card:read`
-- `im:message:update`
-
-If those permissions are missing, the bridge log will usually show `99991672` with `cardkit:card:write`, and the bridge falls back to a final-result message.
-
-Also note that under the current `codex` runtime, the `Codex CLI / SDK` typically emits the assistant text only when the `agent_message` item is completed, not as token-level deltas. In practice that means Feishu "streaming cards" currently behave more like:
-
-- early `Thinking / Tool Progress` updates
-- final response text written into the card at completion
-
-So character-by-character text streaming is not guaranteed in the current implementation.
-
-If creating a new session fails with `Not inside a trusted directory`, either:
-
-- switch to a trusted project with `/new /absolute/path` or `/new proj1`, or
-- enable `Allow Codex outside trusted Git repos` in the basic settings and restart the bridge
-
-The configuration page also includes Codex runtime controls:
-
-- `Default workspace root`
-  - parent directory used for `/new proj1`
-  - falls back to `~/cx2im` when left empty, expanded for the current OS
-- `Codex filesystem permission`
-  - `read-only`, `workspace-write`, or `danger-full-access`
-  - default: `workspace-write`
-- `Codex reasoning effort`
-  - global default reasoning level
-  - can be overridden per IM session with `/reasoning`
-  - official runtime levels are `minimal`, `low`, `medium`, `high`, `xhigh`
-  - IM numeric aliases are `1=minimal`, `2=low`, `3=medium`, `4=high`, `5=xhigh`
-
-If you are using `codex-to-im` on your own development machine for real coding work, the more aggressive recommended setup is:
-
-- set `Codex filesystem permission` to `danger-full-access`
-- set `Codex reasoning effort` to `xhigh`
-
-This is closer to a full-power `code` workflow. It fits a controlled local project, but is not a good default for unknown repositories or higher-risk environments.
-
-The channel pages also expose a “Use Markdown for bridge feedback” switch:
-- enabled by default for Feishu
-- disabled by default for WeChat
-- affects text sent through the bridge, including normal replies, shared-thread mirror messages, and system feedback such as `/h`, `/status`, and `/threads`
-
-## Update
-
-On Windows, `npm update -g codex-to-im` can fail with `EBUSY` if the background UI or bridge is still running from the global install directory.
-
-Recommended update flow:
-
-```bash
-codex-to-im stop
-npm update -g codex-to-im
-codex-to-im
+```text
+/t
 ```
 
-## Repo Layout
+查看最近 10 条桌面线程，发送：
 
-- `src/ui-server.ts` — local workbench UI and HTTP API
-- `src/service-manager.ts` — bridge and UI lifecycle management
-- `src/desktop-sessions.ts` — desktop thread discovery from Codex session files
-- `src/session-bindings.ts` — binding summaries and web-side binding updates
-- `src/lib/bridge/` — bridge runtime and IM channel routing
-- `docs/` — PRD and shared-thread design docs
-
-## Development
-
-```bash
-npm run typecheck
-npm run build
+```text
+/t all
 ```
 
-## Status
+查看全部桌面线程。  
+再通过：
 
-Current product direction:
+```text
+/t 1
+```
 
-- Standalone local app first
-- Web workbench first
-- Shared Codex thread model first
+切到对应线程。
 
-[中文文档](README_CN.md)
+### 2. 在 IM 中继续对话
+
+绑定成功后，直接发送普通消息即可继续当前线程。  
+桌面继续操作这条共享线程时，结果也会同步到 IM。
+
+### 3. 新建 IM 线程
+
+```text
+/new
+```
+
+会在当前正式会话的工作目录下新建线程。  
+如果当前没有正式会话，或当前是临时线程，会直接报错。
+
+也可以显式指定目录：
+
+```text
+/new my-project
+/new D:\work\my-project
+```
+
+## 常用命令
+
+- `/` 或 `/status`：查看当前会话、线程、模型、模式、思考级别、共享镜像状态。
+- `/t`：查看最近 10 条桌面线程。
+- `/t all`：查看全部桌面线程。
+- `/t 1`：切换到第 1 条桌面线程。
+- `/t 0`：切换到当前聊天的临时线程。
+- `/new`：在当前正式会话目录下新建线程。
+- `/new <路径或项目名>`：按指定目录新建线程。
+- `/mode <ask|code>`：切换运行模式。
+- `/reasoning <1-5>`：切换思考级别。
+- `/model`：查看当前模型和可选模型。
+- `/model <模型名>`：切换当前 IM 会话模型。
+- `/history`：查看当前线程历史摘要。
+- `/stop`：停止当前任务。
+- `/unbind`：解除当前聊天与会话的绑定。
+
+## 关键配置
+
+工作台里的常用配置主要有：
+
+- 默认工作空间：用于 `/new my-project` 这类相对路径。
+- Codex 文件系统权限：如 `workspace-write`、`danger-full-access`。
+- Codex 思考级别：`1-5`。
+- 默认模型：从本机可用模型中选择。
+- 反馈使用 markdown：控制 bridge 发到通道里的文本反馈是否走 markdown。
+- 允许局域网访问 Web 控制台：便于手机或局域网设备访问。
+
+## 当前边界
+
+- `/new` 创建的是 IM 线程，当前只保证在 IM 中可继续；不保证会自动出现在 Codex Desktop 会话列表中。
+- 一个会话只能绑定一个聊天，跨飞书/微信也互斥。
+- 飞书附件当前支持图片和文件；视频目前按文件发送，不承诺原生预览。
+- `/t` 默认只显示最近 10 条桌面线程；需要更多时用 `/t all`。
+
+## 更多文档
+
+- Windows 安装说明：[docs/install-windows.md](docs/install-windows.md)
+- 英文文档：[README_EN.md](README_EN.md)

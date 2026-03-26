@@ -134,6 +134,12 @@ export function buildLocalAttachmentPromptSupplement(files: PersistedAttachmentM
   return lines.join('\n');
 }
 
+export function buildConversationPromptText(text: string, files: PersistedAttachmentMeta[] = []): string {
+  const attachmentSupplement = buildLocalAttachmentPromptSupplement(files);
+  if (!attachmentSupplement) return text;
+  return text.trim() ? `${text}\n\n${attachmentSupplement}` : attachmentSupplement;
+}
+
 /**
  * Process an inbound message: send to Claude, consume the response stream,
  * save to DB, and return the result.
@@ -146,6 +152,7 @@ export async function processMessage(
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
   onToolEvent?: OnToolEvent,
+  onPromptPrepared?: (promptText: string) => void,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -214,10 +221,8 @@ export async function processMessage(
     }
     store.addMessage(sessionId, 'user', savedContent);
 
-    const attachmentSupplement = buildLocalAttachmentPromptSupplement(persistedFileMeta);
-    const promptText = attachmentSupplement
-      ? (text.trim() ? `${text}\n\n${attachmentSupplement}` : attachmentSupplement)
-      : text;
+    const promptText = buildConversationPromptText(text, persistedFileMeta);
+    onPromptPrepared?.(promptText);
     // Resolve provider
     let resolvedProvider: import('./host.js').BridgeApiProvider | undefined;
     const providerId = session?.provider_id || '';

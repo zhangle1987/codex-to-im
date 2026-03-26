@@ -146,7 +146,7 @@ flowchart LR
 - [D:/codex/Claude-to-IM-skill/src/lib/bridge/channel-router.ts](D:/codex/Claude-to-IM-skill/src/lib/bridge/channel-router.ts)
   - 已支持 chat 到 session 的自动解析与绑定
 - [D:/codex/Claude-to-IM-skill/src/lib/bridge/bridge-manager.ts](D:/codex/Claude-to-IM-skill/src/lib/bridge/bridge-manager.ts)
-  - 已支持 `/new`、`/bind`、`/status`、`/sessions`、`/stop`
+  - 已支持 `/new`、`/thread`、`/status`、`/sessions`、`/stop`
 
 当前缺失的不是桥接基础设施，而是“桌面真实会话接管”的这一层：
 
@@ -348,8 +348,6 @@ sequenceDiagram
   - 列出最近发现的桌面 thread
 - `/thread <thread-id>`
   - 直接把当前 chat 切换到指定 thread 对应的共享会话
-- `/bind <thread-id>`
-  - 若该 thread 还没有共享会话，则创建并绑定
 - `/new`
   - 新建一条 bridge 自己管理的新共享会话
 - `/stop`
@@ -518,7 +516,6 @@ sequenceDiagram
 - `/use`
 - `/threads`
 - `/thread`
-- `/bind`
 
 ### Phase 2E：桌面一键共享
 

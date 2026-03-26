@@ -531,10 +531,10 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
       })),
       [
         { type: 'task_started', role: undefined, content: '', turnId: 'turn-1' },
-        { type: 'tool_started', role: undefined, content: '', turnId: undefined },
-        { type: 'tool_finished', role: undefined, content: 'Exit code: 0', turnId: undefined },
-        { type: 'message', role: 'commentary', content: 'thinking', turnId: undefined },
-        { type: 'message', role: 'assistant', content: 'final answer', turnId: undefined },
+        { type: 'tool_started', role: undefined, content: '', turnId: 'turn-1' },
+        { type: 'tool_finished', role: undefined, content: 'Exit code: 0', turnId: 'turn-1' },
+        { type: 'message', role: 'commentary', content: 'thinking', turnId: 'turn-1' },
+        { type: 'message', role: 'assistant', content: 'final answer', turnId: 'turn-1' },
         { type: 'task_complete', role: 'assistant', content: 'final answer', turnId: 'turn-1' },
       ],
     );

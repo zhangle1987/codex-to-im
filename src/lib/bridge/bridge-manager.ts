@@ -41,7 +41,6 @@ import {
   getDesktopSessionByThreadId,
   listDesktopSessions,
   readDesktopSessionMirrorRecordDeltaByFilePath,
-  readDesktopSessionMirrorRecordStreamByFilePath,
   readDesktopSessionMessages,
 } from '../../desktop-sessions.js';
 import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
@@ -82,6 +81,7 @@ const MIRROR_POLL_INTERVAL_MS = 2_500;
 const MIRROR_WATCH_DEBOUNCE_MS = 350;
 const MIRROR_EVENT_BATCH_LIMIT = 8;
 const MIRROR_SUPPRESSION_WINDOW_MS = 4_000;
+const MIRROR_PROMPT_MATCH_GRACE_MS = 120_000;
 // Idle timeout after the last desktop event before we flush a buffered turn
 // without seeing task_complete. Keep this conservative to avoid splitting
 // long-running desktop tasks into premature IM notifications.
@@ -310,6 +310,33 @@ function buildIndexedCommandList(
   });
   footer.filter(Boolean).forEach((line) => lines.push(line));
   return lines.join('\n').trim();
+}
+
+function buildDesktopThreadsCommandResponse(
+  desktopSessions: ReturnType<typeof getDisplayedDesktopThreads>,
+  markdown: boolean,
+  showAll: boolean,
+): string {
+  return buildIndexedCommandList(
+    showAll ? '全部桌面会话' : '最近桌面会话',
+    desktopSessions.map((session) => ({
+      heading: session.title || '未命名线程',
+      details: [
+        `目录：${formatCommandPath(session.cwd)}`,
+        `来源：${session.originator || 'Codex Desktop'}`,
+      ],
+    })),
+    showAll
+      ? [
+          '发送 `/t 1` 可接管第 1 条桌面会话。',
+          '发送 `/t` 可只看最近 10 条。',
+        ]
+      : [
+          '发送 `/t 1` 可接管第 1 条桌面会话。',
+          '发送 `/t all` 可查看全部桌面会话。',
+        ],
+    markdown,
+  );
 }
 
 function isFeedbackMarkdownEnabled(channelType: string): boolean {
@@ -923,6 +950,7 @@ interface DesktopMirrorSubscription {
   fileMtimeMs: number | null;
   fileIdentity: string | null;
   trailingText: string;
+  activeMirrorTurnId: string | null;
   bufferedRecords: DesktopMirrorRecord[];
   pendingTurn: DesktopMirrorTurnState | null;
 }
@@ -931,6 +959,7 @@ interface DesktopMirrorTurnState {
   turnId: string | null;
   startedAt: string;
   lastActivityAt: string;
+  userText: string | null;
   lastAssistantText: string | null;
   lastCommentaryText: string | null;
   streamedText: string;
@@ -939,11 +968,11 @@ interface DesktopMirrorTurnState {
 }
 
 interface FinalizedDesktopMirrorTurn {
+  userText: string | null;
   text: string;
   signature: string;
   timestamp: string;
   status: 'completed' | 'interrupted';
-  role?: 'assistant' | 'user';
 }
 
 interface BridgeManagerState {
@@ -958,7 +987,8 @@ interface BridgeManagerState {
   activeTasks: Map<string, AbortController>;
   mirrorSubscriptions: Map<string, DesktopMirrorSubscription>;
   mirrorSyncInFlight: boolean;
-  mirrorSuppressUntil: Map<string, MirrorSuppressionState>;
+  mirrorSuppressUntil: Map<string, MirrorSuppressionState[]>;
+  mirrorIgnoredTurnIds: Map<string, Map<string, number>>;
   queuedCounts: Map<string, number>;
   /** Per-session processing chains for concurrency control */
   sessionLocks: Map<string, Promise<void>>;
@@ -966,9 +996,12 @@ interface BridgeManagerState {
 }
 
 interface MirrorSuppressionState {
+  id: string;
   until: number;
   promptText: string | null;
   awaitingPromptMatch: boolean;
+  candidateTurnId: string | null;
+  activeTurnId: string | null;
   droppingTurn: boolean;
 }
 
@@ -988,6 +1021,7 @@ function getState(): BridgeManagerState {
       mirrorSubscriptions: new Map(),
       mirrorSyncInFlight: false,
       mirrorSuppressUntil: new Map(),
+      mirrorIgnoredTurnIds: new Map(),
       queuedCounts: new Map(),
       sessionLocks: new Map(),
       autoStartChecked: false,
@@ -1005,6 +1039,9 @@ function getState(): BridgeManagerState {
   }
   if (!g[GLOBAL_KEY].mirrorSuppressUntil) {
     g[GLOBAL_KEY].mirrorSuppressUntil = new Map();
+  }
+  if (!g[GLOBAL_KEY].mirrorIgnoredTurnIds) {
+    g[GLOBAL_KEY].mirrorIgnoredTurnIds = new Map();
   }
   if (!Object.prototype.hasOwnProperty.call(g[GLOBAL_KEY], 'mirrorSyncInFlight')) {
     g[GLOBAL_KEY].mirrorSyncInFlight = false;
@@ -1089,99 +1126,248 @@ function formatMirrorStatus(session: BridgeSession | null | undefined): string {
 }
 
 function normalizeMirrorPromptText(text: string): string {
-  return text.replace(/\r\n/g, '\n').trim();
+  return text.replace(/\r\n/g, '\n').normalize('NFKC').trim();
 }
 
-function beginMirrorSuppression(sessionId: string, promptText: string): void {
-  getState().mirrorSuppressUntil.set(sessionId, {
+function getIgnoredMirrorTurns(sessionId: string): Map<string, number> {
+  const state = getState();
+  const existing = state.mirrorIgnoredTurnIds.get(sessionId);
+  if (existing) return existing;
+  const created = new Map<string, number>();
+  state.mirrorIgnoredTurnIds.set(sessionId, created);
+  return created;
+}
+
+function cleanupIgnoredMirrorTurns(sessionId: string): Map<string, number> {
+  const turns = getIgnoredMirrorTurns(sessionId);
+  const now = Date.now();
+  for (const [turnId, until] of turns) {
+    if (until <= now) {
+      turns.delete(turnId);
+    }
+  }
+  if (turns.size === 0) {
+    getState().mirrorIgnoredTurnIds.delete(sessionId);
+  }
+  return turns;
+}
+
+function markIgnoredMirrorTurn(sessionId: string, turnId: string | null | undefined, durationMs = MIRROR_PROMPT_MATCH_GRACE_MS): void {
+  const normalized = (turnId || '').trim();
+  if (!normalized) return;
+  const state = getState();
+  const turns = cleanupIgnoredMirrorTurns(sessionId);
+  turns.set(normalized, Date.now() + durationMs);
+  state.mirrorIgnoredTurnIds.set(sessionId, turns);
+}
+
+function clearIgnoredMirrorTurn(sessionId: string, turnId: string | null | undefined): void {
+  const normalized = (turnId || '').trim();
+  if (!normalized) return;
+  const turns = cleanupIgnoredMirrorTurns(sessionId);
+  turns.delete(normalized);
+  if (turns.size === 0) {
+    getState().mirrorIgnoredTurnIds.delete(sessionId);
+  }
+}
+
+function getMirrorSuppressionStates(sessionId: string): MirrorSuppressionState[] {
+  const state = getState();
+  const existing = state.mirrorSuppressUntil.get(sessionId) || [];
+  if (existing.length === 0) return [];
+  const now = Date.now();
+  const active = existing.filter((suppression) => suppression.until > now);
+  if (active.length === 0) {
+    state.mirrorSuppressUntil.delete(sessionId);
+    return [];
+  }
+  if (active.length !== existing.length) {
+    state.mirrorSuppressUntil.set(sessionId, active);
+  }
+  return active;
+}
+
+function clearMirrorSuppression(sessionId: string, suppressionId?: string | null): void {
+  const state = getState();
+  const existing = state.mirrorSuppressUntil.get(sessionId);
+  if (!existing || existing.length === 0) return;
+  if (!suppressionId) {
+    state.mirrorSuppressUntil.delete(sessionId);
+    return;
+  }
+  const next = existing.filter((suppression) => suppression.id !== suppressionId);
+  if (next.length > 0) {
+    state.mirrorSuppressUntil.set(sessionId, next);
+  } else {
+    state.mirrorSuppressUntil.delete(sessionId);
+  }
+}
+
+function beginMirrorSuppression(sessionId: string, promptText: string): string {
+  const suppressionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const state = getState();
+  const suppressions = getMirrorSuppressionStates(sessionId);
+  suppressions.push({
+    id: suppressionId,
     until: Number.POSITIVE_INFINITY,
     promptText: normalizeMirrorPromptText(promptText) || null,
     awaitingPromptMatch: true,
+    candidateTurnId: null,
+    activeTurnId: null,
     droppingTurn: false,
   });
+  state.mirrorSuppressUntil.set(sessionId, suppressions);
+  return suppressionId;
 }
 
-function settleMirrorSuppression(sessionId: string, durationMs = MIRROR_SUPPRESSION_WINDOW_MS): void {
-  const state = getState();
-  const existing = state.mirrorSuppressUntil.get(sessionId);
-  if (existing) {
-    existing.until = Date.now() + durationMs;
+function settleMirrorSuppression(
+  sessionId: string,
+  suppressionId?: string | null,
+  durationMs = MIRROR_SUPPRESSION_WINDOW_MS,
+): void {
+  const suppressions = getMirrorSuppressionStates(sessionId);
+  if (suppressions.length === 0) return;
+  const target = suppressionId
+    ? suppressions.find((suppression) => suppression.id === suppressionId)
+    : suppressions[suppressions.length - 1];
+  if (!target) return;
+  if (target.awaitingPromptMatch || target.droppingTurn) {
+    target.until = Date.now() + MIRROR_PROMPT_MATCH_GRACE_MS;
     return;
   }
-  state.mirrorSuppressUntil.set(sessionId, {
-    until: Date.now() + durationMs,
-    promptText: null,
-    awaitingPromptMatch: false,
-    droppingTurn: false,
-  });
-}
-
-function getMirrorSuppressionState(sessionId: string): MirrorSuppressionState | null {
-  const state = getState();
-  const suppression = state.mirrorSuppressUntil.get(sessionId);
-  if (!suppression) return null;
-  if (suppression.until <= Date.now()) {
-    state.mirrorSuppressUntil.delete(sessionId);
-    return null;
-  }
-  return suppression;
+  target.until = Date.now() + durationMs;
 }
 
 function isMirrorSuppressed(sessionId: string): boolean {
-  return getMirrorSuppressionState(sessionId) !== null;
+  return getMirrorSuppressionStates(sessionId).length > 0;
 }
 
 function filterSuppressedMirrorRecords(
   sessionId: string,
   records: DesktopMirrorRecord[],
 ): DesktopMirrorRecord[] {
-  const suppression = getMirrorSuppressionState(sessionId);
-  if (!suppression || records.length === 0) return records;
+  const suppressions = getMirrorSuppressionStates(sessionId);
+  if (suppressions.length === 0 || records.length === 0) return records;
 
   const filtered: DesktopMirrorRecord[] = [];
+  cleanupIgnoredMirrorTurns(sessionId);
 
   for (const record of records) {
     const normalizedContent = record.type === 'message'
       ? normalizeMirrorPromptText(record.content || '')
       : '';
+    let handled = false;
 
-    if (suppression.droppingTurn) {
-      if (record.type === 'message' && record.role === 'user') {
-        if (suppression.promptText && normalizedContent === suppression.promptText) {
+    while (true) {
+      const ignoredTurnIds = cleanupIgnoredMirrorTurns(sessionId);
+      if (record.turnId && ignoredTurnIds.has(record.turnId)) {
+        if (record.type === 'task_complete') {
+          clearIgnoredMirrorTurn(sessionId, record.turnId);
+        }
+        handled = true;
+        break;
+      }
+
+      const suppression = getMirrorSuppressionStates(sessionId)[0];
+      if (!suppression) break;
+
+      if (suppression.awaitingPromptMatch) {
+        if (record.type === 'task_started') {
+          suppression.candidateTurnId = record.turnId || suppression.candidateTurnId;
+          handled = true;
+          break;
+        }
+
+        if (
+          record.turnId
+          && suppression.candidateTurnId
+          && record.turnId !== suppression.candidateTurnId
+        ) {
+          break;
+        }
+
+        if (record.type === 'message' && record.role === 'user') {
+          if (suppression.promptText && normalizedContent === suppression.promptText) {
+            suppression.awaitingPromptMatch = false;
+            suppression.droppingTurn = true;
+            suppression.activeTurnId = record.turnId || suppression.candidateTurnId || null;
+            handled = true;
+            break;
+          }
+          clearMirrorSuppression(sessionId, suppression.id);
           continue;
         }
-        filtered.push(record);
-        continue;
+
+        if (
+          record.type === 'task_complete'
+          && suppression.candidateTurnId
+          && record.turnId
+          && record.turnId === suppression.candidateTurnId
+        ) {
+          clearMirrorSuppression(sessionId, suppression.id);
+          handled = true;
+          break;
+        }
+
+        break;
       }
 
-      if (record.type === 'task_complete') {
-        suppression.droppingTurn = false;
-        suppression.awaitingPromptMatch = false;
-        suppression.promptText = null;
-        continue;
-      }
+      if (suppression.droppingTurn) {
+        if (record.turnId && suppression.activeTurnId && record.turnId !== suppression.activeTurnId) {
+          if (record.type === 'task_started') {
+            markIgnoredMirrorTurn(sessionId, suppression.activeTurnId);
+            clearMirrorSuppression(sessionId, suppression.id);
+            continue;
+          }
+          break;
+        }
 
-      continue;
-    }
+        if (record.type === 'task_started') {
+          handled = true;
+          break;
+        }
 
-    if (suppression.awaitingPromptMatch) {
-      if (record.type === 'message' && record.role === 'user') {
-        if (suppression.promptText && normalizedContent === suppression.promptText) {
-          suppression.awaitingPromptMatch = false;
-          suppression.droppingTurn = true;
+        if (record.type === 'task_complete') {
+          clearMirrorSuppression(sessionId, suppression.id);
+          handled = true;
+          break;
+        }
+
+        if (
+          record.type === 'message'
+          && record.role === 'user'
+          && suppression.promptText
+          && normalizedContent !== suppression.promptText
+        ) {
+          markIgnoredMirrorTurn(sessionId, suppression.activeTurnId);
+          clearMirrorSuppression(sessionId, suppression.id);
           continue;
         }
-        filtered.push(record);
-        continue;
+
+        handled = true;
+        break;
       }
 
-      continue;
+      break;
     }
 
-    filtered.push(record);
+    if (!handled) {
+      filtered.push(record);
+    }
   }
 
   return filtered;
+}
+
+function resetMirrorSessionForInteractiveRun(sessionId: string): void {
+  const state = getState();
+  for (const subscription of state.mirrorSubscriptions.values()) {
+    if (subscription.sessionId !== sessionId) continue;
+    stopMirrorStreaming(subscription, 'interrupted');
+    if (subscription.pendingTurn) {
+      subscription.pendingTurn.streamStarted = false;
+    }
+  }
 }
 
 interface MirrorFileSnapshot {
@@ -1196,6 +1382,7 @@ function resetMirrorReadState(subscription: DesktopMirrorSubscription): void {
   subscription.fileMtimeMs = null;
   subscription.fileIdentity = null;
   subscription.trailingText = '';
+  subscription.activeMirrorTurnId = null;
   subscription.bufferedRecords = [];
 }
 
@@ -1292,38 +1479,64 @@ function syncMirrorSessionState(sessionId: string): void {
   });
 }
 
-function formatMirrorMessage(threadTitle: string | null, text: string): string {
-  return formatMirrorMessageForRole(threadTitle, text, 'assistant');
-}
-
 function getMirrorAssistantRuntimeLabel(): string {
   const { store } = getBridgeContext();
   const runtime = (store.getSetting('bridge_runtime') || 'codex').trim().toLowerCase();
   return runtime || 'codex';
 }
 
-function buildMirrorHeader(
-  threadTitle: string | null,
-  role: 'assistant' | 'user' = 'assistant',
-  markdown = false,
-): string {
+function buildMirrorTitle(threadTitle: string | null, markdown = false): string {
   const title = threadTitle?.trim() || '桌面线程';
-  const speaker = role === 'user' ? '我' : getMirrorAssistantRuntimeLabel();
-  const plainHeader = `<${title}> ${speaker}:`;
-  const markdownHeader = `&lt;${title}&gt; ${speaker}:`;
-  const header = markdown ? markdownHeader : plainHeader;
-  return markdown ? `**${header}**` : header;
+  const rendered = markdown ? `&lt;${title}&gt;` : `<${title}>`;
+  return markdown ? `**${rendered}**` : rendered;
 }
 
-function formatMirrorMessageForRole(
-  threadTitle: string | null,
-  text: string,
-  role: 'assistant' | 'user' = 'assistant',
+function buildMirrorSpeakerLabel(label: string, markdown = false): string {
+  return markdown ? `**${label}:**` : `${label}:`;
+}
+
+function formatMirrorSpeakerBlock(
+  label: string,
+  text: string | null | undefined,
   markdown = false,
+  forceLabel = false,
 ): string {
-  const normalized = text.trim();
-  if (!normalized) return '';
-  return `${buildMirrorHeader(threadTitle, role, markdown)}\n\n${normalized}`;
+  const normalized = (text || '').trim();
+  if (!normalized) {
+    return forceLabel ? buildMirrorSpeakerLabel(label, markdown) : '';
+  }
+  const speaker = buildMirrorSpeakerLabel(label, markdown);
+  return normalized.includes('\n')
+    ? `${speaker}\n${normalized}`
+    : `${speaker} ${normalized}`;
+}
+
+function formatMirrorMessage(
+  threadTitle: string | null,
+  userText: string | null | undefined,
+  assistantText: string | null | undefined,
+  markdown = false,
+  forceAssistantLabel = false,
+): string {
+  const sections: string[] = [];
+  const userBlock = formatMirrorSpeakerBlock('我', userText, markdown);
+  if (userBlock) {
+    sections.push(userBlock);
+  }
+  const assistantBlock = formatMirrorSpeakerBlock(
+    getMirrorAssistantRuntimeLabel(),
+    assistantText,
+    markdown,
+    forceAssistantLabel,
+  );
+  if (assistantBlock) {
+    sections.push(assistantBlock);
+  }
+  if (sections.length === 0) {
+    return '';
+  }
+  sections.unshift(buildMirrorTitle(threadTitle, markdown));
+  return sections.join('\n\n').trim();
 }
 
 function getMirrorStreamingAdapter(subscription: DesktopMirrorSubscription): BaseChannelAdapter | null {
@@ -1341,12 +1554,16 @@ function getMirrorStreamingText(
   subscription: DesktopMirrorSubscription,
   turnState: DesktopMirrorTurnState,
 ): string {
-  const content = turnState.streamedText.trim();
   const title = getDesktopThreadTitle(subscription.threadId)?.trim() || '桌面线程';
   const markdown = getFeedbackParseMode(subscription.channelType) === 'Markdown';
-  return content
-    ? formatMirrorMessageForRole(title, content, 'assistant', markdown)
-    : buildMirrorHeader(title, 'assistant', markdown);
+  const rendered = formatMirrorMessage(
+    title,
+    turnState.userText,
+    turnState.streamedText,
+    markdown,
+    true,
+  );
+  return rendered || buildMirrorTitle(title, markdown);
 }
 
 function startMirrorStreaming(
@@ -1425,13 +1642,13 @@ async function deliverMirrorTurn(
   const title = getDesktopThreadTitle(subscription.threadId)?.trim() || '桌面线程';
   const responseParseMode = getFeedbackParseMode(subscription.channelType);
   const markdown = responseParseMode === 'Markdown';
-  const text = turn.text
-    ? renderFeedbackText(
-      formatMirrorMessageForRole(title, turn.text, turn.role || 'assistant', markdown),
-      responseParseMode,
-    )
-    : '';
-  const streamText = text || buildMirrorHeader(title, 'assistant', markdown);
+  const renderedText = formatMirrorMessage(title, turn.userText, turn.text, markdown);
+  const renderedStreamText = formatMirrorMessage(title, turn.userText, turn.text, markdown, true);
+  const text = renderedText ? renderFeedbackText(renderedText, responseParseMode) : '';
+  const streamText = renderFeedbackText(
+    renderedStreamText || buildMirrorTitle(title, markdown),
+    responseParseMode,
+  );
 
   if (subscription.channelType === 'feishu' && typeof adapter.onStreamEnd === 'function') {
     try {
@@ -1485,12 +1702,29 @@ function createMirrorTurnState(timestamp: string, turnId?: string): DesktopMirro
     turnId: turnId || null,
     startedAt: safeTimestamp,
     lastActivityAt: safeTimestamp,
+    userText: null,
     lastAssistantText: null,
     lastCommentaryText: null,
     streamedText: '',
     streamStarted: false,
     toolCalls: new Map(),
   };
+}
+
+function appendMirrorUserText(
+  turnState: DesktopMirrorTurnState,
+  chunk: string,
+): void {
+  const normalized = chunk.trim();
+  if (!normalized) return;
+  if (!turnState.userText) {
+    turnState.userText = normalized;
+    return;
+  }
+  if (turnState.userText === normalized) {
+    return;
+  }
+  turnState.userText = `${turnState.userText}\n\n${normalized}`;
 }
 
 function appendMirrorStreamText(
@@ -1533,10 +1767,18 @@ function finalizeMirrorTurn(
   subscription.pendingTurn = null;
   if (!pendingTurn) return null;
 
-  const text = (preferredText || pendingTurn.lastAssistantText || pendingTurn.lastCommentaryText || '').trim();
-  if (!text && pendingTurn.toolCalls.size === 0) return null;
+  const text = [
+    preferredText,
+    pendingTurn.lastAssistantText,
+    pendingTurn.lastCommentaryText,
+  ]
+    .map((value) => (value || '').trim())
+    .find(Boolean) || '';
+  const userText = pendingTurn.userText?.trim() || null;
+  if (!text && !userText && pendingTurn.toolCalls.size === 0) return null;
 
   return {
+    userText,
     text,
     signature,
     timestamp: timestamp || pendingTurn.lastActivityAt || nowIso(),
@@ -1552,9 +1794,26 @@ function consumeMirrorRecords(
 
   for (const record of records) {
     if (record.type === 'task_started') {
-      const superseded = finalizeMirrorTurn(subscription, `superseded:${record.signature}`, record.timestamp, 'interrupted');
-      if (superseded) finalized.push(superseded);
-      subscription.pendingTurn = createMirrorTurnState(record.timestamp, record.turnId);
+      const pendingTurn = subscription.pendingTurn;
+      const sameTurn = pendingTurn && (
+        !pendingTurn.turnId
+        || !record.turnId
+        || pendingTurn.turnId === record.turnId
+      );
+      if (!sameTurn) {
+        const superseded = finalizeMirrorTurn(subscription, `superseded:${record.signature}`, record.timestamp, 'interrupted');
+        if (superseded) finalized.push(superseded);
+      }
+      if (!subscription.pendingTurn) {
+        subscription.pendingTurn = createMirrorTurnState(record.timestamp, record.turnId);
+      } else {
+        if (!subscription.pendingTurn.turnId && record.turnId) {
+          subscription.pendingTurn.turnId = record.turnId;
+        }
+        if (record.timestamp) {
+          subscription.pendingTurn.lastActivityAt = record.timestamp;
+        }
+      }
       startMirrorStreaming(subscription, subscription.pendingTurn);
       continue;
     }
@@ -1567,15 +1826,12 @@ function consumeMirrorRecords(
     }
 
     if (record.type === 'message' && record.role === 'user') {
+      const pendingTurn = ensureMirrorTurnState(subscription, record);
       const text = record.content.trim();
       if (text) {
-        finalized.push({
-          text,
-          signature: record.signature,
-          timestamp: record.timestamp,
-          status: 'completed',
-          role: 'user',
-        });
+        appendMirrorUserText(pendingTurn, text);
+        startMirrorStreaming(subscription, pendingTurn);
+        updateMirrorStreaming(subscription, pendingTurn);
       }
       continue;
     }
@@ -1719,6 +1975,7 @@ function upsertMirrorSubscription(binding: { id: string; channelType: string; ch
       fileMtimeMs: null,
       fileIdentity: null,
       trailingText: '',
+      activeMirrorTurnId: null,
       bufferedRecords: [],
       pendingTurn: null,
     };
@@ -1837,12 +2094,19 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
 
   if (requiresFullRecover) {
     const previousCursor = subscription.cursor;
-    const records = readDesktopSessionMirrorRecordStreamByFilePath(subscription.filePath);
-    const delta = reconcileDesktopMirrorCursor(subscription.cursor, records);
+    const fullDelta = readDesktopSessionMirrorRecordDeltaByFilePath(
+      subscription.filePath,
+      0,
+      snapshot.size,
+      '',
+      null,
+    );
+    const delta = reconcileDesktopMirrorCursor(subscription.cursor, fullDelta.records);
     subscription.cursor = delta.nextCursor;
     deliverableRecords = filterDuplicateAssistantEvents(previousCursor, delta.deliverableRecords);
     subscription.trailingText = '';
     subscription.fileOffset = snapshot.size;
+    subscription.activeMirrorTurnId = fullDelta.nextTurnId;
   } else if (snapshot.size > subscription.fileOffset || subscription.trailingText) {
     const previousCursor = subscription.cursor;
     const delta = readDesktopSessionMirrorRecordDeltaByFilePath(
@@ -1850,11 +2114,13 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
       subscription.fileOffset,
       snapshot.size,
       subscription.trailingText,
+      subscription.activeMirrorTurnId,
     );
     deliverableRecords = filterDuplicateAssistantEvents(previousCursor, delta.records);
     subscription.cursor = advanceDesktopMirrorCursor(subscription.cursor, delta.records);
     subscription.trailingText = delta.trailingText;
     subscription.fileOffset = delta.nextOffset;
+    subscription.activeMirrorTurnId = delta.nextTurnId;
   }
 
   subscription.fileSize = snapshot.size;
@@ -2120,6 +2386,7 @@ export async function stop(): Promise<void> {
   }
   state.activeTasks.clear();
   state.mirrorSuppressUntil.clear();
+  state.mirrorIgnoredTurnIds.clear();
   state.queuedCounts.clear();
   for (const sessionId of activeSessionIds) {
     syncSessionRuntimeState(sessionId);
@@ -2377,7 +2644,7 @@ async function handleMessage(
         // Multiple pending permissions — numeric shortcut is ambiguous.
         await deliver(adapter, {
           address: msg.address,
-          text: `Multiple pending permissions (${pendingLinks.length}). Please use the full command:\n/perm allow|allow_session|deny <id>`,
+          text: `当前有 ${pendingLinks.length} 条待处理权限，数字快捷回复会有歧义。请使用完整命令：\n/perm allow|allow_session|deny <id>`,
           parseMode: getFeedbackParseMode(adapter.channelType),
           replyToMessageId: msg.messageId,
         });
@@ -2437,8 +2704,9 @@ async function handleMessage(
   // Create an AbortController so /stop can cancel this task externally
   const taskAbort = new AbortController();
   const state = getState();
+  resetMirrorSessionForInteractiveRun(binding.codepilotSessionId);
   state.activeTasks.set(binding.codepilotSessionId, taskAbort);
-  beginMirrorSuppression(binding.codepilotSessionId, text || (hasAttachments ? 'Describe this image.' : ''));
+  let mirrorSuppressionId: string | null = null;
   syncSessionRuntimeState(binding.codepilotSessionId);
 
   // ── Streaming preview setup ──────────────────────────────────
@@ -2555,7 +2823,11 @@ async function handleMessage(
         perm.suggestions,
         msg.messageId,
       );
-    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, onToolEvent);
+    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, onToolEvent, (preparedPrompt) => {
+      if (!mirrorSuppressionId) {
+        mirrorSuppressionId = beginMirrorSuppression(binding.codepilotSessionId, preparedPrompt);
+      }
+    });
 
     // Finalize streaming card if adapter supports it.
     // onStreamEnd awaits any in-flight card creation and returns true if a card
@@ -2625,7 +2897,9 @@ async function handleMessage(
       } catch { /* best effort */ }
     }
 
-    settleMirrorSuppression(binding.codepilotSessionId);
+    if (mirrorSuppressionId) {
+      settleMirrorSuppression(binding.codepilotSessionId, mirrorSuppressionId);
+    }
     state.activeTasks.delete(binding.codepilotSessionId);
     syncSessionRuntimeState(binding.codepilotSessionId);
     // Notify adapter that message processing ended
@@ -2664,7 +2938,7 @@ async function handleCommand(
     console.warn(`[bridge-manager] Blocked dangerous command input from chat ${msg.address.chatId}: ${dangerCheck.reason}`);
     await deliver(adapter, {
       address: msg.address,
-      text: `Command rejected: invalid input detected.`,
+      text: '命令被拒绝：检测到无效输入。',
       parseMode: getFeedbackParseMode(adapter.channelType),
       replyToMessageId: msg.messageId,
     });
@@ -2731,102 +3005,6 @@ async function handleCommand(
       break;
     }
 
-    case '/bind': {
-      if (!args) {
-        response = '用法：/bind <序号>';
-        break;
-      }
-
-      const prefersThreadList = parseListIndex(args) !== null;
-      const displayedThreads = getDisplayedDesktopThreads(10);
-      if (prefersThreadList) {
-        const threadPick = resolveByIndexOrPrefix(args, displayedThreads, (session) => session.threadId);
-        if (threadPick.match) {
-          let importedBinding: ReturnType<typeof router.bindToSdkSession>;
-          try {
-            importedBinding = router.bindToSdkSession(msg.address, threadPick.match.threadId, {
-              workingDirectory: threadPick.match.cwd,
-              displayName: threadPick.match.title,
-            });
-          } catch (error) {
-            response = toUserVisibleBindingError(error, '绑定桌面会话失败。');
-            break;
-          }
-          const session = store.getSession(importedBinding.codepilotSessionId);
-          response = buildCommandFields(
-            '已绑定桌面会话',
-            [
-              ['标题', threadPick.match.title || getSessionDisplayName(session, importedBinding.workingDirectory)],
-              ['目录', formatCommandPath(importedBinding.workingDirectory)],
-            ],
-            ['接下来直接发送文本即可继续。'],
-            responseParseMode === 'Markdown',
-          );
-          break;
-        }
-      }
-
-      const displayedSessions = getDisplayedBridgeSessions(currentBinding?.codepilotSessionId);
-      const sessionPick = resolveByIndexOrPrefix(args, displayedSessions, (session) => session.id);
-      if (sessionPick.ambiguous) {
-        response = '匹配到多个兼容会话，请使用更长的编号，或直接改用 `/t` 切换桌面会话。';
-        break;
-      }
-      if (sessionPick.match) {
-        let binding: ReturnType<typeof router.bindToSession>;
-        try {
-          binding = router.bindToSession(msg.address, sessionPick.match.id);
-        } catch (error) {
-          response = toUserVisibleBindingError(error, '切换会话失败。');
-          break;
-        }
-        if (binding) {
-          response = buildCommandFields(
-            '已切换会话（兼容命令）',
-            [
-              ['标题', getSessionDisplayName(sessionPick.match, binding.workingDirectory)],
-              ['目录', formatCommandPath(binding.workingDirectory)],
-            ],
-            ['普通使用建议直接通过 `/t` 切换桌面会话。'],
-            responseParseMode === 'Markdown',
-          );
-          break;
-        }
-      }
-
-      const threadPick = resolveByIndexOrPrefix(args, displayedThreads, (session) => session.threadId);
-      if (threadPick.ambiguous) {
-        response = '匹配到多个桌面会话，请先发送 `/t` 查看列表，再用 `/t 1` 这种序号切换。';
-        break;
-      }
-      if (!threadPick.match) {
-        response = '没有找到对应目标。先发送 `/t` 查看桌面会话，再按序号切换。';
-        break;
-      }
-
-      let importedBinding: ReturnType<typeof router.bindToSdkSession>;
-      try {
-        importedBinding = router.bindToSdkSession(msg.address, threadPick.match.threadId, {
-          workingDirectory: threadPick.match.cwd,
-          displayName: threadPick.match.title,
-        });
-      } catch (error) {
-        response = toUserVisibleBindingError(error, '绑定桌面会话失败。');
-        break;
-      }
-      const importedSession = store.getSession(importedBinding.codepilotSessionId);
-      response = buildCommandFields(
-        '已绑定桌面会话',
-        [
-          ['标题', threadPick.match.title || getSessionDisplayName(importedSession, importedBinding.workingDirectory)],
-          ['目录', formatCommandPath(importedBinding.workingDirectory)],
-        ],
-        ['接下来直接发送文本即可继续。'],
-        responseParseMode === 'Markdown',
-      );
-      break;
-    }
-
     case '/thread': {
       if (args === '0' || args === '0 reset') {
           const draftSession = args === '0 reset'
@@ -2857,7 +3035,20 @@ async function handleCommand(
       }
 
       if (!args) {
-        response = '用法：/thread <序号>，或 /thread 0 进入临时草稿线程';
+        response = '用法：/thread <序号>，或 /thread 0 进入临时草稿线程；发送 /t all 可查看全部桌面会话';
+        break;
+      }
+      if (args === 'all') {
+        const desktopSessions = getDisplayedDesktopThreads();
+        if (desktopSessions.length === 0) {
+          response = '没有找到桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。';
+          break;
+        }
+        response = buildDesktopThreadsCommandResponse(
+          desktopSessions,
+          responseParseMode === 'Markdown',
+          true,
+        );
         break;
       }
       const displayedThreads = getDisplayedDesktopThreads(10);
@@ -2917,25 +3108,18 @@ async function handleCommand(
     }
 
     case '/threads': {
-      const desktopSessions = getDisplayedDesktopThreads(10);
+      const showAll = args === 'all';
+      const desktopSessions = getDisplayedDesktopThreads(showAll ? undefined : 10);
       if (desktopSessions.length === 0) {
-        response = '没有找到最近桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。';
+        response = showAll
+          ? '没有找到桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。'
+          : '没有找到最近桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。';
         break;
       }
-      response = buildIndexedCommandList(
-        '最近桌面会话',
-        desktopSessions.map((session) => ({
-          heading: session.title || '未命名线程',
-          details: [
-            `目录：${formatCommandPath(session.cwd)}`,
-            `来源：${session.originator || 'Codex Desktop'}`,
-          ],
-        })),
-        [
-          '发送 `/t 1` 可接管第 1 条桌面会话。',
-          '完整命令仍兼容，例如 `/thread 1`。',
-        ],
+      response = buildDesktopThreadsCommandResponse(
+        desktopSessions,
         responseParseMode === 'Markdown',
+        showAll,
       );
       break;
     }
@@ -3020,7 +3204,7 @@ async function handleCommand(
     }
 
     case '/cwd': {
-      response = '当前版本已不支持 /cwd。请使用 /new 新建会话，或使用 /thread /bind /use 切换到已有工作空间。';
+      response = '当前版本已不支持 /cwd。请使用 /new 新建会话，或使用 /thread /use 切换到已有工作空间。';
       break;
     }
 
@@ -3212,7 +3396,7 @@ async function handleCommand(
           '最近对话（raw）',
           [
             ['标题', threadTitle || getSessionDisplayName(session, currentBinding.workingDirectory)],
-            ['来源', desktopMessages.length > 0 ? 'desktop thread' : 'bridge cache'],
+            ['来源', desktopMessages.length > 0 ? '桌面线程' : 'Bridge 缓存'],
             ['返回条数', `${messages.length} / 配置 ${limit}`],
           ],
           [],
@@ -3275,9 +3459,9 @@ async function handleCommand(
         taskAbort.abort();
         st.activeTasks.delete(binding.codepilotSessionId);
         syncSessionRuntimeState(binding.codepilotSessionId);
-        response = 'Stopping current task...';
+        response = '正在停止当前任务...';
       } else {
-        response = 'No task is currently running.';
+        response = '当前没有正在运行的任务。';
       }
       break;
     }
@@ -3343,7 +3527,8 @@ async function handleCommand(
         '**常用**',
         '- `/` 当前会话',
         '- `/h` 帮助',
-        '- `/t` 最近桌面会话',
+        '- `/t` 最近 10 条桌面会话',
+        '- `/t all` 全部桌面会话',
         '- `/t 1` 接管第 1 条会话',
         '- `/n` 在当前工作目录下新建线程（仅保证 IM 可继续，不会自动出现在桌面会话列表）',
         '- `/n proj1` 在默认工作空间下新建项目会话',
@@ -3421,7 +3606,6 @@ export const _testOnly = {
   formatRuntimeStatus,
   formatMirrorStatus,
   formatMirrorMessage,
-  formatMirrorMessageForRole,
   consumeMirrorRecords,
   consumeBufferedMirrorTurns,
   flushTimedOutMirrorTurn,

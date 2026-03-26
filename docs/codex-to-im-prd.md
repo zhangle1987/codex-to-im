@@ -200,7 +200,7 @@
 - `/threads`
 - `/thread <thread-id>`
 - `/new`
-- `/bind <thread-id>`
+- `/thread <thread-id>`
 - `/stop`
 
 按钮和卡片交互可以作为增强，但不能替代文本命令。
@@ -359,7 +359,7 @@
 
 目标：
 
-- 飞书端支持 `/sessions`、`/use`、`/bind`、`/thread`
+- 飞书端支持 `/sessions`、`/use`、`/thread`
 - 飞书端支持切换当前活动共享会话
 - 支持“同步当前会话到飞书”按钮
 - 支持从飞书端继续推动工作

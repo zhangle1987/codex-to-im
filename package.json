@@ -1,8 +1,16 @@
 {
   "name": "codex-to-im",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "description": "Installable Codex-to-IM bridge with local setup UI and background service",
   "license": "MIT",
+  "homepage": "https://github.com/zhangle1987/codex-to-im#readme",
+  "bugs": {
+    "url": "https://github.com/zhangle1987/codex-to-im/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhangle1987/codex-to-im.git"
+  },
   "type": "module",
   "files": [
     "dist/",
@@ -13,7 +21,7 @@
     "SKILL.md",
     "LICENSE",
     "README.md",
-    "README_CN.md",
+    "README_EN.md",
     "SECURITY.md",
     "config.env.example"
   ],

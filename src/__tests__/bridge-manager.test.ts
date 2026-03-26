@@ -229,6 +229,68 @@ describe('bridge-manager resolveCommandAlias', () => {
     const message = _testOnly.toUserVisibleCommandError('/model', new Error('boom'));
     assert.equal(message, '/model 执行失败，请稍后重试。');
   });
+
+  it('suppresses an IM-triggered mirror turn until task_complete', () => {
+    const sessionId = 'session-suppress-turn';
+    _testOnly.beginMirrorSuppression(sessionId, '整理一下readme ，主要以功能说明为主，不需要把修改的内容都写进去。');
+
+    const filtered = _testOnly.filterSuppressedMirrorRecords(sessionId, [
+      {
+        type: 'message',
+        role: 'user',
+        content: '整理一下readme ，主要以功能说明为主，不需要把修改的内容都写进去。',
+        signature: 'sig-user',
+        timestamp: '2026-03-26T06:25:26.708Z',
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: 'README 已经整理成以功能说明为主的版本了。',
+        signature: 'sig-assistant',
+        timestamp: '2026-03-26T06:25:40.000Z',
+      },
+      {
+        type: 'task_complete',
+        role: 'assistant',
+        content: 'README 已经整理成以功能说明为主的版本了。',
+        signature: 'sig-complete',
+        timestamp: '2026-03-26T06:33:19.604Z',
+      },
+    ] as never);
+
+    assert.deepEqual(filtered, []);
+  });
+
+  it('releases mirror suppression after task_complete', () => {
+    const sessionId = 'session-suppress-release';
+    _testOnly.beginMirrorSuppression(sessionId, 'hello');
+    _testOnly.filterSuppressedMirrorRecords(sessionId, [
+      {
+        type: 'message',
+        role: 'user',
+        content: 'hello',
+        signature: 'sig-user',
+        timestamp: '2026-03-26T06:25:26.708Z',
+      },
+      {
+        type: 'task_complete',
+        role: 'assistant',
+        content: 'done',
+        signature: 'sig-complete',
+        timestamp: '2026-03-26T06:33:19.604Z',
+      },
+    ] as never);
+
+    const laterRecord = {
+      type: 'message',
+      role: 'user',
+      content: '桌面后续新消息',
+      signature: 'sig-later',
+      timestamp: '2026-03-26T06:40:00.000Z',
+    };
+    const filtered = _testOnly.filterSuppressedMirrorRecords(sessionId, [laterRecord] as never);
+    assert.deepEqual(filtered, [laterRecord]);
+  });
 });
 
 describe('bridge-manager status formatting', () => {
@@ -308,30 +370,29 @@ describe('bridge-manager status formatting', () => {
   });
 
   it('formats mirror event batches for IM delivery', () => {
-    const rendered = _testOnly.formatMirrorMessage('Current Thread', 'Desktop answer');
+    const rendered = _testOnly.formatMirrorMessage('Current Thread', 'Desktop prompt', 'Desktop answer');
 
-    assert.equal(rendered, '<Current Thread> codex:\n\nDesktop answer');
+    assert.equal(rendered, '<Current Thread>\n\n我: Desktop prompt\n\ncodex: Desktop answer');
   });
 
   it('returns an empty mirror message when there is no text', () => {
-    const rendered = _testOnly.formatMirrorMessage('Current Thread', '');
+    const rendered = _testOnly.formatMirrorMessage('Current Thread', '', '');
 
     assert.equal(rendered, '');
   });
 
-  it('formats user mirror messages with the 我 header', () => {
-    const rendered = _testOnly.formatMirrorMessageForRole('Current Thread', 'Desktop prompt', 'user');
+  it('formats markdown mirror headers with a combined user and codex layout', () => {
+    const rendered = _testOnly.formatMirrorMessage(
+      'Current Thread',
+      'Desktop prompt',
+      '- item 1\n- item 2',
+      true,
+    );
 
-    assert.equal(rendered, '<Current Thread> 我:\n\nDesktop prompt');
+    assert.equal(rendered, '**&lt;Current Thread&gt;**\n\n**我:** Desktop prompt\n\n**codex:**\n- item 1\n- item 2');
   });
 
-  it('formats markdown mirror headers with bold speaker labels', () => {
-    const rendered = _testOnly.formatMirrorMessageForRole('Current Thread', '- item 1\n- item 2', 'assistant', true);
-
-    assert.equal(rendered, '**&lt;Current Thread&gt; codex:**\n\n- item 1\n- item 2');
-  });
-
-  it('emits desktop user mirror text as a standalone finalized turn', () => {
+  it('buffers desktop user mirror text into the active turn instead of finalizing immediately', () => {
     const subscription = {
       pendingTurn: null,
       threadId: 'thread-1',
@@ -347,16 +408,18 @@ describe('bridge-manager status formatting', () => {
       },
     ]);
 
-    assert.deepEqual(finalized, [
-      {
-        text: 'desktop prompt',
-        signature: 'user-1',
-        timestamp: '2026-03-25T08:00:00.000Z',
-        status: 'completed',
-        role: 'user',
-      },
-    ]);
-    assert.equal(subscription.pendingTurn, null);
+    assert.deepEqual(finalized, []);
+    assert.deepEqual(subscription.pendingTurn, {
+      turnId: null,
+      startedAt: '2026-03-25T08:00:00.000Z',
+      lastActivityAt: '2026-03-25T08:00:00.000Z',
+      userText: 'desktop prompt',
+      lastAssistantText: null,
+      lastCommentaryText: null,
+      streamedText: '',
+      streamStarted: false,
+      toolCalls: new Map(),
+    });
   });
 
   it('buffers mirror records until task_complete arrives', () => {
@@ -371,6 +434,14 @@ describe('bridge-manager status formatting', () => {
         type: 'task_started',
         content: '',
         timestamp: '2026-03-25T08:00:00.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'user',
+        type: 'message',
+        role: 'user',
+        content: 'desktop prompt',
+        timestamp: '2026-03-25T08:00:00.500Z',
         turnId: 'turn-1',
       },
       {
@@ -399,6 +470,7 @@ describe('bridge-manager status formatting', () => {
 
     assert.deepEqual(finalized, [
       {
+        userText: 'desktop prompt',
         text: 'final answer',
         signature: 'complete',
         timestamp: '2026-03-25T08:00:03.000Z',
@@ -493,6 +565,7 @@ describe('bridge-manager status formatting', () => {
 
     assert.deepEqual(finalized, [
       {
+        userText: null,
         text: '',
         signature: 'complete',
         timestamp: '2026-03-25T08:00:03.000Z',
@@ -517,19 +590,24 @@ describe('bridge-manager status formatting', () => {
       ],
     } as { pendingTurn: unknown; threadId: string; bufferedRecords: unknown[] };
 
-    const finalized = _testOnly.consumeBufferedMirrorTurns(subscription as any);
+    const finalized = _testOnly.consumeBufferedMirrorTurns(
+      subscription as any,
+      Date.parse('2026-03-25T08:00:30.000Z'),
+    );
 
-    assert.deepEqual(finalized, [
-      {
-        text: 'desktop prompt',
-        signature: 'user-1',
-        timestamp: '2026-03-25T08:00:00.000Z',
-        status: 'completed',
-        role: 'user',
-      },
-    ]);
+    assert.deepEqual(finalized, []);
     assert.deepEqual(subscription.bufferedRecords, []);
-    assert.equal(subscription.pendingTurn, null);
+    assert.deepEqual(subscription.pendingTurn, {
+      turnId: null,
+      startedAt: '2026-03-25T08:00:00.000Z',
+      lastActivityAt: '2026-03-25T08:00:00.000Z',
+      userText: 'desktop prompt',
+      lastAssistantText: null,
+      lastCommentaryText: null,
+      streamedText: '',
+      streamStarted: false,
+      toolCalls: new Map(),
+    });
   });
 
   it('checks buffered pending turns for timeout even when no new file data arrived', () => {
@@ -540,6 +618,7 @@ describe('bridge-manager status formatting', () => {
         turnId: 'turn-1',
         startedAt: '2026-03-25T08:00:00.000Z',
         lastActivityAt: '2026-03-25T08:00:00.000Z',
+        userText: null,
         lastAssistantText: 'stale answer',
         lastCommentaryText: null,
         streamedText: 'stale answer',
@@ -555,6 +634,7 @@ describe('bridge-manager status formatting', () => {
 
     assert.deepEqual(finalized, [
       {
+        userText: null,
         text: 'stale answer',
         signature: 'timeout:thread-1:turn-1',
         timestamp: '2026-03-25T08:00:00.000Z',
@@ -565,7 +645,7 @@ describe('bridge-manager status formatting', () => {
     assert.equal(subscription.pendingTurn, null);
   });
 
-  it('suppresses IM-originated mirror records while preserving later desktop user input', () => {
+  it('suppresses all mirror records from an IM-originated turn until task_complete', () => {
     const sessionId = 'session-self-echo';
     _testOnly.beginMirrorSuppression(sessionId, '来自 IM 的问题');
 
@@ -583,6 +663,7 @@ describe('bridge-manager status formatting', () => {
         role: 'user',
         content: '来自 IM 的问题',
         timestamp: '2026-03-25T08:00:01.000Z',
+        turnId: 'turn-1',
       },
       {
         signature: 'assistant-self',
@@ -590,13 +671,31 @@ describe('bridge-manager status formatting', () => {
         role: 'assistant',
         content: '来自 IM 的回复',
         timestamp: '2026-03-25T08:00:02.000Z',
+        turnId: 'turn-1',
       },
       {
-        signature: 'user-desktop',
+        signature: 'desktop-commentary',
         type: 'message',
-        role: 'user',
-        content: '来自桌面的新消息',
+        role: 'commentary',
+        content: '桌面旧任务还在继续思考',
         timestamp: '2026-03-25T08:00:03.000Z',
+        turnId: 'desktop-turn',
+      },
+      {
+        signature: 'desktop-complete',
+        type: 'task_complete',
+        role: 'assistant',
+        content: '桌面旧任务完成',
+        timestamp: '2026-03-25T08:00:03.500Z',
+        turnId: 'desktop-turn',
+      },
+      {
+        signature: 'assistant-self-final',
+        type: 'message',
+        role: 'assistant',
+        content: '来自 IM 的最终回复',
+        timestamp: '2026-03-25T08:00:03.800Z',
+        turnId: 'turn-1',
       },
       {
         signature: 'complete',
@@ -610,13 +709,201 @@ describe('bridge-manager status formatting', () => {
 
     assert.deepEqual(filtered, [
       {
+        signature: 'desktop-commentary',
+        type: 'message',
+        role: 'commentary',
+        content: '桌面旧任务还在继续思考',
+        timestamp: '2026-03-25T08:00:03.000Z',
+        turnId: 'desktop-turn',
+      },
+      {
+        signature: 'desktop-complete',
+        type: 'task_complete',
+        role: 'assistant',
+        content: '桌面旧任务完成',
+        timestamp: '2026-03-25T08:00:03.500Z',
+        turnId: 'desktop-turn',
+      },
+    ]);
+  });
+
+  it('releases later desktop mirror records after the IM-originated turn completes', () => {
+    const sessionId = 'session-self-echo-next-batch';
+    _testOnly.beginMirrorSuppression(sessionId, '来自 IM 的问题');
+
+    const suppressed = _testOnly.filterSuppressedMirrorRecords(sessionId, [
+      {
+        signature: 'start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'user-self',
+        type: 'message',
+        role: 'user',
+        content: '来自 IM 的问题',
+        timestamp: '2026-03-25T08:00:01.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'assistant-self',
+        type: 'message',
+        role: 'assistant',
+        content: '来自 IM 的回复',
+        timestamp: '2026-03-25T08:00:02.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'complete',
+        type: 'task_complete',
+        role: 'assistant',
+        content: '来自 IM 的回复',
+        timestamp: '2026-03-25T08:00:04.000Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    const released = _testOnly.filterSuppressedMirrorRecords(sessionId, [
+      {
         signature: 'user-desktop',
         type: 'message',
         role: 'user',
         content: '来自桌面的新消息',
-        timestamp: '2026-03-25T08:00:03.000Z',
+        timestamp: '2026-03-25T08:00:05.000Z',
+      },
+      {
+        signature: 'assistant-desktop',
+        type: 'message',
+        role: 'assistant',
+        content: '来自桌面的回复',
+        timestamp: '2026-03-25T08:00:05.500Z',
       },
     ]);
+
+    assert.deepEqual(suppressed, []);
+    assert.deepEqual(released, [
+      {
+        signature: 'user-desktop',
+        type: 'message',
+        role: 'user',
+        content: '来自桌面的新消息',
+        timestamp: '2026-03-25T08:00:05.000Z',
+      },
+      {
+        signature: 'assistant-desktop',
+        type: 'message',
+        role: 'assistant',
+        content: '来自桌面的回复',
+        timestamp: '2026-03-25T08:00:05.500Z',
+      },
+    ]);
+  });
+
+  it('normalizes unicode punctuation when suppressing IM-originated mirror prompts', () => {
+    const sessionId = 'session-unicode-punctuation';
+    _testOnly.beginMirrorSuppression(sessionId, '整理一下readme ,主要以功能说明为主,不需要把修改的内容都写进去。');
+
+    const filtered = _testOnly.filterSuppressedMirrorRecords(sessionId, [
+      {
+        signature: 'user-self',
+        type: 'message',
+        role: 'user',
+        content: '整理一下readme ，主要以功能说明为主，不需要把修改的内容都写进去。',
+        timestamp: '2026-03-25T08:00:01.000Z',
+      },
+      {
+        signature: 'assistant-self',
+        type: 'message',
+        role: 'assistant',
+        content: '这是 IM 自己那轮的回复',
+        timestamp: '2026-03-25T08:00:02.000Z',
+      },
+      {
+        signature: 'complete',
+        type: 'task_complete',
+        role: 'assistant',
+        content: '这是 IM 自己那轮的回复',
+        timestamp: '2026-03-25T08:00:03.000Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.deepEqual(filtered, []);
+  });
+
+  it('supports multiple queued IM suppressions without leaking a delayed earlier completion', () => {
+    const sessionId = 'session-queued-suppressions';
+    _testOnly.beginMirrorSuppression(sessionId, '第一条 IM 消息');
+    _testOnly.beginMirrorSuppression(sessionId, '第二条 IM 消息');
+
+    const filtered = _testOnly.filterSuppressedMirrorRecords(sessionId, [
+      {
+        signature: 'start-1',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'user-1',
+        type: 'message',
+        role: 'user',
+        content: '第一条 IM 消息',
+        timestamp: '2026-03-25T08:00:01.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'assistant-1',
+        type: 'message',
+        role: 'assistant',
+        content: '第一条回复',
+        timestamp: '2026-03-25T08:00:02.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'start-2',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:03.000Z',
+        turnId: 'turn-2',
+      },
+      {
+        signature: 'user-2',
+        type: 'message',
+        role: 'user',
+        content: '第二条 IM 消息',
+        timestamp: '2026-03-25T08:00:04.000Z',
+        turnId: 'turn-2',
+      },
+      {
+        signature: 'assistant-2',
+        type: 'message',
+        role: 'assistant',
+        content: '第二条回复',
+        timestamp: '2026-03-25T08:00:05.000Z',
+        turnId: 'turn-2',
+      },
+      {
+        signature: 'complete-2',
+        type: 'task_complete',
+        role: 'assistant',
+        content: '第二条回复',
+        timestamp: '2026-03-25T08:00:06.000Z',
+        turnId: 'turn-2',
+      },
+      {
+        signature: 'complete-1',
+        type: 'task_complete',
+        role: 'assistant',
+        content: '第一条回复',
+        timestamp: '2026-03-25T08:00:07.000Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.deepEqual(filtered, []);
   });
 
   it('flushes a buffered mirror turn after the idle timeout', () => {
@@ -626,6 +913,7 @@ describe('bridge-manager status formatting', () => {
         turnId: 'turn-1',
         startedAt: '2026-03-25T08:00:00.000Z',
         lastActivityAt: '2026-03-25T08:00:00.000Z',
+        userText: null,
         lastAssistantText: 'stale answer',
       },
     } as { pendingTurn: unknown; threadId: string };
@@ -636,6 +924,7 @@ describe('bridge-manager status formatting', () => {
     );
 
     assert.deepEqual(flushed, {
+      userText: null,
       text: 'stale answer',
       signature: 'timeout:thread-1:turn-1',
       timestamp: '2026-03-25T08:00:00.000Z',
