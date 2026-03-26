@@ -102,6 +102,21 @@ describe('JsonFileStore', () => {
     assert.equal(store.getChannelBinding('telegram', 'missing'), null);
   });
 
+  it('deleteChannelBinding removes the binding by id', () => {
+    const store = new JsonFileStore(makeSettings());
+    const binding = store.upsertChannelBinding({
+      channelType: 'telegram',
+      chatId: 'delete-binding',
+      codepilotSessionId: 'sess-1',
+      workingDirectory: '/tmp',
+      model: 'model-1',
+    });
+
+    store.deleteChannelBinding(binding.id);
+
+    assert.equal(store.getChannelBinding('telegram', 'delete-binding'), null);
+  });
+
   it('listChannelBindings filters by type', () => {
     const store = new JsonFileStore(makeSettings());
     store.upsertChannelBinding({

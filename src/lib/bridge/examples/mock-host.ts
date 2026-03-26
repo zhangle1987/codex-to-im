@@ -65,6 +65,15 @@ class InMemoryStore implements BridgeStore {
     return binding;
   }
 
+  deleteChannelBinding(id: string) {
+    for (const [key, binding] of this.bindings) {
+      if (binding.id === id) {
+        this.bindings.delete(key);
+        break;
+      }
+    }
+  }
+
   updateChannelBinding(id: string, updates: Partial<ChannelBinding>) {
     for (const [key, b] of this.bindings) {
       if (b.id === id) { this.bindings.set(key, { ...b, ...updates }); break; }

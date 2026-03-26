@@ -37,6 +37,44 @@ export interface BindingSummary {
   mirrorLastEventAt?: string;
 }
 
+function formatChannelLabel(channelType: string): string {
+  return channelType === 'weixin' ? '微信' : channelType === 'feishu' ? '飞书' : channelType;
+}
+
+function findConflictingBinding(
+  store: BridgeStore,
+  current: { channelType: string; chatId: string },
+  match: (binding: ChannelBinding) => boolean,
+): ChannelBinding | null {
+  return store.listChannelBindings().find((binding) => {
+    if (binding.channelType === current.channelType && binding.chatId === current.chatId) {
+      return false;
+    }
+    return match(binding);
+  }) || null;
+}
+
+function assertBindingTargetAvailable(
+  store: BridgeStore,
+  current: { channelType: string; chatId: string },
+  opts: { sessionId?: string; sdkSessionId?: string },
+): void {
+  const conflict = findConflictingBinding(
+    store,
+    current,
+    (binding) => (
+      (opts.sessionId ? binding.codepilotSessionId === opts.sessionId : false)
+      || (opts.sdkSessionId ? binding.sdkSessionId === opts.sdkSessionId : false)
+    ),
+  );
+
+  if (!conflict) return;
+
+  throw new Error(
+    `该会话已绑定到 ${formatChannelLabel(conflict.channelType)} 聊天 ${conflict.chatId}。一个会话只能绑定一个聊天。`,
+  );
+}
+
 function getSessionName(session: BridgeSession): string {
   if (session.session_type === 'draft') return '临时草稿线程';
   if (session.session_type === 'history_summary') return '历史摘要线程';
@@ -60,6 +98,12 @@ export function bindStoreToSession(
   const session = store.getSession(sessionId);
   if (!session) return null;
 
+  assertBindingTargetAvailable(
+    store,
+    { channelType, chatId },
+    { sessionId: session.id, sdkSessionId: session.sdk_session_id || undefined },
+  );
+
   return store.upsertChannelBinding({
     channelType,
     chatId,
@@ -78,6 +122,12 @@ export function bindStoreToSdkSession(
   sdkSessionId: string,
   opts?: { workingDirectory?: string; model?: string; displayName?: string },
 ): ChannelBinding {
+  assertBindingTargetAvailable(
+    store,
+    { channelType, chatId },
+    { sdkSessionId },
+  );
+
   const existing = store.findSessionBySdkSessionId(sdkSessionId);
   if (existing) {
       return store.upsertChannelBinding({
@@ -204,6 +254,17 @@ export function updateBindingTarget(
     throw new Error('Updated binding not found.');
   }
   return updated;
+}
+
+export function removeBinding(
+  store: BridgeStore,
+  bindingId: string,
+): void {
+  const binding = store.listChannelBindings().find((item) => item.id === bindingId);
+  if (!binding) {
+    throw new Error('Binding not found.');
+  }
+  store.deleteChannelBinding(bindingId);
 }
 
 export function getChannelBindingSummaries(

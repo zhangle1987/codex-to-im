@@ -263,6 +263,16 @@ export class JsonFileStore implements BridgeStore {
     return binding;
   }
 
+  deleteChannelBinding(id: string): void {
+    this.reloadBindings();
+    for (const [key, binding] of this.bindings) {
+      if (binding.id !== id) continue;
+      this.bindings.delete(key);
+      this.persistBindings();
+      return;
+    }
+  }
+
   updateChannelBinding(id: string, updates: Partial<ChannelBinding>): void {
     this.reloadBindings();
     for (const [key, b] of this.bindings) {

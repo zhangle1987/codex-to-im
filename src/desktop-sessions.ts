@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import type { BridgeMessage } from './lib/bridge/host.js';
 
 export interface DesktopSessionSummary {
@@ -97,6 +98,20 @@ interface SessionIndexLine {
   updated_at?: string;
 }
 
+interface ThreadIndexEntry {
+  title: string;
+  updatedAt: string;
+}
+
+interface VisibleDesktopThreadRow {
+  id: string;
+  updatedAtMs: number;
+}
+
+interface CodexGlobalState {
+  'electron-saved-workspace-roots'?: unknown;
+}
+
 const ACTIVE_WINDOW_MS = 15 * 60 * 1000;
 const MAX_SESSION_META_BYTES = 4 * 1024 * 1024;
 const MAX_SESSION_TITLE_SCAN_BYTES = 512 * 1024;
@@ -118,9 +133,81 @@ function getSessionIndexPath(): string {
   return path.join(getCodexHome(), 'session_index.jsonl');
 }
 
+function getCodexGlobalStatePath(): string {
+  return path.join(getCodexHome(), '.codex-global-state.json');
+}
+
+function getDesktopStateDbPath(): string | null {
+  const codexHome = getCodexHome();
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(codexHome, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const candidates = entries
+    .filter((entry) => entry.isFile() && /^state_\d+\.sqlite$/i.test(entry.name))
+    .map((entry) => path.join(codexHome, entry.name))
+    .sort((left, right) => {
+      try {
+        return fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs;
+      } catch {
+        return 0;
+      }
+    });
+
+  return candidates[0] || null;
+}
+
 function extractThreadIdFromRolloutName(name: string): string | null {
   const match = name.match(/-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
   return match?.[1] || null;
+}
+
+function normalizeComparablePath(value: string): string {
+  if (!value) return '';
+  const stripped = value.replace(/^\\\\\?\\/, '');
+  return path.resolve(stripped).replace(/[\\/]+$/, '').toLowerCase();
+}
+
+function isInternalSkillWorkspace(cwd: string): boolean {
+  const normalizedCwd = normalizeComparablePath(cwd);
+  if (!normalizedCwd) return false;
+
+  const skillsRoot = normalizeComparablePath(path.join(getCodexHome(), 'skills'));
+  if (!skillsRoot) return false;
+
+  return normalizedCwd === skillsRoot || normalizedCwd.startsWith(`${skillsRoot}\\`) || normalizedCwd.startsWith(`${skillsRoot}/`);
+}
+
+function loadSavedWorkspaceRoots(): string[] | null {
+  const statePath = getCodexGlobalStatePath();
+  if (!fs.existsSync(statePath)) return null;
+
+  let parsed: CodexGlobalState;
+  try {
+    parsed = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as CodexGlobalState;
+  } catch {
+    return null;
+  }
+
+  const roots = Array.isArray(parsed['electron-saved-workspace-roots'])
+    ? parsed['electron-saved-workspace-roots']
+        .map((value) => (typeof value === 'string' ? normalizeComparablePath(value) : ''))
+        .filter(Boolean)
+    : [];
+
+  return roots.length > 0 ? roots : null;
+}
+
+function isWithinSavedWorkspaceRoots(cwd: string, roots: string[] | null): boolean {
+  if (!roots || roots.length === 0) return true;
+  const normalizedCwd = normalizeComparablePath(cwd);
+  if (!normalizedCwd) return false;
+
+  return roots.some((root) =>
+    normalizedCwd === root || normalizedCwd.startsWith(`${root}\\`) || normalizedCwd.startsWith(`${root}/`));
 }
 
 function loadArchivedThreadIds(): Set<string> {
@@ -219,7 +306,7 @@ function isDesktopLike(meta: SessionMetaLine['payload']): boolean {
   return originator.includes('desktop') || source === 'vscode' || source === 'desktop';
 }
 
-function loadThreadNameIndex(archivedThreadIds: Set<string>): Map<string, string> {
+function loadThreadIndexEntries(archivedThreadIds: Set<string>): Map<string, ThreadIndexEntry> {
   const indexPath = getSessionIndexPath();
   if (!fs.existsSync(indexPath)) return new Map();
 
@@ -230,7 +317,7 @@ function loadThreadNameIndex(archivedThreadIds: Set<string>): Map<string, string
     return new Map();
   }
 
-  const titles = new Map<string, { title: string; updatedAt: string }>();
+  const titles = new Map<string, ThreadIndexEntry>();
   for (const line of content.split(/\r?\n/)) {
     if (!line.trim()) continue;
 
@@ -252,7 +339,61 @@ function loadThreadNameIndex(archivedThreadIds: Set<string>): Map<string, string
     }
   }
 
-  return new Map(Array.from(titles.entries()).map(([threadId, entry]) => [threadId, entry.title]));
+  return titles;
+}
+
+function parseUpdatedAtValue(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1_000_000_000_000 ? value : value * 1000;
+  }
+  if (typeof value === 'string') {
+    const numeric = Number(value.trim());
+    if (Number.isFinite(numeric)) {
+      return numeric > 1_000_000_000_000 ? numeric : numeric * 1000;
+    }
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function loadVisibleDesktopThreads(limit?: number): VisibleDesktopThreadRow[] | null {
+  const dbPath = getDesktopStateDbPath();
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
+
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const hasLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0;
+    const sql = `
+      SELECT id, updated_at
+      FROM threads
+      WHERE archived = 0
+        AND source != 'exec'
+      ORDER BY updated_at DESC
+      ${hasLimit ? 'LIMIT ?' : ''}
+    `;
+    const rows = hasLimit
+      ? db.prepare(sql).all(Math.max(1, Math.floor(limit!))) as Array<{ id?: string; updated_at?: string | number }>
+      : db.prepare(sql).all() as Array<{ id?: string; updated_at?: string | number }>;
+
+    const ids = rows
+      .map((row) => {
+        const id = typeof row.id === 'string' ? row.id.trim() : '';
+        if (!id) return null;
+        return {
+          id,
+          updatedAtMs: parseUpdatedAtValue(row.updated_at),
+        } satisfies VisibleDesktopThreadRow;
+      })
+      .filter((row): row is VisibleDesktopThreadRow => Boolean(row));
+
+    return ids.length > 0 ? ids : null;
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
 }
 
 function buildFallbackTitle(threadId: string, filePath: string, cwd: string): string {
@@ -284,7 +425,7 @@ function buildFallbackTitle(threadId: string, filePath: string, cwd: string): st
 
 function parseDesktopSession(
   filePath: string,
-  threadNames: Map<string, string>,
+  threadIndexEntries: Map<string, ThreadIndexEntry>,
   archivedThreadIds: Set<string>,
 ): DesktopSessionSummary | null {
   const firstLine = readFirstLine(filePath);
@@ -313,10 +454,13 @@ function parseDesktopSession(
   }
 
   const cwd = parsed.payload.cwd || '';
+  if (isInternalSkillWorkspace(cwd)) {
+    return null;
+  }
   const lastEventAt = stat.mtime.toISOString();
   const firstSeenAt = parsed.payload.timestamp || parsed.timestamp || stat.birthtime.toISOString();
   const threadId = parsed.payload.id;
-  const title = threadNames.get(threadId) || buildFallbackTitle(threadId, filePath, cwd);
+  const title = threadIndexEntries.get(threadId)?.title || buildFallbackTitle(threadId, filePath, cwd);
 
   return {
     threadId,
@@ -380,24 +524,60 @@ function isSessionMessageLine(line: SessionMessageLine | SessionEventLine): line
   return line.type === 'response_item';
 }
 
-export function listDesktopSessions(limit = 12): DesktopSessionSummary[] {
+export function listDesktopSessions(limit?: number): DesktopSessionSummary[] {
   const root = getCodexSessionsRoot();
   if (!fs.existsSync(root)) return [];
   const archivedThreadIds = loadArchivedThreadIds();
-  const threadNames = loadThreadNameIndex(archivedThreadIds);
+  const threadIndexEntries = loadThreadIndexEntries(archivedThreadIds);
+  const savedWorkspaceRoots = loadSavedWorkspaceRoots();
+  const visibleThreads = loadVisibleDesktopThreads(limit);
+  const visibleThreadIds = visibleThreads?.map((thread) => thread.id) || null;
+  const visibleThreadSet = visibleThreadIds ? new Set(visibleThreadIds) : null;
+  const visibleThreadUpdatedAt = new Map(visibleThreads?.map((thread) => [thread.id, thread.updatedAtMs]) || []);
+  const oldestVisibleUpdatedAtMs = visibleThreads && visibleThreads.length > 0
+    ? Math.min(...visibleThreads.map((thread) => thread.updatedAtMs || Number.MAX_SAFE_INTEGER))
+    : 0;
 
   const files: string[] = [];
   walkSessionFiles(root, files);
 
-  const sessions: DesktopSessionSummary[] = [];
+  const allSessions = new Map<string, DesktopSessionSummary>();
   for (const filePath of files) {
-    const session = parseDesktopSession(filePath, threadNames, archivedThreadIds);
-    if (session) sessions.push(session);
+    const session = parseDesktopSession(filePath, threadIndexEntries, archivedThreadIds);
+    if (!session) continue;
+    if (!isWithinSavedWorkspaceRoots(session.cwd, savedWorkspaceRoots)) continue;
+    allSessions.set(session.threadId, session);
+  }
+
+  const sessions = Array.from(allSessions.values());
+
+  if (visibleThreadSet && visibleThreadIds) {
+    const mergedThreadIds = new Set<string>(visibleThreadIds);
+    if (oldestVisibleUpdatedAtMs > 0) {
+      for (const session of sessions) {
+        if (visibleThreadSet.has(session.threadId)) continue;
+        const candidateUpdatedAtMs = parseUpdatedAtValue(threadIndexEntries.get(session.threadId)?.updatedAt || session.lastEventAt);
+        if (candidateUpdatedAtMs > oldestVisibleUpdatedAtMs) {
+          mergedThreadIds.add(session.threadId);
+        }
+      }
+    }
+
+    return sessions
+      .filter((session) => mergedThreadIds.has(session.threadId))
+      .sort((left, right) => {
+        const rightUpdatedAtMs = visibleThreadUpdatedAt.get(right.threadId)
+          || parseUpdatedAtValue(threadIndexEntries.get(right.threadId)?.updatedAt || right.lastEventAt);
+        const leftUpdatedAtMs = visibleThreadUpdatedAt.get(left.threadId)
+          || parseUpdatedAtValue(threadIndexEntries.get(left.threadId)?.updatedAt || left.lastEventAt);
+        return rightUpdatedAtMs - leftUpdatedAtMs;
+      })
+      .slice(0, typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? Math.max(1, Math.floor(limit)) : undefined);
   }
 
   return sessions
     .sort((a, b) => b.lastEventAt.localeCompare(a.lastEventAt))
-    .slice(0, Math.max(1, limit));
+    .slice(0, typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? Math.max(1, Math.floor(limit)) : undefined);
 }
 
 export function getDesktopSessionByThreadId(threadId: string): DesktopSessionSummary | null {

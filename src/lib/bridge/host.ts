@@ -165,6 +165,7 @@ export interface BridgeStore {
   // ── Channel bindings ──
   getChannelBinding(channelType: string, chatId: string): ChannelBinding | null;
   upsertChannelBinding(data: UpsertChannelBindingInput): ChannelBinding;
+  deleteChannelBinding(id: string): void;
   updateChannelBinding(id: string, updates: Partial<ChannelBinding>): void;
   listChannelBindings(channelType?: ChannelType): ChannelBinding[];
 

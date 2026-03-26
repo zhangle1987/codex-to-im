@@ -3147,6 +3147,26 @@ async function handleCommand(
       break;
     }
 
+    case '/unbind': {
+      if (!currentBinding) {
+        response = '当前聊天还没有绑定任何会话。';
+        break;
+      }
+      store.deleteChannelBinding(currentBinding.id);
+      response = buildCommandFields(
+        '已解绑当前聊天',
+        [
+          ['聊天', msg.address.chatId],
+        ],
+        [
+          '这个聊天已释放当前会话绑定。',
+          '之后如果直接发送文本，会自动进入新的临时草稿线程。',
+        ],
+        responseParseMode === 'Markdown',
+      );
+      break;
+    }
+
     case '/help':
       responseParseMode = getFeedbackParseMode(adapter.channelType);
       response = [
@@ -3168,6 +3188,7 @@ async function handleCommand(
         '- `/model` 查看当前模型；`/model gpt-5.4` 可切换，`/model default` 回退到默认模型',
         '- `/t 0` 临时草稿线程',
         '- `/t 0 reset` 重置草稿线程',
+        '- `/unbind` 解绑当前聊天，释放当前会话',
         '- `/stop` 停止当前任务',
         '',
         '**其它**',

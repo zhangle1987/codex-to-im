@@ -12,6 +12,7 @@ import {
   getChannelBindingSummaries,
   listBindingSummaries,
   listBindingTargetOptions,
+  removeBinding,
   updateBindingTarget,
 } from './session-bindings.js';
 import {
@@ -999,6 +1000,33 @@ function renderHtml(): string {
         gap: 16px;
       }
 
+      .session-section {
+        display: grid;
+        gap: 12px;
+      }
+
+      .session-section + .session-section {
+        margin-top: 22px;
+      }
+
+      .session-section-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 12px;
+      }
+
+      .session-section-title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 700;
+      }
+
+      .session-section-meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
       .project-group {
         border: 1px solid var(--border);
         border-radius: 10px;
@@ -1132,6 +1160,84 @@ function renderHtml(): string {
         flex-wrap: wrap;
       }
 
+      .session-binding-tags {
+        display: grid;
+        gap: 8px;
+        margin-top: 8px;
+      }
+
+      .session-binding-tag {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 8px;
+        padding: 6px 10px;
+        border-radius: 10px;
+        background: rgba(22, 119, 255, 0.08);
+        color: var(--primary);
+        font-size: 12px;
+        border: 1px solid rgba(22, 119, 255, 0.16);
+        width: fit-content;
+        max-width: 100%;
+      }
+
+      .session-binding-tag button {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: #ffffff;
+        font-size: 12px;
+      }
+
+      .session-binding-tag-label {
+        min-width: 0;
+        word-break: break-word;
+      }
+
+      .session-simple-list {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        background: #ffffff;
+      }
+
+      .session-simple-item {
+        display: grid;
+        grid-template-columns: minmax(0, 1.6fr) minmax(220px, 1fr) auto;
+        gap: 16px;
+        align-items: center;
+        padding: 14px 16px;
+        border-top: 1px solid var(--border);
+      }
+
+      .session-simple-item:first-child {
+        border-top: 0;
+      }
+
+      .session-simple-main {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+      }
+
+      .session-simple-title {
+        font-weight: 700;
+        word-break: break-word;
+      }
+
+      .session-simple-thread,
+      .session-simple-time,
+      .session-simple-path {
+        color: var(--muted);
+        font-size: 12px;
+        word-break: break-all;
+      }
+
+      .session-simple-side {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+      }
+
       .panel-block {
         margin-top: 18px;
         padding-top: 16px;
@@ -1249,6 +1355,27 @@ function renderHtml(): string {
       .binding-list {
         display: grid;
         gap: 10px;
+      }
+
+      .binding-tabs {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 10px;
+      }
+
+      .binding-tab {
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: #ffffff;
+        color: var(--muted);
+        padding: 7px 12px;
+      }
+
+      .binding-tab.active {
+        border-color: rgba(22, 119, 255, 0.30);
+        background: rgba(22, 119, 255, 0.08);
+        color: var(--primary);
       }
 
       .binding-item {
@@ -1404,8 +1531,10 @@ function renderHtml(): string {
         .page-header,
         .panel-header,
         .project-group-head,
-        .binding-head { flex-direction: column; align-items: stretch; }
+        .binding-head,
+        .session-section-head { flex-direction: column; align-items: stretch; }
         .session-head { grid-template-columns: 1fr; }
+        .session-simple-item { grid-template-columns: 1fr; }
         .session-actions { justify-content: flex-start; }
       }
     </style>
@@ -1527,7 +1656,7 @@ function renderHtml(): string {
           <div class="page-header">
             <div>
               <h1 class="page-title">会话</h1>
-              <p class="page-copy">按工程目录查看最近桌面会话，并复制 thread 或接管命令。</p>
+              <p class="page-copy">先看当前已经绑定到聊天的会话，再查看全部桌面会话列表。</p>
             </div>
             <div class="toolbar">
               <button id="refreshDesktopBtn">刷新桌面会话</button>
@@ -1538,7 +1667,22 @@ function renderHtml(): string {
             <div class="notice">这里只展示在 Codex 桌面索引里有名字的线程，和 Codex Desktop App 左侧列表保持一致。</div>
             <div class="notice" style="margin-top: 12px;">最短路径：找到目标 thread，然后把 <code>/thread 019d1da4</code> 这样的命令发给飞书机器人，或直接到“通道”页切换绑定。</div>
             <div class="small" id="desktopSessionMeta" style="margin: 14px 0 16px;">正在加载…</div>
-            <div class="session-list" id="desktopSessionsList"></div>
+            <div class="session-list">
+              <section class="session-section">
+                <div class="session-section-head">
+                  <h2 class="session-section-title">当前已绑定会话</h2>
+                  <div class="session-section-meta" id="boundSessionsMeta">正在加载…</div>
+                </div>
+                <div id="boundSessionsList"></div>
+              </section>
+              <section class="session-section">
+                <div class="session-section-head">
+                  <h2 class="session-section-title">全部会话</h2>
+                  <div class="session-section-meta" id="allSessionsMeta">正在加载…</div>
+                </div>
+                <div id="desktopSessionsList"></div>
+              </section>
+            </div>
             <div class="message" id="desktopMessage"></div>
           </section>
         </section>
@@ -1695,6 +1839,7 @@ function renderHtml(): string {
                   <div class="command-item"><div class="command-col-command"><code>/model [slug|default]</code></div><div class="command-col-original"><code>/model [slug|default]</code></div><div class="command-col-desc">查看或切换当前 IM 会话使用的模型；CLI only 模型会标注“仅 IM / CLI”，共享桌面线程只允许查看不允许切换。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0</code></div><div class="command-col-original"><code>/thread 0</code></div><div class="command-col-desc">切换到当前聊天的临时草稿线程。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0 reset</code></div><div class="command-col-original"><code>/thread 0 reset</code></div><div class="command-col-desc">丢弃当前草稿上下文并重建一条新的草稿线程。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/unbind</code></div><div class="command-col-original"><code>/unbind</code></div><div class="command-col-desc">解绑当前聊天，释放当前会话；之后再直接发文本会自动进入新的临时草稿线程。</div></div>
                   <div class="command-item"><div class="command-col-command">—</div><div class="command-col-original"><code>/stop</code></div><div class="command-col-desc">停止当前任务。</div></div>
                 </div>
               </section>
@@ -1856,6 +2001,10 @@ function renderHtml(): string {
         desktopSessions: [],
         bindings: [],
         bindingOptions: [],
+        activeBindingByChannel: {
+          feishu: '',
+          weixin: '',
+        },
         weixinAccounts: [],
         desktopRoot: '',
         activePage: 'overview',
@@ -1964,6 +2113,40 @@ function renderHtml(): string {
           +     '</tbody>'
           +   '</table>'
           + '</div>';
+      }
+
+      function bindingTabLabel(binding) {
+        return binding.chatId || binding.id;
+      }
+
+      function ensureActiveBinding(channelType, bindings) {
+        const current = state.activeBindingByChannel[channelType];
+        if (current && bindings.some((binding) => binding.id === current)) {
+          return current;
+        }
+        const next = bindings[0] ? bindings[0].id : '';
+        state.activeBindingByChannel[channelType] = next;
+        return next;
+      }
+
+      function renderBindingCard(binding) {
+        return ''
+          + '<article class="binding-item" data-binding-id="' + escapeHtml(binding.id) + '">'
+          +   '<div class="binding-head">'
+          +     '<div class="binding-title">' + escapeHtml(binding.chatId) + '</div>'
+          +     '<div class="actions">'
+          +       '<div class="small">' + escapeHtml(binding.mode) + '</div>'
+          +       '<button type="button" data-action="unbind-binding" data-binding-id="' + escapeHtml(binding.id) + '">解绑当前聊天</button>'
+          +     '</div>'
+          +   '</div>'
+          +   '<div class="binding-detail">当前会话：<code>' + escapeHtml(binding.currentSessionId.slice(0, 8)) + '...</code> · ' + escapeHtml(binding.currentSessionName) + '</div>'
+          +   '<div class="binding-detail">当前目标：' + escapeHtml(binding.currentTargetLabel || '未绑定') + '</div>'
+          +   '<div class="binding-detail">当前 thread：<code>' + escapeHtml(binding.currentThreadId || 'not-shared') + '</code></div>'
+          +   '<div class="binding-detail">运行状态：' + escapeHtml(bindingRuntimeText(binding)) + '</div>'
+          +   '<div class="binding-detail">共享镜像：' + escapeHtml(bindingMirrorText(binding)) + '</div>'
+          +   '<div class="binding-detail">目录：' + escapeHtml(binding.workingDirectory || '~') + '</div>'
+          +   renderBindingTable(binding)
+          + '</article>';
       }
 
       function enabledChannelsFromForm() {
@@ -2357,6 +2540,24 @@ function renderHtml(): string {
         return marks;
       }
 
+      function bindingsForThread(threadId) {
+        const currentTargetKey = 'desktop:' + threadId;
+        return (state.bindings || []).filter((binding) => (
+          binding.currentThreadId === threadId || binding.currentTargetKey === currentTargetKey
+        ));
+      }
+
+      function projectNameFromCwd(cwd) {
+        const value = String(cwd || '').trim();
+        if (!value) return '(no cwd)';
+        const parts = value.split(/[\\\\/]+/).filter(Boolean);
+        return parts.length ? parts[parts.length - 1] : value;
+      }
+
+      function formatBindingAccount(binding) {
+        return channelLabel(binding.channelType) + ' · ' + binding.chatId;
+      }
+
       function bindingRuntimeText(binding) {
         const status = binding.runtimeStatus || 'idle';
         const queuedCount = Number(binding.queuedCount || 0);
@@ -2413,36 +2614,98 @@ function renderHtml(): string {
           + '</article>';
       }
 
+      function renderBoundDesktopSessionCard(session) {
+        const bindings = bindingsForThread(session.threadId);
+        const marks = currentThreadMarks(session.threadId);
+        const markHtml = marks.map((mark) => '<span class="session-mark">' + escapeHtml(mark) + '</span>').join('');
+        const bindingTags = bindings.map((binding) => (
+          '<div class="session-binding-tag">'
+            + '<span class="session-binding-tag-label">' + escapeHtml(formatBindingAccount(binding)) + '</span>'
+            + '<button type="button" data-action="unbind-binding" data-binding-id="' + escapeHtml(binding.id) + '" data-channel="' + escapeHtml(binding.channelType) + '">解绑</button>'
+          + '</div>'
+        )).join('');
+
+        return ''
+          + '<article class="session-card' + (marks.length ? ' current-thread' : '') + '">'
+          +   '<div class="session-head">'
+          +     '<div class="session-main">'
+          +       '<div class="session-title-row"><div class="session-title">' + escapeHtml(session.title || 'Untitled Session') + '</div>' + markHtml + '</div>'
+          +       '<div class="session-thread">Thread: <code>' + escapeHtml(session.threadId) + '</code></div>'
+          +       '<div class="session-path">' + escapeHtml(session.cwd || '(no cwd)') + '</div>'
+          +       '<div class="session-binding-tags">' + bindingTags + '</div>'
+          +     '</div>'
+          +     '<div class="session-cell">'
+          +       '<div class="session-label">所属项目</div>'
+          +       '<div class="session-value">' + escapeHtml(projectNameFromCwd(session.cwd)) + '</div>'
+          +     '</div>'
+          +     '<div class="session-cell">'
+          +       '<div class="session-label">最近活动</div>'
+          +       '<div class="session-value">' + escapeHtml(formatTime(session.lastEventAt || '')) + '</div>'
+          +     '</div>'
+          +     '<div class="session-cell">'
+          +       '<div class="session-label">来源</div>'
+          +       '<div class="session-value">' + escapeHtml(session.originator || 'Codex Desktop') + '</div>'
+          +     '</div>'
+          +   '</div>'
+          + '</article>';
+      }
+
+      function renderDesktopSessionListItem(session) {
+        const marks = currentThreadMarks(session.threadId);
+        const markHtml = marks.map((mark) => '<span class="binding-table-mark">' + escapeHtml(mark) + '</span>').join('');
+
+        return ''
+          + '<article class="session-simple-item">'
+          +   '<div class="session-simple-main">'
+          +     '<div class="session-title-row"><div class="session-simple-title">' + escapeHtml(session.title || 'Untitled Session') + '</div>' + markHtml + '</div>'
+          +     '<div class="session-simple-thread">Thread: <code>' + escapeHtml(session.threadId) + '</code></div>'
+          +     '<div class="session-simple-time">最近活动：' + escapeHtml(formatTime(session.lastEventAt || '')) + '</div>'
+          +   '</div>'
+          +   '<div class="session-simple-side">'
+          +     '<div class="session-simple-path">' + escapeHtml(session.cwd || '(no cwd)') + '</div>'
+          +     '<div class="session-simple-time">来源：' + escapeHtml(session.originator || 'Codex Desktop') + '</div>'
+          +   '</div>'
+          +   '<div class="session-actions">'
+          +     '<button type="button" data-action="copy-thread" data-thread-id="' + escapeHtml(session.threadId) + '">复制 thread</button>'
+          +     '<button type="button" data-action="copy-bind-command" data-thread-id="' + escapeHtml(session.threadId) + '">复制命令</button>'
+          +   '</div>'
+          + '</article>';
+      }
+
       function renderDesktopSessions(result) {
         state.desktopSessions = result.sessions || [];
         state.desktopRoot = result.root || '-';
-        const groups = groupDesktopSessions(state.desktopSessions);
+        const sessions = state.desktopSessions || [];
+        const boundSessions = sessions.filter((session) => bindingsForThread(session.threadId).length > 0);
         document.getElementById('desktopSessionCount').textContent = String(state.desktopSessions.length);
         document.getElementById('desktopSessionMeta').textContent =
-          '扫描目录：' + state.desktopRoot + ' · ' + groups.length + ' 个工程 · ' + state.desktopSessions.length + ' 条桌面会话';
+          '扫描目录：' + state.desktopRoot + ' · ' + state.desktopSessions.length + ' 条桌面会话';
         document.getElementById('desktopRootStatus').textContent = state.desktopRoot;
 
+        const boundList = document.getElementById('boundSessionsList');
+        const boundMeta = document.getElementById('boundSessionsMeta');
         const list = document.getElementById('desktopSessionsList');
+        const allMeta = document.getElementById('allSessionsMeta');
+        boundMeta.textContent = boundSessions.length > 0
+          ? '当前有 ' + boundSessions.length + ' 条桌面会话已绑定到聊天。'
+          : '当前没有已绑定到聊天的桌面会话。';
+        allMeta.textContent = '按最近活动排序，共 ' + sessions.length + ' 条。';
+
+        if (boundSessions.length === 0) {
+          boundList.innerHTML = '<div class="binding-empty">当前没有任何桌面会话正在绑定到飞书或微信聊天。</div>';
+        } else {
+          boundList.innerHTML = boundSessions.map((session) => renderBoundDesktopSessionCard(session)).join('');
+        }
+
         if (state.desktopSessions.length === 0) {
           list.innerHTML = '<div class="notice ghost">当前没有发现桌面端会话。先在 Codex Desktop App 中打开或运行一个会话，再回到这里刷新。</div>';
           rerenderBindingPanels();
           return;
         }
 
-        list.innerHTML = groups.map((group) => ''
-          + '<section class="project-group">'
-          +   '<div class="project-group-head">'
-          +     '<div>'
-          +       '<div class="project-group-title">' + escapeHtml(group.name) + '</div>'
-          +       '<div class="project-group-path">' + escapeHtml(group.cwd || '(no cwd)') + '</div>'
-          +     '</div>'
-          +     '<div class="project-group-count">' + group.sessions.length + ' 个线程</div>'
-          +   '</div>'
-          +   '<div class="project-session-list">'
-          +     group.sessions.map((session) => renderDesktopSessionCard(session)).join('')
-          +   '</div>'
-          + '</section>'
-        ).join('');
+        list.innerHTML = '<div class="session-simple-list">'
+          + sessions.map((session) => renderDesktopSessionListItem(session)).join('')
+          + '</div>';
 
         rerenderBindingPanels();
       }
@@ -2475,30 +2738,30 @@ function renderHtml(): string {
         const list = document.getElementById(listId);
         const meta = document.getElementById(metaId);
         meta.textContent = bindings.length > 0
-          ? '当前已发现 ' + bindings.length + ' 个聊天绑定。这里只显示和会话页一致的命名桌面线程。'
+          ? '当前已发现 ' + bindings.length + ' 个聊天绑定。一个会话只能绑定一个聊天。这里只显示和会话页一致的命名桌面线程。'
           : emptyText;
 
         if (bindings.length === 0) {
+          state.activeBindingByChannel[channelType] = '';
           list.innerHTML = '<div class="binding-empty">' + escapeHtml(emptyText) + '</div>';
           return;
         }
 
-        list.innerHTML = bindings.map((binding) => {
-          return ''
-            + '<article class="binding-item" data-binding-id="' + escapeHtml(binding.id) + '">'
-            +   '<div class="binding-head">'
-            +     '<div class="binding-title">' + escapeHtml(binding.chatId) + '</div>'
-            +     '<div class="small">' + escapeHtml(binding.mode) + '</div>'
-            +   '</div>'
-            +   '<div class="binding-detail">当前会话：<code>' + escapeHtml(binding.currentSessionId.slice(0, 8)) + '...</code> · ' + escapeHtml(binding.currentSessionName) + '</div>'
-            +   '<div class="binding-detail">当前目标：' + escapeHtml(binding.currentTargetLabel || '未绑定') + '</div>'
-            +   '<div class="binding-detail">当前 thread：<code>' + escapeHtml(binding.currentThreadId || 'not-shared') + '</code></div>'
-            +   '<div class="binding-detail">运行状态：' + escapeHtml(bindingRuntimeText(binding)) + '</div>'
-            +   '<div class="binding-detail">共享镜像：' + escapeHtml(bindingMirrorText(binding)) + '</div>'
-            +   '<div class="binding-detail">目录：' + escapeHtml(binding.workingDirectory || '~') + '</div>'
-            +   renderBindingTable(binding)
-            + '</article>';
-        }).join('');
+        const activeBindingId = ensureActiveBinding(channelType, bindings);
+        const activeBinding = bindings.find((binding) => binding.id === activeBindingId) || bindings[0];
+        const tabs = bindings.length > 1
+          ? '<div class="binding-tabs">' + bindings.map((binding) => (
+              '<button type="button" class="binding-tab' + (binding.id === activeBinding.id ? ' active' : '') + '"'
+                + ' data-action="select-binding-tab"'
+                + ' data-channel="' + escapeHtml(channelType) + '"'
+                + ' data-binding-id="' + escapeHtml(binding.id) + '"'
+                + ' title="' + escapeHtml(binding.chatId) + '">'
+                + escapeHtml(bindingTabLabel(binding))
+              + '</button>'
+            )).join('') + '</div>'
+          : '';
+
+        list.innerHTML = tabs + renderBindingCard(activeBinding);
       }
 
       function renderWeixinAccounts() {
@@ -2658,7 +2921,7 @@ function renderHtml(): string {
       }
 
       async function loadDesktopSessions() {
-        const result = await api('/api/desktop-sessions?limit=36');
+        const result = await api('/api/desktop-sessions');
         renderDesktopSessions(result);
       }
 
@@ -2900,56 +3163,65 @@ function renderHtml(): string {
         }
       });
 
-      document.getElementById('desktopSessionsList').addEventListener('click', async (event) => {
+      async function handleSessionListAction(event) {
         const source = event.target instanceof Element ? event.target : null;
         const target = source ? source.closest('button[data-action]') : null;
         if (!target) return;
 
         try {
-          if (target.dataset.action === 'bind-channel') {
-            const bindingId = target.dataset.bindingId || '';
-            const targetKey = target.dataset.targetKey || '';
-            const channelType = target.dataset.channel || '';
-            if (!bindingId || !targetKey) {
-              throw new Error('当前通道没有可切换的绑定，请先在通道页完成接入。');
-            }
-            const result = await api('/api/bindings/update', {
-              method: 'POST',
-              body: JSON.stringify({
-                bindingId,
-                targetKey,
-              }),
-            });
-            renderBindings(result);
-            showMessage(
-              'desktopMessage',
-              'success',
-              (channelType === 'weixin' ? '微信' : '飞书') + '已切换到当前会话。'
-            );
-            return;
-          }
           if (target.dataset.action === 'copy-thread') {
             await copyText(target.dataset.threadId || '', 'Thread ID 已复制。');
             return;
           }
           if (target.dataset.action === 'copy-bind-command') {
-            await copyText(shortThreadCommand(target.dataset.threadId || ''), '飞书接管命令已复制。');
+            await copyText(shortThreadCommand(target.dataset.threadId || ''), '接管命令已复制。');
             return;
-          }
-          if (target.dataset.action === 'copy-cwd') {
-            await copyText(target.dataset.cwd || '', '工作目录已复制。');
           }
         } catch (error) {
           showMessage('desktopMessage', 'error', error.message);
         }
+      }
+
+      document.getElementById('desktopSessionsList').addEventListener('click', handleSessionListAction);
+      document.getElementById('boundSessionsList').addEventListener('click', async (event) => {
+        const source = event.target instanceof Element ? event.target : null;
+        const target = source ? source.closest('button[data-action]') : null;
+        if (!target) return;
+
+        if (target.dataset.action === 'unbind-binding') {
+          const channelType = target.dataset.channel || 'feishu';
+          await handleBindingAction(event, channelType, 'desktopMessage');
+          return;
+        }
+
+        await handleSessionListAction(event);
       });
 
       async function handleBindingAction(event, channelType, messageId) {
         const source = event.target instanceof Element ? event.target : null;
-        const target = source ? source.closest('button[data-action="switch-binding-target"]') : null;
+        const target = source ? source.closest('button[data-action]') : null;
         if (!target) return;
 
         try {
+          if (target.dataset.action === 'select-binding-tab') {
+            state.activeBindingByChannel[channelType] = target.dataset.bindingId || '';
+            rerenderBindingPanels();
+            return;
+          }
+          if (target.dataset.action === 'unbind-binding') {
+            const result = await api('/api/bindings/delete', {
+              method: 'POST',
+              body: JSON.stringify({
+                bindingId: target.dataset.bindingId,
+              }),
+            });
+            renderBindings(result);
+            showMessage(messageId, 'success', channelType === 'feishu' ? '飞书绑定已解绑。' : '微信绑定已解绑。');
+            return;
+          }
+          if (target.dataset.action !== 'switch-binding-target') {
+            return;
+          }
           const result = await api('/api/bindings/update', {
             method: 'POST',
             body: JSON.stringify({
@@ -3098,7 +3370,8 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && url.pathname === '/api/desktop-sessions') {
-      const limit = parsePositiveInt(url.searchParams.get('limit'), 10);
+      const limitParam = url.searchParams.get('limit');
+      const limit = limitParam ? parsePositiveInt(limitParam, 10) : undefined;
       json(response, 200, {
         root: getCodexSessionsRoot(),
         sessions: listDesktopSessions(limit),
@@ -3181,6 +3454,28 @@ const server = http.createServer(async (request, response) => {
       json(response, 200, {
         ok: true,
         updated,
+        bindings: listBindingSummaries(store),
+        channels: {
+          feishu: getChannelBindingSummaries(store, 'feishu'),
+          weixin: getChannelBindingSummaries(store, 'weixin'),
+        },
+        options: listBindingTargetOptions(store, 12),
+      });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/bindings/delete') {
+      const payload = await readJsonBody<Record<string, unknown>>(request);
+      const bindingId = asString(payload.bindingId);
+      if (!bindingId) {
+        json(response, 400, { error: 'bindingId 不能为空。' });
+        return;
+      }
+
+      const store = createUiStore();
+      removeBinding(store, bindingId);
+      json(response, 200, {
+        ok: true,
         bindings: listBindingSummaries(store),
         channels: {
           feishu: getChannelBindingSummaries(store, 'feishu'),

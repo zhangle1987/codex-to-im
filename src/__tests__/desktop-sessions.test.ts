@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
   listDesktopSessions,
@@ -108,6 +109,193 @@ describe('listDesktopSessions', () => {
     const sessions = listDesktopSessions(10);
 
     assert.equal(sessions.length, 0);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('hides desktop threads whose cwd points at the internal skills workspace', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-sessions-'));
+    process.env.CODEX_HOME = tempRoot;
+
+    const sessionsDir = path.join(tempRoot, 'sessions', '2026', '03', '24');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+
+    const rolloutPath = path.join(
+      sessionsDir,
+      'rollout-2026-03-24T10-13-10-019d1d9e-0be2-7053-886d-ff078ef17084.jsonl',
+    );
+    fs.writeFileSync(
+      rolloutPath,
+      [
+        JSON.stringify({
+          timestamp: '2026-03-24T02:13:10.245Z',
+          type: 'session_meta',
+          payload: {
+            id: '019d1d9e-0be2-7053-886d-ff078ef17084',
+            timestamp: '2026-03-24T02:13:10.245Z',
+            cwd: path.join(tempRoot, 'skills', 'codex-to-im'),
+            originator: 'Codex Desktop',
+            source: 'vscode',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-03-24T02:13:11.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'user_message',
+            message: '请阅读和了解这个项目',
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const sessions = listDesktopSessions(12);
+
+    assert.equal(sessions.length, 0);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('hides desktop threads whose project root is no longer in the desktop saved workspace list', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-sessions-'));
+    process.env.CODEX_HOME = tempRoot;
+
+    const sessionsDir = path.join(tempRoot, 'sessions', '2026', '03', '24');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+
+    const visibleThreadId = '019cdc07-1238-7573-a42a-e5f2341f00b9';
+    const hiddenThreadId = '019cdb48-d2a3-7821-83dd-14a61f629760';
+    for (const [threadId, cwd, title] of [
+      [visibleThreadId, 'C:\\Users\\zhangle\\WeChatProjects\\miniprogram-1', '保留的桌面项目'],
+      [hiddenThreadId, 'D:\\codex\\dinosaur', '已移除的桌面项目'],
+    ] as const) {
+      const rolloutPath = path.join(sessionsDir, `rollout-2026-03-24T10-00-00-${threadId}.jsonl`);
+      fs.writeFileSync(
+        rolloutPath,
+        [
+          JSON.stringify({
+            timestamp: '2026-03-24T02:00:00.000Z',
+            type: 'session_meta',
+            payload: {
+              id: threadId,
+              timestamp: '2026-03-24T02:00:00.000Z',
+              cwd,
+              originator: 'Codex Desktop',
+              source: 'vscode',
+            },
+          }),
+          JSON.stringify({
+            timestamp: '2026-03-24T02:00:01.000Z',
+            type: 'event_msg',
+            payload: {
+              type: 'user_message',
+              message: title,
+            },
+          }),
+        ].join('\n'),
+        'utf-8',
+      );
+    }
+
+    fs.writeFileSync(
+      path.join(tempRoot, '.codex-global-state.json'),
+      JSON.stringify({
+        'electron-saved-workspace-roots': ['C:\\Users\\zhangle\\WeChatProjects\\miniprogram-1'],
+      }),
+      'utf-8',
+    );
+
+    const sessions = listDesktopSessions();
+
+    assert.deepEqual(sessions.map((session) => session.threadId), [visibleThreadId]);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('includes freshly created desktop threads that have reached session_index before the state db catches up', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-sessions-'));
+    process.env.CODEX_HOME = tempRoot;
+
+    const sessionsDir = path.join(tempRoot, 'sessions', '2026', '03', '26');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+
+    const visibleThreadId = '019d2303-06e4-73e2-8857-00444446ceb0';
+    const freshThreadId = '019d27aa-5d8d-7ab3-89df-3d28fed5730a';
+    const staleThreadId = '019cdb48-d2a3-7821-83dd-14a61f629760';
+
+    for (const [threadId, title] of [
+      [visibleThreadId, '当前桌面可见会话'],
+      [freshThreadId, '测试工程2'],
+      [staleThreadId, '已经不在桌面里的旧会话'],
+    ] as const) {
+      const rolloutPath = path.join(sessionsDir, `rollout-2026-03-26T09-00-00-${threadId}.jsonl`);
+      fs.writeFileSync(
+        rolloutPath,
+        [
+          JSON.stringify({
+            timestamp: '2026-03-26T01:00:00.000Z',
+            type: 'session_meta',
+            payload: {
+              id: threadId,
+              timestamp: '2026-03-26T01:00:00.000Z',
+              cwd: 'D:\\codex\\test',
+              originator: 'Codex Desktop',
+              source: 'vscode',
+            },
+          }),
+          JSON.stringify({
+            timestamp: '2026-03-26T01:00:01.000Z',
+            type: 'event_msg',
+            payload: {
+              type: 'user_message',
+              message: title,
+            },
+          }),
+        ].join('\n'),
+        'utf-8',
+      );
+    }
+
+    fs.writeFileSync(
+      path.join(tempRoot, 'session_index.jsonl'),
+      [
+        JSON.stringify({
+          id: visibleThreadId,
+          thread_name: '当前桌面可见会话',
+          updated_at: '2026-03-26T01:00:00.000Z',
+        }),
+        JSON.stringify({
+          id: staleThreadId,
+          thread_name: '已经不在桌面里的旧会话',
+          updated_at: '2026-03-25T01:00:00.000Z',
+        }),
+        JSON.stringify({
+          id: freshThreadId,
+          thread_name: '测试工程2',
+          updated_at: '2026-03-26T01:03:12.626Z',
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const db = new DatabaseSync(path.join(tempRoot, 'state_5.sqlite'));
+    db.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        updated_at INTEGER NOT NULL,
+        archived INTEGER NOT NULL,
+        source TEXT NOT NULL
+      );
+    `);
+    db.prepare(`INSERT INTO threads (id, updated_at, archived, source) VALUES (?, ?, 0, 'vscode')`)
+      .run(visibleThreadId, Math.floor(Date.parse('2026-03-26T01:00:00.000Z') / 1000));
+    db.close();
+
+    const sessions = listDesktopSessions(10);
+    const threadIds = sessions.map((session) => session.threadId);
+
+    assert.deepEqual(threadIds, [freshThreadId, visibleThreadId]);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
