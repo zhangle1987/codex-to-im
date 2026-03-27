@@ -96,7 +96,7 @@ export function getBridgeStatus(): BridgeStatus {
   return {
     ...status,
     pid,
-    running: status.running ?? true,
+    running: true,
   };
 }
 
