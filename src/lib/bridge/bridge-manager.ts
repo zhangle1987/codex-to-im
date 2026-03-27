@@ -77,6 +77,8 @@ const HISTORY_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
 const REASONING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 const MODE_OPTIONS_TEXT = '可选：`code`（直接执行，默认） `plan`（先分析再行动） `ask`（轻对话 / 草稿）';
 const REASONING_OPTIONS_TEXT = '可选：`1=minimal` `2=low` `3=medium` `4=high` `5=xhigh`';
+const DEFAULT_DESKTOP_THREAD_LIST_LIMIT = 10;
+const MAX_DESKTOP_THREAD_LIST_LIMIT = 200;
 const MIRROR_POLL_INTERVAL_MS = 2_500;
 const MIRROR_WATCH_DEBOUNCE_MS = 350;
 const MIRROR_EVENT_BATCH_LIMIT = 8;
@@ -180,21 +182,22 @@ function resolveByIndexOrPrefix<T>(
   return { match: null, ambiguous: false };
 }
 
-function getDisplayedDesktopThreads(limit = 10) {
+function getDisplayedDesktopThreads(limit = DEFAULT_DESKTOP_THREAD_LIST_LIMIT) {
   return listDesktopSessions(limit);
 }
 
 function parseDesktopThreadListArgs(args: string): { showAll: boolean; limit: number } | null {
   const trimmed = args.trim().toLowerCase();
   if (!trimmed) {
-    return { showAll: false, limit: 10 };
+    return { showAll: false, limit: DEFAULT_DESKTOP_THREAD_LIST_LIMIT };
   }
   if (trimmed === 'all') {
-    return { showAll: true, limit: 0 };
+    return { showAll: true, limit: MAX_DESKTOP_THREAD_LIST_LIMIT };
   }
   const match = trimmed.match(/^n\s+(\d+)$/);
   if (!match) return null;
-  const limit = Number(match[1]);
+  const requestedLimit = Number(match[1]);
+  const limit = Math.min(requestedLimit, MAX_DESKTOP_THREAD_LIST_LIMIT);
   if (!Number.isInteger(limit) || limit < 1) return null;
   return { showAll: false, limit };
 }
@@ -338,7 +341,7 @@ function buildDesktopThreadsCommandResponse(
   limit = 10,
 ): string {
   return buildIndexedCommandList(
-    showAll ? '全部桌面会话' : `最近 ${limit} 条桌面会话`,
+    showAll ? `桌面会话（最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条）` : `最近 ${limit} 条桌面会话`,
     desktopSessions.map((session) => ({
       heading: session.title || '未命名线程',
       details: [
@@ -349,12 +352,12 @@ function buildDesktopThreadsCommandResponse(
     showAll
       ? [
           '发送 `/t 1` 可接管第 1 条桌面会话。',
-          '发送 `/t` 可只看最近 10 条。',
+          `发送 \`/t\` 可只看最近 ${DEFAULT_DESKTOP_THREAD_LIST_LIMIT} 条。`,
         ]
       : [
           '发送 `/t 1` 可接管第 1 条桌面会话。',
-          '发送 `/t all` 可查看全部桌面会话。',
-          '发送 `/t n 100` 可查看最近 100 条桌面会话。',
+          `发送 \`/t all\` 可查看最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条桌面会话。`,
+          `发送 \`/t n 100\` 可查看最近 100 条桌面会话（最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条）。`,
         ],
     markdown,
   );
@@ -3068,11 +3071,11 @@ async function handleCommand(
       }
 
       if (!args) {
-        response = '用法：/thread <序号>，或 /thread 0 进入临时草稿线程；发送 /t all 查看全部，或 /t n 100 查看最近 100 条桌面会话';
+        response = `用法：/thread <序号>，或 /thread 0 进入临时草稿线程；发送 /t all 查看最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条，或 /t n 100 查看最近 100 条桌面会话`;
         break;
       }
       if (args === 'all') {
-        const desktopSessions = getDisplayedDesktopThreads(undefined);
+        const desktopSessions = getDisplayedDesktopThreads(MAX_DESKTOP_THREAD_LIST_LIMIT);
         if (desktopSessions.length === 0) {
           response = '没有找到桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。';
           break;
@@ -3084,7 +3087,7 @@ async function handleCommand(
         );
         break;
       }
-      const displayedThreads = getDisplayedDesktopThreads(10);
+      const displayedThreads = getDisplayedDesktopThreads(DEFAULT_DESKTOP_THREAD_LIST_LIMIT);
       const threadPick = resolveByIndexOrPrefix(args, displayedThreads, (session) => session.threadId);
       if (threadPick.ambiguous) {
         response = '匹配到多个桌面会话，请先发送 `/t` 查看列表，再用 `/t 1` 这种序号切换。';
@@ -3143,11 +3146,11 @@ async function handleCommand(
     case '/threads': {
       const listArgs = parseDesktopThreadListArgs(args);
       if (!listArgs) {
-        response = '用法：/threads、/threads all、/threads n 100';
+        response = `用法：/threads、/threads all、/threads n 100（最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条）`;
         break;
       }
       const { showAll, limit } = listArgs;
-      const desktopSessions = getDisplayedDesktopThreads(showAll ? undefined : limit);
+      const desktopSessions = getDisplayedDesktopThreads(limit);
       if (desktopSessions.length === 0) {
         response = showAll
           ? '没有找到桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。'
@@ -3566,9 +3569,9 @@ async function handleCommand(
         '**常用**',
         '- `/` 当前会话',
         '- `/h` 帮助',
-        '- `/t` 最近 10 条桌面会话',
-        '- `/t all` 全部桌面会话',
-        '- `/t n 100` 最近 100 条桌面会话',
+        `- \`/t\` 最近 ${DEFAULT_DESKTOP_THREAD_LIST_LIMIT} 条桌面会话`,
+        `- \`/t all\` 最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条桌面会话`,
+        `- \`/t n 100\` 最近 100 条桌面会话（最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条）`,
         '- `/t 1` 接管第 1 条会话',
         '- `/n` 在当前工作目录下新建线程（仅保证 IM 可继续，不会自动出现在桌面会话列表）',
         '- `/n proj1` 在默认工作空间下新建项目会话',
@@ -3637,6 +3640,7 @@ export const _testOnly = {
   resolveNewWorkingDirectory,
   resolveNewSessionWorkingDirectory,
   resolveCommandAlias,
+  parseDesktopThreadListArgs,
   toUserVisibleBindingError,
   toUserVisibleCommandError,
   normalizeReasoningEffort,

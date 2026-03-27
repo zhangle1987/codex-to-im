@@ -175,6 +175,13 @@ describe('bridge-manager resolveCommandAlias', () => {
     assert.equal(_testOnly.resolveCommandAlias('/t', '1'), '/thread');
   });
 
+  it('caps desktop thread list requests at 200 items', () => {
+    assert.deepEqual(_testOnly.parseDesktopThreadListArgs(''), { showAll: false, limit: 10 });
+    assert.deepEqual(_testOnly.parseDesktopThreadListArgs('all'), { showAll: true, limit: 200 });
+    assert.deepEqual(_testOnly.parseDesktopThreadListArgs('n 100'), { showAll: false, limit: 100 });
+    assert.deepEqual(_testOnly.parseDesktopThreadListArgs('n 500'), { showAll: false, limit: 200 });
+  });
+
   it('maps short session and history aliases', () => {
     assert.equal(_testOnly.resolveCommandAlias('/s', ''), '/sessions');
     assert.equal(_testOnly.resolveCommandAlias('/s', '2'), '/use');

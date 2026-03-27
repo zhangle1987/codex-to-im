@@ -227,7 +227,7 @@ codex-to-im stop
 - IM 里也支持一组短命令别名：
 - `/` / `/status` 当前会话
 - `/h` / `/help` 帮助
-- `/t` / `/threads` 最近 10 条桌面会话，`/t all` / `/threads all` 查看全部，`/t n 100` / `/threads n 100` 查看最近 100 条，`/t 1` / `/thread 1` 接管
+- `/t` / `/threads` 最近 10 条桌面会话，`/t all` / `/threads all` 最多查看 200 条，`/t n 100` / `/threads n 100` 查看最近 100 条（同样最多 200 条），`/t 1` / `/thread 1` 接管
 - `/n` / `/new` 在当前正式会话目录下新建线程；这类线程当前只保证在 IM 中可继续，不会自动出现在 Codex Desktop 会话列表中
 - `/n proj1` / `/new proj1` 新建项目会话
 - `/m` / `/mode` 查看或切换模式，可选 `code` / `plan` / `ask`
