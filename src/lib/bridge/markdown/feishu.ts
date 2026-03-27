@@ -93,14 +93,37 @@ export function htmlToFeishuMarkdown(html: string): string {
 
 /**
  * Build tool progress markdown lines.
- * Each tool shows an icon based on status: 🔄 Running, ✅ Complete, ❌ Error.
+ * Tools are grouped by name so repeated shell/apply_patch/update_plan calls
+ * do not flood the card. The icon reflects the highest-priority live state:
+ * running > error > complete.
  */
 export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   if (tools.length === 0) return '';
-  const lines = tools.map((tc) => {
-    const icon = tc.status === 'running' ? '🔄' : tc.status === 'complete' ? '✅' : '❌';
-    return `${icon} \`${tc.name}\``;
+  const grouped = new Map<string, { running: number; complete: number; error: number }>();
+
+  for (const tool of tools) {
+    const key = tool.name || 'tool';
+    const bucket = grouped.get(key) || { running: 0, complete: 0, error: 0 };
+    if (tool.status === 'running') bucket.running += 1;
+    else if (tool.status === 'error') bucket.error += 1;
+    else bucket.complete += 1;
+    grouped.set(key, bucket);
+  }
+
+  const lines = Array.from(grouped.entries()).map(([name, counts]) => {
+    const total = counts.running + counts.complete + counts.error;
+    const icon = counts.running > 0 ? '🔄' : counts.error > 0 ? '❌' : '✅';
+    const countSuffix = total > 1 ? ` ×${total}` : '';
+    const detailParts: string[] = [];
+    if (counts.running > 0) detailParts.push(`运行中 ${counts.running}`);
+    if (counts.error > 0) detailParts.push(`异常 ${counts.error}`);
+    if ((counts.running > 0 || counts.error > 0) && counts.complete > 0) {
+      detailParts.push(`完成 ${counts.complete}`);
+    }
+    const detailSuffix = detailParts.length > 0 ? `（${detailParts.join(' / ')}）` : '';
+    return `${icon} \`${name}\`${countSuffix}${detailSuffix}`;
   });
+
   return lines.join('\n');
 }
 
