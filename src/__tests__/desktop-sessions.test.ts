@@ -645,6 +645,104 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('extracts text from structured function_call_output payloads without crashing', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-03-25T00:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'task_started',
+            turn_id: 'turn-structured',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-03-25T00:00:01.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call_output',
+            call_id: 'call-structured',
+            output: [
+              { type: 'input_text', text: 'App terminal snapshot for this thread:' },
+              { type: 'input_image', image_url: 'data:image/png;base64,AAAA' },
+              { type: 'input_text', text: 'cwd: D:\\codex\\demo' },
+            ],
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const records = readDesktopSessionMirrorRecordStreamByFilePath(filePath);
+
+    assert.deepEqual(
+      records.map((record) => ({
+        type: record.type,
+        content: record.content,
+        turnId: record.turnId,
+        toolId: record.toolId,
+      })),
+      [
+        {
+          type: 'task_started',
+          content: '',
+          turnId: 'turn-structured',
+          toolId: undefined,
+        },
+        {
+          type: 'tool_finished',
+          content: 'App terminal snapshot for this thread: cwd: D:\\codex\\demo',
+          turnId: 'turn-structured',
+          toolId: 'call-structured',
+        },
+      ],
+    );
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('extracts text from structured task_complete payloads', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-03-25T00:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'task_complete',
+            turn_id: 'turn-structured-complete',
+            last_agent_message: [
+              { type: 'output_text', text: '结论：' },
+              { type: 'output_text', text: '- 第一项' },
+              { type: 'output_text', text: '- 第二项' },
+            ],
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const records = readDesktopSessionMirrorRecordStreamByFilePath(filePath);
+
+    assert.deepEqual(records, [
+      {
+        signature: records[0]?.signature,
+        type: 'task_complete',
+        role: 'assistant',
+        content: '结论：\n\n- 第一项\n\n- 第二项',
+        timestamp: '2026-03-25T00:00:00.000Z',
+        turnId: 'turn-structured-complete',
+      },
+    ]);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('reads appended mirror records and preserves trailing partial text', () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
     const filePath = path.join(tempRoot, 'rollout.jsonl');

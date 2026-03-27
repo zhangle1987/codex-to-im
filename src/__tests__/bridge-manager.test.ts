@@ -170,6 +170,8 @@ describe('bridge-manager resolveCommandAlias', () => {
 
   it('maps short desktop thread alias based on args', () => {
     assert.equal(_testOnly.resolveCommandAlias('/t', ''), '/threads');
+    assert.equal(_testOnly.resolveCommandAlias('/t', 'all'), '/threads');
+    assert.equal(_testOnly.resolveCommandAlias('/t', 'n 10'), '/threads');
     assert.equal(_testOnly.resolveCommandAlias('/t', '1'), '/thread');
   });
 

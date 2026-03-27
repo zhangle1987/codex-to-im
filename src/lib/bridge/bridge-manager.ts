@@ -133,7 +133,11 @@ function resolveCommandAlias(rawCommand: string, args: string): string {
     case '/h':
       return '/help';
     case '/t':
-      return args ? '/thread' : '/threads';
+      return !args
+        ? '/threads'
+        : /^(all|n\b)/i.test(args.trim())
+          ? '/threads'
+          : '/thread';
     case '/s':
       return args ? '/use' : '/sessions';
     case '/n':
@@ -178,6 +182,21 @@ function resolveByIndexOrPrefix<T>(
 
 function getDisplayedDesktopThreads(limit = 10) {
   return listDesktopSessions(limit);
+}
+
+function parseDesktopThreadListArgs(args: string): { showAll: boolean; limit: number } | null {
+  const trimmed = args.trim().toLowerCase();
+  if (!trimmed) {
+    return { showAll: false, limit: 10 };
+  }
+  if (trimmed === 'all') {
+    return { showAll: true, limit: 0 };
+  }
+  const match = trimmed.match(/^n\s+(\d+)$/);
+  if (!match) return null;
+  const limit = Number(match[1]);
+  if (!Number.isInteger(limit) || limit < 1) return null;
+  return { showAll: false, limit };
 }
 
 function getDisplayedBridgeSessions(currentSessionId?: string): BridgeSession[] {
@@ -316,9 +335,10 @@ function buildDesktopThreadsCommandResponse(
   desktopSessions: ReturnType<typeof getDisplayedDesktopThreads>,
   markdown: boolean,
   showAll: boolean,
+  limit = 10,
 ): string {
   return buildIndexedCommandList(
-    showAll ? '全部桌面会话' : '最近桌面会话',
+    showAll ? '全部桌面会话' : `最近 ${limit} 条桌面会话`,
     desktopSessions.map((session) => ({
       heading: session.title || '未命名线程',
       details: [
@@ -334,6 +354,7 @@ function buildDesktopThreadsCommandResponse(
       : [
           '发送 `/t 1` 可接管第 1 条桌面会话。',
           '发送 `/t all` 可查看全部桌面会话。',
+          '发送 `/t n 100` 可查看最近 100 条桌面会话。',
         ],
     markdown,
   );
@@ -2165,7 +2186,19 @@ async function reconcileMirrorSubscriptions(): Promise<void> {
   try {
     syncMirrorSubscriptionSet();
     for (const subscription of state.mirrorSubscriptions.values()) {
-      await reconcileMirrorSubscription(subscription);
+      try {
+        await reconcileMirrorSubscription(subscription);
+      } catch (error) {
+        stopMirrorStreaming(subscription, 'interrupted');
+        resetMirrorReadState(subscription);
+        subscription.status = 'stale';
+        subscription.dirty = false;
+        console.error(
+          `[bridge-manager] Mirror reconcile failed for thread ${subscription.threadId}:`,
+          error instanceof Error ? error.stack || error.message : error,
+        );
+        syncMirrorSessionState(subscription.sessionId);
+      }
     }
   } finally {
     state.mirrorSyncInFlight = false;
@@ -3035,11 +3068,11 @@ async function handleCommand(
       }
 
       if (!args) {
-        response = '用法：/thread <序号>，或 /thread 0 进入临时草稿线程；发送 /t all 可查看全部桌面会话';
+        response = '用法：/thread <序号>，或 /thread 0 进入临时草稿线程；发送 /t all 查看全部，或 /t n 100 查看最近 100 条桌面会话';
         break;
       }
       if (args === 'all') {
-        const desktopSessions = getDisplayedDesktopThreads();
+        const desktopSessions = getDisplayedDesktopThreads(undefined);
         if (desktopSessions.length === 0) {
           response = '没有找到桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。';
           break;
@@ -3108,8 +3141,13 @@ async function handleCommand(
     }
 
     case '/threads': {
-      const showAll = args === 'all';
-      const desktopSessions = getDisplayedDesktopThreads(showAll ? undefined : 10);
+      const listArgs = parseDesktopThreadListArgs(args);
+      if (!listArgs) {
+        response = '用法：/threads、/threads all、/threads n 100';
+        break;
+      }
+      const { showAll, limit } = listArgs;
+      const desktopSessions = getDisplayedDesktopThreads(showAll ? undefined : limit);
       if (desktopSessions.length === 0) {
         response = showAll
           ? '没有找到桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。'
@@ -3120,6 +3158,7 @@ async function handleCommand(
         desktopSessions,
         responseParseMode === 'Markdown',
         showAll,
+        limit,
       );
       break;
     }
@@ -3529,6 +3568,7 @@ async function handleCommand(
         '- `/h` 帮助',
         '- `/t` 最近 10 条桌面会话',
         '- `/t all` 全部桌面会话',
+        '- `/t n 100` 最近 100 条桌面会话',
         '- `/t 1` 接管第 1 条会话',
         '- `/n` 在当前工作目录下新建线程（仅保证 IM 可继续，不会自动出现在桌面会话列表）',
         '- `/n proj1` 在默认工作空间下新建项目会话',

@@ -70,14 +70,14 @@ interface SessionMessageLine {
     type?: string;
     role?: string;
     phase?: string;
-    name?: string;
+    name?: unknown;
     arguments?: string;
-    call_id?: string;
-    output?: string;
+    call_id?: unknown;
+    output?: unknown;
     is_error?: boolean;
     content?: Array<{
       type?: string;
-      text?: string;
+      text?: unknown;
     }>;
   };
 }
@@ -87,8 +87,8 @@ interface SessionEventLine {
   type?: string;
   payload?: {
     type?: string;
-    message?: string;
-    last_agent_message?: string;
+    message?: unknown;
+    last_agent_message?: unknown;
     turn_id?: string;
   };
 }
@@ -420,7 +420,7 @@ function buildFallbackTitle(threadId: string, filePath: string, cwd: string): st
 
       if (!isSessionEventLine(parsed) || parsed.payload?.type !== 'user_message') continue;
 
-      const firstUserMessage = trimTitle(normalizeFreeText(parsed.payload.message || ''));
+      const firstUserMessage = trimTitle(extractNormalizedFreeText(parsed.payload.message));
       if (firstUserMessage) return firstUserMessage;
     }
   } catch {
@@ -498,6 +498,52 @@ function normalizeFreeText(text: string): string {
 
 function normalizeStructuredText(text: string): string {
   return text.replace(/\r\n/g, '\n').trim();
+}
+
+function collectStructuredTextParts(value: unknown, parts: string[], depth = 0): void {
+  if (value == null || depth > 6) return;
+  if (typeof value === 'string') {
+    parts.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectStructuredTextParts(item, parts, depth + 1);
+    }
+    return;
+  }
+  if (typeof value !== 'object') return;
+
+  const record = value as Record<string, unknown>;
+  if (typeof record.text === 'string') {
+    parts.push(record.text);
+  }
+  if (typeof record.message === 'string') {
+    parts.push(record.message);
+  }
+  if (typeof record.summary === 'string') {
+    parts.push(record.summary);
+  }
+  if ('content' in record) {
+    collectStructuredTextParts(record.content, parts, depth + 1);
+  }
+  if ('items' in record) {
+    collectStructuredTextParts(record.items, parts, depth + 1);
+  }
+}
+
+function extractNormalizedFreeText(value: unknown): string {
+  if (typeof value === 'string') return normalizeFreeText(value);
+  const parts: string[] = [];
+  collectStructuredTextParts(value, parts);
+  return parts.length > 0 ? normalizeFreeText(parts.join('\n')) : '';
+}
+
+function extractNormalizedStructuredText(value: unknown): string {
+  if (typeof value === 'string') return normalizeStructuredText(value);
+  const parts: string[] = [];
+  collectStructuredTextParts(value, parts);
+  return parts.length > 0 ? normalizeStructuredText(parts.join('\n\n')) : '';
 }
 
 function createDesktopEventSignature(rawLine: string): string {
@@ -620,7 +666,7 @@ function pushDesktopSessionEvent(
   rawLine: string,
 ): void {
   if (isSessionEventLine(parsed) && parsed.payload?.type === 'user_message') {
-    const text = normalizeStructuredText(parsed.payload.message || '');
+    const text = extractNormalizedStructuredText(parsed.payload.message);
     if (!text) return;
     events.push({
       signature: createDesktopEventSignature(rawLine),
@@ -632,7 +678,7 @@ function pushDesktopSessionEvent(
   }
 
   if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_complete') {
-    const text = normalizeStructuredText(parsed.payload.last_agent_message || '');
+    const text = extractNormalizedStructuredText(parsed.payload.last_agent_message);
     if (!text) return;
 
     const lastEvent = events[events.length - 1];
@@ -679,7 +725,7 @@ function pushDesktopMirrorRecord(
   }
 
   if (isSessionEventLine(parsed) && parsed.payload?.type === 'user_message') {
-    const text = normalizeStructuredText(parsed.payload.message || '');
+    const text = extractNormalizedStructuredText(parsed.payload.message);
     if (!text) return;
     records.push({
       signature: createDesktopEventSignature(rawLine),
@@ -697,7 +743,7 @@ function pushDesktopMirrorRecord(
       signature: createDesktopEventSignature(rawLine),
       type: 'task_complete',
       role: 'assistant',
-      content: normalizeStructuredText(parsed.payload.last_agent_message || ''),
+      content: extractNormalizedStructuredText(parsed.payload.last_agent_message),
       timestamp: parsed.timestamp || '',
       turnId: parsed.payload.turn_id || '',
     });
@@ -719,8 +765,8 @@ function pushDesktopMirrorRecord(
   }
 
   if (isSessionMessageLine(parsed) && parsed.payload?.type === 'function_call') {
-    const toolName = normalizeFreeText(parsed.payload.name || '');
-    const toolId = normalizeFreeText(parsed.payload.call_id || '') || createDesktopEventSignature(rawLine);
+    const toolName = extractNormalizedFreeText(parsed.payload.name);
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || createDesktopEventSignature(rawLine);
     if (!toolName) return;
     records.push({
       signature: createDesktopEventSignature(rawLine),
@@ -735,11 +781,11 @@ function pushDesktopMirrorRecord(
   }
 
   if (isSessionMessageLine(parsed) && parsed.payload?.type === 'function_call_output') {
-    const toolId = normalizeFreeText(parsed.payload.call_id || '') || createDesktopEventSignature(rawLine);
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || createDesktopEventSignature(rawLine);
     records.push({
       signature: createDesktopEventSignature(rawLine),
       type: 'tool_finished',
-      content: normalizeFreeText(parsed.payload.output || ''),
+      content: extractNormalizedFreeText(parsed.payload.output),
       timestamp: parsed.timestamp || '',
       ...(activeTurnId ? { turnId: activeTurnId } : {}),
       toolId,

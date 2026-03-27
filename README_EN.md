@@ -136,7 +136,7 @@ Useful commands:
 
 - `/` / `/status` shows the current session
 - `/h` / `/help` shows help
-- `/t` / `/threads` lists the most recent 10 desktop threads, `/t all` / `/threads all` lists all of them, and `/t 1` / `/thread 1` binds the first one
+- `/t` / `/threads` lists the most recent 10 desktop threads, `/t all` / `/threads all` lists all of them, `/t n 100` / `/threads n 100` lists the most recent 100 desktop threads, and `/t 1` / `/thread 1` binds the first one
 - `/n` / `/new` creates a new thread in the current formal session directory; these IM-created threads are only guaranteed to continue inside IM and will not automatically appear in the Codex Desktop thread list
 - `/n proj1` / `/new proj1` creates a new project session under the default workspace root
 - `/m` / `/mode` shows or changes the current mode; options: `code` / `plan` / `ask`
