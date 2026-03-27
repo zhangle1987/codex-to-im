@@ -711,7 +711,7 @@ describe('bridge-manager status formatting', () => {
 
     const finalized = _testOnly.consumeBufferedMirrorTurns(
       subscription as any,
-      Date.parse('2026-03-25T08:20:01.000Z'),
+      Date.parse('2026-03-25T08:10:01.000Z'),
     );
 
     assert.deepEqual(finalized, [
@@ -1006,7 +1006,7 @@ describe('bridge-manager status formatting', () => {
 
     const flushed = _testOnly.flushTimedOutMirrorTurn(
       subscription as any,
-      Date.parse('2026-03-25T08:20:01.000Z'),
+      Date.parse('2026-03-25T08:10:01.000Z'),
     );
 
     assert.deepEqual(flushed, {
@@ -1029,6 +1029,203 @@ describe('bridge-manager status formatting', () => {
       withNotice,
       '**&lt;Current Thread&gt;**\n\n**我:** Desktop prompt\n\n**codex:** stale answer\n\n> 超时提醒：长时间没有收到新的桌面会话输出，本次流式同步已先结束；如果桌面后续继续产出内容，会重新开始新一轮同步。',
     );
+  });
+});
+
+describe('bridge-manager stop handling', () => {
+  beforeEach(() => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+  });
+
+  it('aborts the active IM task only when /stop is received', async () => {
+    const sent: string[] = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: 'msg-stop' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-stop' } as const;
+    const binding = router.createBinding(address, 'D:\\workspace\\stop');
+
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const abortController = new AbortController();
+    state.activeTasks.set(binding.codepilotSessionId, {
+      id: 'task-stop',
+      abortController,
+      adapter,
+      address,
+      streamKey: 'stream-stop',
+      sessionId: binding.codepilotSessionId,
+      hasStreamingCards: false,
+      streamFinalized: false,
+      uiEnded: false,
+      mirrorSuppressionId: null,
+    });
+
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'incoming-stop',
+      address,
+      text: '/stop',
+      timestamp: Date.now(),
+    });
+
+    assert.equal(abortController.signal.aborted, true);
+    assert.deepEqual(sent, ['正在停止当前任务...']);
+  });
+});
+
+describe('bridge-manager idle reminder handling', () => {
+  beforeEach(() => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+  });
+
+  it('sends a 10-minute idle reminder without aborting the active IM task', async () => {
+    const sent: Array<{ text: string; replyToMessageId?: string }> = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string; replyToMessageId?: string }) => {
+        sent.push({ text: message.text, replyToMessageId: message.replyToMessageId });
+        return { ok: true, messageId: 'msg-reminder' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-reminder' } as const;
+    const binding = router.createBinding(address, 'D:\\workspace\\reminder');
+
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const abortController = new AbortController();
+    state.activeTasks.set(binding.codepilotSessionId, {
+      id: 'task-reminder',
+      abortController,
+      adapter,
+      address,
+      requestMessageId: 'incoming-reminder',
+      streamKey: 'stream-reminder',
+      sessionId: binding.codepilotSessionId,
+      hasStreamingCards: false,
+      lastActivityAt: Date.now() - (10 * 60 * 1000) - 1,
+      idleReminderSent: false,
+      streamFinalized: false,
+      uiEnded: false,
+      mirrorSuppressionId: null,
+    });
+
+    await _testOnly.reconcileIdleInteractiveTasks();
+    await _testOnly.reconcileIdleInteractiveTasks();
+
+    assert.equal(abortController.signal.aborted, false);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].text, /超过 10 分钟没有新的执行输出/);
+    assert.equal(sent[0].replyToMessageId, 'incoming-reminder');
+    assert.equal(state.activeTasks.get(binding.codepilotSessionId)?.id, 'task-reminder');
+    assert.equal(state.activeTasks.get(binding.codepilotSessionId)?.idleReminderSent, true);
+  });
+});
+
+describe('bridge-manager new session handling', () => {
+  beforeEach(() => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+  });
+
+  it('keeps the current task running when /new creates another IM session', async () => {
+    const sent: string[] = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: 'msg-new' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-new' } as const;
+    const oldWorkDir = path.join(os.tmpdir(), 'cti-old-session');
+    const newWorkDir = path.join(os.tmpdir(), 'cti-new-session');
+    const binding = router.createBinding(address, oldWorkDir);
+
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const abortController = new AbortController();
+    state.activeTasks.set(binding.codepilotSessionId, {
+      id: 'task-old',
+      abortController,
+      adapter,
+      address,
+      requestMessageId: 'incoming-old',
+      streamKey: 'stream-old',
+      sessionId: binding.codepilotSessionId,
+      hasStreamingCards: false,
+      lastActivityAt: Date.now(),
+      idleReminderSent: false,
+      streamFinalized: false,
+      uiEnded: false,
+      mirrorSuppressionId: null,
+    });
+
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'incoming-new',
+      address,
+      text: `/new ${newWorkDir}`,
+      timestamp: Date.now(),
+    });
+
+    const updatedBinding = router.resolve(address);
+    assert.equal(abortController.signal.aborted, false);
+    assert.notEqual(updatedBinding.codepilotSessionId, binding.codepilotSessionId);
+    assert.equal(state.activeTasks.get(binding.codepilotSessionId)?.id, 'task-old');
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /旧任务在运行，它不会被终止/);
+  });
+
+  it('does not write an old task sdk session id back onto the current binding after /new', () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    const address = { channelType: 'feishu', chatId: 'chat-new-binding' } as const;
+    const oldBinding = router.createBinding(address, path.join(os.tmpdir(), 'cti-old-binding'));
+    const oldSessionId = oldBinding.codepilotSessionId;
+
+    const newBinding = router.createBinding(address, path.join(os.tmpdir(), 'cti-new-binding'));
+    const newSessionId = newBinding.codepilotSessionId;
+
+    assert.equal(newBinding.id, oldBinding.id);
+    assert.notEqual(newSessionId, oldSessionId);
+
+    _testOnly.persistSdkSessionUpdate(oldSessionId, 'thread-old', false);
+
+    const currentBinding = store.getChannelBinding(address.channelType, address.chatId);
+    assert.equal(store.getSession(oldSessionId)?.sdk_session_id, 'thread-old');
+    assert.equal(store.getSession(newSessionId)?.sdk_session_id || '', '');
+    assert.equal(currentBinding?.codepilotSessionId, newSessionId);
+    assert.equal(currentBinding?.sdkSessionId || '', '');
   });
 });
 

@@ -84,10 +84,10 @@ const MIRROR_WATCH_DEBOUNCE_MS = 350;
 const MIRROR_EVENT_BATCH_LIMIT = 8;
 const MIRROR_SUPPRESSION_WINDOW_MS = 4_000;
 const MIRROR_PROMPT_MATCH_GRACE_MS = 120_000;
+const INTERACTIVE_IDLE_REMINDER_MS = 600_000;
 // Idle timeout after the last desktop event before we flush a buffered turn
-// without seeing task_complete. Keep this conservative to avoid splitting
-// long-running desktop tasks into premature IM notifications.
-const MIRROR_IDLE_TIMEOUT_MS = 1_200_000;
+// without seeing task_complete.
+const MIRROR_IDLE_TIMEOUT_MS = 600_000;
 const AVAILABLE_CODEX_MODELS = listSelectableCodexModels();
 const AVAILABLE_CODEX_MODEL_MAP = new Map(AVAILABLE_CODEX_MODELS.map((model) => [model.slug, model]));
 
@@ -1008,6 +1008,22 @@ interface FinalizedDesktopMirrorTurn {
   timedOut?: boolean;
 }
 
+interface InteractiveTaskState {
+  id: string;
+  abortController: AbortController;
+  adapter: BaseChannelAdapter;
+  address: ChannelAddress;
+  requestMessageId: string;
+  streamKey: string;
+  sessionId: string;
+  hasStreamingCards: boolean;
+  lastActivityAt: number;
+  idleReminderSent: boolean;
+  streamFinalized: boolean;
+  uiEnded: boolean;
+  mirrorSuppressionId: string | null;
+}
+
 interface BridgeManagerState {
   adapters: Map<string, BaseChannelAdapter>;
   adapterMeta: Map<string, AdapterMeta>;
@@ -1017,7 +1033,7 @@ interface BridgeManagerState {
   reconcileTimer: NodeJS.Timeout | null;
   mirrorPollTimer: NodeJS.Timeout | null;
   mirrorWakeTimer: NodeJS.Timeout | null;
-  activeTasks: Map<string, AbortController>;
+  activeTasks: Map<string, InteractiveTaskState>;
   mirrorSubscriptions: Map<string, DesktopMirrorSubscription>;
   mirrorSyncInFlight: boolean;
   mirrorSuppressUntil: Map<string, MirrorSuppressionState[]>;
@@ -1085,6 +1101,61 @@ function getState(): BridgeManagerState {
 function getQueuedCount(sessionId: string): number {
   const state = getState();
   return state.queuedCounts.get(sessionId) || 0;
+}
+
+function buildInteractiveIdleReminderNotice(): string {
+  return [
+    '提醒：这轮任务仍在运行，但已经超过 10 分钟没有新的执行输出。',
+    '系统不会自动终止它；如果你仍在对应线程，可发送 `/stop` 主动停止；如果已经切到别的线程，需要先切回对应线程。',
+  ].join('\n');
+}
+
+function isCurrentInteractiveTask(sessionId: string, taskId: string): boolean {
+  return getState().activeTasks.get(sessionId)?.id === taskId;
+}
+
+function touchInteractiveTask(sessionId: string, taskId: string): void {
+  const task = getState().activeTasks.get(sessionId);
+  if (task?.id !== taskId) return;
+  task.lastActivityAt = Date.now();
+  task.idleReminderSent = false;
+}
+
+function releaseInteractiveTask(sessionId: string, taskId: string): void {
+  const state = getState();
+  const current = state.activeTasks.get(sessionId);
+  if (current?.id !== taskId) return;
+  state.activeTasks.delete(sessionId);
+  syncSessionRuntimeState(sessionId);
+}
+
+async function remindIdleInteractiveTask(task: InteractiveTaskState): Promise<void> {
+  if (!isCurrentInteractiveTask(task.sessionId, task.id) || task.idleReminderSent) return;
+  task.idleReminderSent = true;
+
+  try {
+    await deliver(task.adapter, {
+      address: task.address,
+      text: renderFeedbackTextForChannel(
+        task.adapter.channelType,
+        buildInteractiveIdleReminderNotice(),
+      ),
+      parseMode: getFeedbackParseMode(task.adapter.channelType),
+      replyToMessageId: task.requestMessageId,
+    });
+  } catch {
+    // best effort reminder
+  }
+}
+
+async function reconcileIdleInteractiveTasks(): Promise<void> {
+  const now = Date.now();
+  const tasks = Array.from(getState().activeTasks.values());
+  for (const task of tasks) {
+    if (task.idleReminderSent) continue;
+    if (now - task.lastActivityAt < INTERACTIVE_IDLE_REMINDER_MS) continue;
+    await remindIdleInteractiveTask(task);
+  }
 }
 
 function syncSessionRuntimeState(sessionId: string): void {
@@ -2414,6 +2485,9 @@ export async function start(): Promise<void> {
     void syncConfiguredAdapters({ startLoops: true }).catch((err) => {
       console.error('[bridge-manager] Adapter reconcile failed:', err);
     });
+    void reconcileIdleInteractiveTasks().catch((err) => {
+      console.error('[bridge-manager] Interactive idle reminder reconcile failed:', err);
+    });
   }, 5_000);
 
   state.mirrorPollTimer = setInterval(() => {
@@ -2459,8 +2533,8 @@ export async function stop(): Promise<void> {
   state.loopAborts.clear();
 
   const activeSessionIds = Array.from(state.activeTasks.keys());
-  for (const abort of state.activeTasks.values()) {
-    abort.abort();
+  for (const task of state.activeTasks.values()) {
+    task.abortController.abort();
   }
   state.activeTasks.clear();
   state.mirrorSuppressUntil.clear();
@@ -2782,10 +2856,25 @@ async function handleMessage(
 
   // Create an AbortController so /stop can cancel this task externally
   const taskAbort = new AbortController();
+  const taskId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const state = getState();
   resetMirrorSessionForInteractiveRun(binding.codepilotSessionId);
-  state.activeTasks.set(binding.codepilotSessionId, taskAbort);
-  let mirrorSuppressionId: string | null = null;
+  const taskState: InteractiveTaskState = {
+    id: taskId,
+    abortController: taskAbort,
+    adapter,
+    address: msg.address,
+    requestMessageId: msg.messageId,
+    streamKey,
+    sessionId: binding.codepilotSessionId,
+    hasStreamingCards: false,
+    lastActivityAt: Date.now(),
+    idleReminderSent: false,
+    streamFinalized: false,
+    uiEnded: false,
+    mirrorSuppressionId: null,
+  };
+  state.activeTasks.set(binding.codepilotSessionId, taskState);
   syncSessionRuntimeState(binding.codepilotSessionId);
 
   // ── Streaming preview setup ──────────────────────────────────
@@ -2856,9 +2945,11 @@ async function handleMessage(
   // These run in parallel with the existing preview system — Feishu
   // uses cards instead of message edit for streaming.
   const hasStreamingCards = typeof adapter.onStreamText === 'function';
+  taskState.hasStreamingCards = hasStreamingCards;
   const toolCallTracker = new Map<string, ToolCallInfo>();
 
   const onStreamCardText = hasStreamingCards ? (fullText: string) => {
+    if (!isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
     const rendered = renderFeedbackTextForChannel(
       adapter.channelType,
       stripOutboundArtifactBlocksForStreaming(fullText),
@@ -2867,6 +2958,8 @@ async function handleMessage(
   } : undefined;
 
   const onToolEvent = hasStreamingCards ? (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
+    if (!isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
+    touchInteractiveTask(binding.codepilotSessionId, taskId);
     if (toolName) {
       toolCallTracker.set(toolId, { id: toolId, name: toolName, status });
     } else {
@@ -2881,6 +2974,8 @@ async function handleMessage(
 
   // Combined partial text callback: streaming preview + streaming cards
   const onPartialText = (previewOnPartialText || onStreamCardText) ? (fullText: string) => {
+    if (!isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
+    touchInteractiveTask(binding.codepilotSessionId, taskId);
     if (previewOnPartialText) previewOnPartialText(fullText);
     if (onStreamCardText) onStreamCardText(fullText);
   } : undefined;
@@ -2903,10 +2998,14 @@ async function handleMessage(
         msg.messageId,
       );
     }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, onToolEvent, (preparedPrompt) => {
-      if (!mirrorSuppressionId) {
-        mirrorSuppressionId = beginMirrorSuppression(binding.codepilotSessionId, preparedPrompt);
+      if (!taskState.mirrorSuppressionId) {
+        taskState.mirrorSuppressionId = beginMirrorSuppression(binding.codepilotSessionId, preparedPrompt);
       }
     });
+
+    if (!isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) {
+      return;
+    }
 
     // Finalize streaming card if adapter supports it.
     // onStreamEnd awaits any in-flight card creation and returns true if a card
@@ -2921,6 +3020,7 @@ async function handleMessage(
           renderFeedbackTextForChannel(adapter.channelType, result.responseText),
           streamKey,
         );
+        taskState.streamFinalized = cardFinalized;
       } catch (err) {
         console.warn('[bridge-manager] Card finalize failed:', err instanceof Error ? err.message : err);
       }
@@ -2952,14 +3052,9 @@ async function handleMessage(
     // Persist the actual SDK session ID for future resume.
     // If the result has an error and no session ID was captured, clear the
     // stale ID so the next message starts fresh instead of retrying a broken resume.
-    if (binding.id) {
-      try {
-        const update = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
-        if (update !== null) {
-          store.updateChannelBinding(binding.id, { sdkSessionId: update });
-        }
-      } catch { /* best effort */ }
-    }
+    try {
+      persistSdkSessionUpdate(binding.codepilotSessionId, result.sdkSessionId, result.hasError);
+    } catch { /* best effort */ }
   } finally {
     // Clean up preview state
     if (previewState) {
@@ -2971,19 +3066,28 @@ async function handleMessage(
     }
 
     // If task was aborted and streaming card is still active, finalize as interrupted
-    if (hasStreamingCards && adapter.onStreamEnd && taskAbort.signal.aborted) {
+    if (
+      hasStreamingCards
+      && adapter.onStreamEnd
+      && taskAbort.signal.aborted
+      && !taskState.streamFinalized
+    ) {
       try {
         await adapter.onStreamEnd(msg.address.chatId, 'interrupted', '', streamKey);
+        taskState.streamFinalized = true;
       } catch { /* best effort */ }
     }
 
-    if (mirrorSuppressionId) {
-      settleMirrorSuppression(binding.codepilotSessionId, mirrorSuppressionId);
+    if (taskState.mirrorSuppressionId) {
+      settleMirrorSuppression(binding.codepilotSessionId, taskState.mirrorSuppressionId);
+      taskState.mirrorSuppressionId = null;
     }
-    state.activeTasks.delete(binding.codepilotSessionId);
-    syncSessionRuntimeState(binding.codepilotSessionId);
+    releaseInteractiveTask(binding.codepilotSessionId, taskId);
     // Notify adapter that message processing ended
-    adapter.onMessageEnd?.(msg.address.chatId, streamKey);
+    if (!taskState.uiEnded) {
+      adapter.onMessageEnd?.(msg.address.chatId, streamKey);
+      taskState.uiEnded = true;
+    }
     // Commit the offset only after full processing (success or failure)
     ack();
   }
@@ -3055,14 +3159,6 @@ async function handleCommand(
         break;
       }
 
-      if (currentBinding) {
-        const st = getState();
-        const oldTask = st.activeTasks.get(currentBinding.codepilotSessionId);
-        if (oldTask) {
-          oldTask.abort();
-        }
-      }
-
       const workDir = resolved.workDir;
       ensureWorkingDirectoryExists(workDir);
       const binding = router.createBinding(msg.address, workDir);
@@ -3076,6 +3172,7 @@ async function handleCommand(
         ],
         [
           args.trim() ? '接下来直接发送文本即可继续。' : '已在当前工作目录下新建一个线程。接下来直接发送文本即可继续。',
+          '如果当前聊天里已有旧任务在运行，它不会被终止，仍会在后台继续执行并可能稍后回消息。',
           '这是 IM 侧线程，当前只保证在 IM 中可继续；不会自动出现在 Codex Desktop 会话列表中。',
         ],
         responseParseMode === 'Markdown',
@@ -3521,6 +3618,7 @@ async function handleCommand(
             return {
               heading: `${getSessionDisplayName(session, session.working_directory)}${session.id === currentBinding?.codepilotSessionId ? ' [当前]' : ''}`,
               details: [
+                `状态：${formatRuntimeStatus(session)}`,
                 `目录：${formatCommandPath(session.working_directory)}`,
               ],
             };
@@ -3540,7 +3638,7 @@ async function handleCommand(
       const st = getState();
       const taskAbort = st.activeTasks.get(binding.codepilotSessionId);
       if (taskAbort) {
-        taskAbort.abort();
+        taskAbort.abortController.abort();
         response = '正在停止当前任务...';
       } else {
         response = '当前没有正在运行的任务。';
@@ -3671,6 +3769,46 @@ export function computeSdkSessionUpdate(
   return null;
 }
 
+function persistSdkSessionUpdate(
+  sessionId: string,
+  sdkSessionId: string | null | undefined,
+  hasError: boolean,
+): void {
+  const update = computeSdkSessionUpdate(sdkSessionId, hasError);
+  if (update === null) {
+    return;
+  }
+  getBridgeContext().store.updateSdkSessionId(sessionId, update);
+}
+
+function resetStateForTests(): void {
+  const state = getState();
+  state.running = false;
+  state.startedAt = null;
+  state.adapters.clear();
+  state.adapterMeta.clear();
+  state.loopAborts.clear();
+  state.activeTasks.clear();
+  state.mirrorSubscriptions.clear();
+  state.mirrorSuppressUntil.clear();
+  state.mirrorIgnoredTurnIds.clear();
+  state.queuedCounts.clear();
+  state.sessionLocks.clear();
+  state.mirrorSyncInFlight = false;
+  if (state.reconcileTimer) {
+    clearInterval(state.reconcileTimer);
+    state.reconcileTimer = null;
+  }
+  if (state.mirrorPollTimer) {
+    clearInterval(state.mirrorPollTimer);
+    state.mirrorPollTimer = null;
+  }
+  if (state.mirrorWakeTimer) {
+    clearTimeout(state.mirrorWakeTimer);
+    state.mirrorWakeTimer = null;
+  }
+}
+
 // ── Test-only export ─────────────────────────────────────────
 // Exposed so integration tests can exercise handleMessage directly
 // without wiring up the full adapter loop.
@@ -3697,6 +3835,9 @@ export const _testOnly = {
   consumeBufferedMirrorTurns,
   flushTimedOutMirrorTurn,
   filterSuppressedMirrorRecords,
+  reconcileIdleInteractiveTasks,
   beginMirrorSuppression,
   settleMirrorSuppression,
+  persistSdkSessionUpdate,
+  resetStateForTests,
 };

@@ -594,7 +594,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
         elapsed: formatElapsed(elapsedMs),
       };
 
-      const finalCardJson = buildFinalCardJson(responseText, state.toolCalls, footer);
+      const existingText = state.pendingText || '';
+      const trimmedExisting = existingText.trim();
+      const trimmedResponse = responseText.trim();
+      let finalText = trimmedResponse || trimmedExisting;
+      if (
+        status === 'interrupted'
+        && trimmedExisting
+        && trimmedResponse
+        && trimmedResponse !== trimmedExisting
+        && !trimmedExisting.includes(trimmedResponse)
+      ) {
+        finalText = `${trimmedExisting}\n\n${trimmedResponse}`;
+      }
+
+      const finalCardJson = buildFinalCardJson(finalText, state.toolCalls, footer);
 
       state.sequence++;
       await cardkit.card.update({
