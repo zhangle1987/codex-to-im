@@ -53,6 +53,7 @@ const TYPING_EMOJI = 'Typing';
 
 /** State for an active CardKit v2 streaming card. */
 interface FeishuCardState {
+  chatId: string;
   cardId: string;
   messageId: string;
   sequence: number;
@@ -119,9 +120,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private lastIncomingMessageId = new Map<string, string>();
   /** Track active typing reaction IDs per chat for cleanup. */
   private typingReactions = new Map<string, string>();
-  /** Active streaming card state per chatId. */
+  /** Active streaming card state per stream key. */
   private activeCards = new Map<string, FeishuCardState>();
-  /** In-flight card creation promises per chatId — prevents duplicate creation. */
+  /** In-flight card creation promises per stream key — prevents duplicate creation. */
   private cardCreatePromises = new Map<string, Promise<boolean>>();
   /** Cached tenant token for upload APIs. */
   private tenantTokenCache:
@@ -130,6 +131,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private isStreamingEnabled(): boolean {
     return getBridgeContext().store.getSetting('bridge_feishu_streaming_enabled') !== 'false';
+  }
+
+  private resolveStreamKey(chatId: string, streamKey?: string): string {
+    return streamKey?.trim() || chatId;
   }
 
   // ── Lifecycle ───────────────────────────────────────────────
@@ -274,12 +279,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Add a "Typing" emoji reaction to the user's message and create streaming card.
    * Called by bridge-manager via onMessageStart().
    */
-  onMessageStart(chatId: string): void {
+  onMessageStart(chatId: string, streamKey?: string): void {
     const messageId = this.lastIncomingMessageId.get(chatId);
 
     // Create streaming card (fire-and-forget — fallback to traditional if fails)
     if (messageId && this.isStreamingEnabled()) {
-      this.createStreamingCard(chatId, messageId).catch(() => {});
+      this.createStreamingCard(chatId, messageId, streamKey).catch(() => {});
     }
 
     // Typing indicator (same as before)
@@ -304,9 +309,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Remove the "Typing" emoji reaction and clean up card state.
    * Called by bridge-manager via onMessageEnd().
    */
-  onMessageEnd(chatId: string): void {
+  onMessageEnd(chatId: string, streamKey?: string): void {
     // Clean up any orphaned card state (normally cleaned by finalizeCard)
-    this.cleanupCard(chatId);
+    this.cleanupCard(chatId, streamKey);
 
     // Remove typing reaction (same as before)
     const reactionId = this.typingReactions.get(chatId);
@@ -368,21 +373,23 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Create a new streaming card and send it as a message.
    * Returns true if card was created successfully.
    */
-  private createStreamingCard(chatId: string, replyToMessageId?: string): Promise<boolean> {
-    if (!this.restClient || this.activeCards.has(chatId)) return Promise.resolve(false);
+  private createStreamingCard(chatId: string, replyToMessageId?: string, streamKey?: string): Promise<boolean> {
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    if (!this.restClient || this.activeCards.has(cardKey)) return Promise.resolve(false);
 
     // In-flight guard: if creation is already in progress, return the existing promise
-    const existing = this.cardCreatePromises.get(chatId);
+    const existing = this.cardCreatePromises.get(cardKey);
     if (existing) return existing;
 
-    const promise = this._doCreateStreamingCard(chatId, replyToMessageId);
-    this.cardCreatePromises.set(chatId, promise);
-    promise.finally(() => this.cardCreatePromises.delete(chatId));
+    const promise = this._doCreateStreamingCard(chatId, replyToMessageId, cardKey);
+    this.cardCreatePromises.set(cardKey, promise);
+    promise.finally(() => this.cardCreatePromises.delete(cardKey));
     return promise;
   }
 
-  private async _doCreateStreamingCard(chatId: string, replyToMessageId?: string): Promise<boolean> {
+  private async _doCreateStreamingCard(chatId: string, replyToMessageId?: string, streamKey?: string): Promise<boolean> {
     if (!this.restClient) return false;
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
     const cardkit = (this.restClient as any).cardkit?.v1;
     if (!cardkit?.card) {
       console.warn('[feishu-adapter] CardKit v1 API is unavailable in the current Feishu SDK client');
@@ -444,7 +451,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
 
       // Store card state
-      this.activeCards.set(chatId, {
+      this.activeCards.set(cardKey, {
+        chatId,
         cardId,
         messageId,
         sequence: 0,
@@ -456,7 +464,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         throttleTimer: null,
       });
 
-      console.log(`[feishu-adapter] Streaming card created: cardId=${cardId}, msgId=${messageId}`);
+      console.log(`[feishu-adapter] Streaming card created: streamKey=${cardKey}, cardId=${cardId}, msgId=${messageId}`);
       return true;
     } catch (err) {
       console.warn('[feishu-adapter] Failed to create streaming card:', err instanceof Error ? err.message : err);
@@ -467,8 +475,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
   /**
    * Update streaming card content with throttling.
    */
-  private updateCardContent(chatId: string, text: string): void {
-    const state = this.activeCards.get(chatId);
+  private updateCardContent(chatId: string, text: string, streamKey?: string): void {
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    const state = this.activeCards.get(cardKey);
     if (!state || !this.restClient) return;
 
     // Clear thinking state once text arrives
@@ -481,9 +490,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (elapsed < CARD_THROTTLE_MS && state.lastUpdateAt > 0) {
       // Schedule trailing-edge flush
       if (!state.throttleTimer) {
-        state.throttleTimer = setTimeout(() => {
-          state.throttleTimer = null;
-          this.flushCardUpdate(chatId);
+          state.throttleTimer = setTimeout(() => {
+            state.throttleTimer = null;
+          this.flushCardUpdate(cardKey);
         }, CARD_THROTTLE_MS - elapsed);
       }
       return;
@@ -494,14 +503,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
       clearTimeout(state.throttleTimer);
       state.throttleTimer = null;
     }
-    this.flushCardUpdate(chatId);
+    this.flushCardUpdate(cardKey);
   }
 
   /**
    * Flush pending card update to Feishu API.
    */
-  private flushCardUpdate(chatId: string): void {
-    const state = this.activeCards.get(chatId);
+  private flushCardUpdate(streamKey: string): void {
+    const state = this.activeCards.get(streamKey);
     if (!state || !this.restClient) return;
     const cardkit = (this.restClient as any).cardkit?.v1;
     if (!cardkit?.cardElement?.content) return;
@@ -526,12 +535,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
   /**
    * Update tool progress in the streaming card.
    */
-  private updateToolProgress(chatId: string, tools: ToolCallInfo[]): void {
-    const state = this.activeCards.get(chatId);
+  private updateToolProgress(chatId: string, tools: ToolCallInfo[], streamKey?: string): void {
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    const state = this.activeCards.get(cardKey);
     if (!state) return;
     state.toolCalls = tools;
     // Trigger a content flush with current text + updated tools
-    this.updateCardContent(chatId, state.pendingText || '');
+    this.updateCardContent(chatId, state.pendingText || '', cardKey);
   }
 
   /**
@@ -541,14 +551,16 @@ export class FeishuAdapter extends BaseChannelAdapter {
     chatId: string,
     status: 'completed' | 'interrupted' | 'error',
     responseText: string,
+    streamKey?: string,
   ): Promise<boolean> {
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
     // Wait for in-flight card creation to complete before finalizing
-    const pending = this.cardCreatePromises.get(chatId);
+    const pending = this.cardCreatePromises.get(cardKey);
     if (pending) {
       try { await pending; } catch { /* creation failed — no card to finalize */ }
     }
 
-    const state = this.activeCards.get(chatId);
+    const state = this.activeCards.get(cardKey);
     if (!state || !this.restClient) return false;
     const cardkit = (this.restClient as any).cardkit?.v1;
     if (!cardkit?.card?.settings || !cardkit?.card?.update) return false;
@@ -593,34 +605,35 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
       });
 
-      console.log(`[feishu-adapter] Card finalized: cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
+      console.log(`[feishu-adapter] Card finalized: streamKey=${cardKey}, cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
       return true;
     } catch (err) {
       console.warn('[feishu-adapter] Card finalize failed:', err instanceof Error ? err.message : err);
       return false;
     } finally {
-      this.activeCards.delete(chatId);
+      this.activeCards.delete(cardKey);
     }
   }
 
   /**
    * Clean up card state without finalizing (e.g. on unexpected errors).
    */
-  private cleanupCard(chatId: string): void {
-    this.cardCreatePromises.delete(chatId);
-    const state = this.activeCards.get(chatId);
+  private cleanupCard(chatId: string, streamKey?: string): void {
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    this.cardCreatePromises.delete(cardKey);
+    const state = this.activeCards.get(cardKey);
     if (!state) return;
     if (state.throttleTimer) {
       clearTimeout(state.throttleTimer);
     }
-    this.activeCards.delete(chatId);
+    this.activeCards.delete(cardKey);
   }
 
   /**
    * Check if there is an active streaming card for a given chat.
    */
-  hasActiveCard(chatId: string): boolean {
-    return this.activeCards.has(chatId);
+  hasActiveCard(chatId: string, streamKey?: string): boolean {
+    return this.activeCards.has(this.resolveStreamKey(chatId, streamKey));
   }
 
   // ── Streaming adapter interface ────────────────────────────────
@@ -629,33 +642,40 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Called by bridge-manager on each text SSE event.
    * Creates streaming card on first call, then updates content.
    */
-  onStreamText(chatId: string, fullText: string): void {
+  onStreamText(chatId: string, fullText: string, streamKey?: string): void {
     if (!this.isStreamingEnabled()) return;
-    if (!this.activeCards.has(chatId)) {
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    if (!this.activeCards.has(cardKey)) {
       // Card should have been created by onMessageStart, but create lazily if not
       const messageId = this.lastIncomingMessageId.get(chatId);
-      this.createStreamingCard(chatId, messageId).then((ok) => {
-        if (ok) this.updateCardContent(chatId, fullText);
+      this.createStreamingCard(chatId, messageId, cardKey).then((ok) => {
+        if (ok) this.updateCardContent(chatId, fullText, cardKey);
       }).catch(() => {});
       return;
     }
-    this.updateCardContent(chatId, fullText);
+    this.updateCardContent(chatId, fullText, cardKey);
   }
 
-  onMirrorStreamStart(chatId: string): void {
+  onMirrorStreamStart(chatId: string, streamKey?: string): void {
     if (!this.isStreamingEnabled()) return;
-    if (this.activeCards.has(chatId)) return;
-    this.createStreamingCard(chatId, undefined).catch(() => {});
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    if (this.activeCards.has(cardKey)) return;
+    this.createStreamingCard(chatId, undefined, cardKey).catch(() => {});
   }
 
-  onToolEvent(chatId: string, tools: ToolCallInfo[]): void {
+  onToolEvent(chatId: string, tools: ToolCallInfo[], streamKey?: string): void {
     if (!this.isStreamingEnabled()) return;
-    this.updateToolProgress(chatId, tools);
+    this.updateToolProgress(chatId, tools, streamKey);
   }
 
-  async onStreamEnd(chatId: string, status: 'completed' | 'interrupted' | 'error', responseText: string): Promise<boolean> {
+  async onStreamEnd(
+    chatId: string,
+    status: 'completed' | 'interrupted' | 'error',
+    responseText: string,
+    streamKey?: string,
+  ): Promise<boolean> {
     if (!this.isStreamingEnabled()) return false;
-    return this.finalizeCard(chatId, status, responseText);
+    return this.finalizeCard(chatId, status, responseText, streamKey);
   }
 
   // ── Send ────────────────────────────────────────────────────

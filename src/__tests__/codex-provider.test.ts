@@ -293,6 +293,40 @@ describe('CodexProvider', () => {
     assert.ok(!Object.prototype.hasOwnProperty.call(capturedResumeOptions!, 'model'), 'Model should not be forwarded by default');
   });
 
+  it('passes the abort signal to runStreamed so /stop can cancel the active turn', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    let capturedTurnOptions: Record<string, unknown> | undefined;
+    const mockThread = {
+      runStreamed: (_input: unknown, turnOptions?: Record<string, unknown>) => {
+        capturedTurnOptions = turnOptions;
+        return {
+          events: (async function* () {
+            yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
+          })(),
+        };
+      },
+    };
+
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: () => mockThread,
+    };
+
+    const abortController = new AbortController();
+    const stream = provider.streamChat({
+      prompt: 'hello',
+      sessionId: 'stop-session',
+      abortController,
+    });
+
+    await collectStream(stream);
+
+    assert.equal(capturedTurnOptions?.signal, abortController.signal);
+  });
+
   it('reuses the in-memory Codex thread even when the stored model is Claude-like', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');

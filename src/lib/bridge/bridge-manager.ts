@@ -140,8 +140,6 @@ function resolveCommandAlias(rawCommand: string, args: string): string {
         : /^(all|n\b)/i.test(args.trim())
           ? '/threads'
           : '/thread';
-    case '/s':
-      return args ? '/use' : '/sessions';
     case '/n':
       return '/new';
     case '/m':
@@ -227,6 +225,14 @@ function getSessionDisplayName(session: BridgeSession | null | undefined, fallba
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function buildInteractiveStreamKey(sessionId: string, messageId: string): string {
+  return `im:${sessionId}:${messageId}`;
+}
+
+function buildMirrorStreamKey(sessionId: string, turnId: string | null | undefined, startedAt: string): string {
+  return `mirror:${sessionId}:${turnId || startedAt}`;
 }
 
 function getWorkspaceRoot(): string {
@@ -981,6 +987,7 @@ interface DesktopMirrorSubscription {
 
 interface DesktopMirrorTurnState {
   turnId: string | null;
+  streamKey: string;
   startedAt: string;
   lastActivityAt: string;
   userText: string | null;
@@ -992,11 +999,13 @@ interface DesktopMirrorTurnState {
 }
 
 interface FinalizedDesktopMirrorTurn {
+  streamKey: string;
   userText: string | null;
   text: string;
   signature: string;
   timestamp: string;
   status: 'completed' | 'interrupted';
+  timedOut?: boolean;
 }
 
 interface BridgeManagerState {
@@ -1563,6 +1572,18 @@ function formatMirrorMessage(
   return sections.join('\n\n').trim();
 }
 
+function buildMirrorTimeoutNotice(markdown = false): string {
+  return markdown
+    ? '> 超时提醒：长时间没有收到新的桌面会话输出，本次流式同步已先结束；如果桌面后续继续产出内容，会重新开始新一轮同步。'
+    : '超时提醒：长时间没有收到新的桌面会话输出，本次流式同步已先结束；如果桌面后续继续产出内容，会重新开始新一轮同步。';
+}
+
+function appendMirrorTimeoutNotice(text: string, markdown = false): string {
+  const notice = buildMirrorTimeoutNotice(markdown);
+  const normalized = text.trim();
+  return normalized ? `${normalized}\n\n${notice}` : notice;
+}
+
 function getMirrorStreamingAdapter(subscription: DesktopMirrorSubscription): BaseChannelAdapter | null {
   const state = getState();
   const adapter = state.adapters.get(subscription.channelType);
@@ -1598,9 +1619,9 @@ function startMirrorStreaming(
   if (!adapter || turnState.streamStarted) return;
 
   try {
-    adapter.onMirrorStreamStart?.(subscription.chatId);
+    adapter.onMirrorStreamStart?.(subscription.chatId, turnState.streamKey);
     if (!adapter.onMirrorStreamStart) {
-      adapter.onStreamText?.(subscription.chatId, '');
+      adapter.onStreamText?.(subscription.chatId, '', turnState.streamKey);
     }
     turnState.streamStarted = true;
   } catch {
@@ -1621,7 +1642,7 @@ function updateMirrorStreaming(
   );
   if (!text) return;
   try {
-    adapter.onStreamText?.(subscription.chatId, text);
+    adapter.onStreamText?.(subscription.chatId, text, turnState.streamKey);
   } catch {
     // Non-critical best effort only.
   }
@@ -1635,7 +1656,7 @@ function updateMirrorToolProgress(
   if (!adapter || typeof adapter.onToolEvent !== 'function') return;
   startMirrorStreaming(subscription, turnState);
   try {
-    adapter.onToolEvent(subscription.chatId, Array.from(turnState.toolCalls.values()));
+    adapter.onToolEvent(subscription.chatId, Array.from(turnState.toolCalls.values()), turnState.streamKey);
   } catch {
     // Non-critical best effort only.
   }
@@ -1652,7 +1673,7 @@ function stopMirrorStreaming(
     subscription.channelType,
     getMirrorStreamingText(subscription, pendingTurn),
   );
-  void adapter.onStreamEnd(subscription.chatId, status, text).catch(() => {});
+  void adapter.onStreamEnd(subscription.chatId, status, text, pendingTurn.streamKey).catch(() => {});
 }
 
 async function deliverMirrorTurn(
@@ -1666,8 +1687,14 @@ async function deliverMirrorTurn(
   const title = getDesktopThreadTitle(subscription.threadId)?.trim() || '桌面线程';
   const responseParseMode = getFeedbackParseMode(subscription.channelType);
   const markdown = responseParseMode === 'Markdown';
-  const renderedText = formatMirrorMessage(title, turn.userText, turn.text, markdown);
-  const renderedStreamText = formatMirrorMessage(title, turn.userText, turn.text, markdown, true);
+  const renderedTextBase = formatMirrorMessage(title, turn.userText, turn.text, markdown);
+  const renderedStreamTextBase = formatMirrorMessage(title, turn.userText, turn.text, markdown, true);
+  const renderedText = turn.timedOut
+    ? appendMirrorTimeoutNotice(renderedTextBase || buildMirrorTitle(title, markdown), markdown)
+    : renderedTextBase;
+  const renderedStreamText = turn.timedOut
+    ? appendMirrorTimeoutNotice(renderedStreamTextBase || buildMirrorTitle(title, markdown), markdown)
+    : renderedStreamTextBase;
   const text = renderedText ? renderFeedbackText(renderedText, responseParseMode) : '';
   const streamText = renderFeedbackText(
     renderedStreamText || buildMirrorTitle(title, markdown),
@@ -1680,6 +1707,7 @@ async function deliverMirrorTurn(
         subscription.chatId,
         turn.status,
         streamText,
+        turn.streamKey,
       );
       if (finalized) {
         subscription.lastDeliveredAt = turn.timestamp || nowIso();
@@ -1720,10 +1748,11 @@ async function deliverMirrorTurns(
   }
 }
 
-function createMirrorTurnState(timestamp: string, turnId?: string): DesktopMirrorTurnState {
+function createMirrorTurnState(sessionId: string, timestamp: string, turnId?: string): DesktopMirrorTurnState {
   const safeTimestamp = timestamp || nowIso();
   return {
     turnId: turnId || null,
+    streamKey: buildMirrorStreamKey(sessionId, turnId || null, safeTimestamp),
     startedAt: safeTimestamp,
     lastActivityAt: safeTimestamp,
     userText: null,
@@ -1767,7 +1796,7 @@ function ensureMirrorTurnState(
   record: DesktopMirrorRecord,
 ): DesktopMirrorTurnState {
   if (!subscription.pendingTurn) {
-    subscription.pendingTurn = createMirrorTurnState(record.timestamp, record.turnId);
+    subscription.pendingTurn = createMirrorTurnState(subscription.sessionId, record.timestamp, record.turnId);
     return subscription.pendingTurn;
   }
 
@@ -1802,11 +1831,13 @@ function finalizeMirrorTurn(
   if (!text && !userText && pendingTurn.toolCalls.size === 0) return null;
 
   return {
+    streamKey: pendingTurn.streamKey,
     userText,
     text,
     signature,
     timestamp: timestamp || pendingTurn.lastActivityAt || nowIso(),
     status,
+    ...(signature.startsWith('timeout:') ? { timedOut: true } : {}),
   };
 }
 
@@ -1829,7 +1860,7 @@ function consumeMirrorRecords(
         if (superseded) finalized.push(superseded);
       }
       if (!subscription.pendingTurn) {
-        subscription.pendingTurn = createMirrorTurnState(record.timestamp, record.turnId);
+        subscription.pendingTurn = createMirrorTurnState(subscription.sessionId, record.timestamp, record.turnId);
       } else {
         if (!subscription.pendingTurn.turnId && record.turnId) {
           subscription.pendingTurn.turnId = record.turnId;
@@ -2159,12 +2190,23 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
     }
   }
 
+  const timedOutTurn = flushTimedOutMirrorTurn(subscription);
+
   if (getState().activeTasks.has(subscription.sessionId) || isMirrorSuppressed(subscription.sessionId)) {
+    if (timedOutTurn) {
+      try {
+        await deliverMirrorTurns(subscription, [timedOutTurn]);
+      } catch (error) {
+        subscription.dirty = true;
+        console.warn('[bridge-manager] Mirror delivery failed:', error instanceof Error ? error.message : error);
+      }
+    }
     syncMirrorSessionState(subscription.sessionId);
     return;
   }
 
-  const finalizedTurns = consumeBufferedMirrorTurns(subscription);
+  const finalizedTurns = timedOutTurn ? [timedOutTurn] : [];
+  finalizedTurns.push(...consumeBufferedMirrorTurns(subscription));
 
   if (finalizedTurns.length === 0) {
     syncMirrorSessionState(subscription.sessionId);
@@ -2733,9 +2775,10 @@ async function handleMessage(
 
   // Regular message — route to conversation engine
   const binding = router.resolve(msg.address);
+  const streamKey = buildInteractiveStreamKey(binding.codepilotSessionId, msg.messageId);
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
-  adapter.onMessageStart?.(msg.address.chatId);
+  adapter.onMessageStart?.(msg.address.chatId, streamKey);
 
   // Create an AbortController so /stop can cancel this task externally
   const taskAbort = new AbortController();
@@ -2820,7 +2863,7 @@ async function handleMessage(
       adapter.channelType,
       stripOutboundArtifactBlocksForStreaming(fullText),
     );
-    try { adapter.onStreamText!(msg.address.chatId, rendered); } catch { /* non-critical */ }
+    try { adapter.onStreamText!(msg.address.chatId, rendered, streamKey); } catch { /* non-critical */ }
   } : undefined;
 
   const onToolEvent = hasStreamingCards ? (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
@@ -2832,7 +2875,7 @@ async function handleMessage(
       if (existing) existing.status = status;
     }
     try {
-      adapter.onToolEvent!(msg.address.chatId, Array.from(toolCallTracker.values()));
+      adapter.onToolEvent!(msg.address.chatId, Array.from(toolCallTracker.values()), streamKey);
     } catch { /* non-critical */ }
   } : undefined;
 
@@ -2876,6 +2919,7 @@ async function handleMessage(
           msg.address.chatId,
           status,
           renderFeedbackTextForChannel(adapter.channelType, result.responseText),
+          streamKey,
         );
       } catch (err) {
         console.warn('[bridge-manager] Card finalize failed:', err instanceof Error ? err.message : err);
@@ -2929,7 +2973,7 @@ async function handleMessage(
     // If task was aborted and streaming card is still active, finalize as interrupted
     if (hasStreamingCards && adapter.onStreamEnd && taskAbort.signal.aborted) {
       try {
-        await adapter.onStreamEnd(msg.address.chatId, 'interrupted', '');
+        await adapter.onStreamEnd(msg.address.chatId, 'interrupted', '', streamKey);
       } catch { /* best effort */ }
     }
 
@@ -2939,7 +2983,7 @@ async function handleMessage(
     state.activeTasks.delete(binding.codepilotSessionId);
     syncSessionRuntimeState(binding.codepilotSessionId);
     // Notify adapter that message processing ended
-    adapter.onMessageEnd?.(msg.address.chatId);
+    adapter.onMessageEnd?.(msg.address.chatId, streamKey);
     // Commit the offset only after full processing (success or failure)
     ack();
   }
@@ -3016,8 +3060,6 @@ async function handleCommand(
         const oldTask = st.activeTasks.get(currentBinding.codepilotSessionId);
         if (oldTask) {
           oldTask.abort();
-          st.activeTasks.delete(currentBinding.codepilotSessionId);
-          syncSessionRuntimeState(currentBinding.codepilotSessionId);
         }
       }
 
@@ -3499,8 +3541,6 @@ async function handleCommand(
       const taskAbort = st.activeTasks.get(binding.codepilotSessionId);
       if (taskAbort) {
         taskAbort.abort();
-        st.activeTasks.delete(binding.codepilotSessionId);
-        syncSessionRuntimeState(binding.codepilotSessionId);
         response = '正在停止当前任务...';
       } else {
         response = '当前没有正在运行的任务。';
@@ -3650,6 +3690,9 @@ export const _testOnly = {
   formatRuntimeStatus,
   formatMirrorStatus,
   formatMirrorMessage,
+  buildInteractiveStreamKey,
+  buildMirrorStreamKey,
+  appendMirrorTimeoutNotice,
   consumeMirrorRecords,
   consumeBufferedMirrorTurns,
   flushTimedOutMirrorTurn,

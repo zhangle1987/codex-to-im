@@ -7,6 +7,7 @@ import {
   getUiServerStatus,
   getUiServerUrl,
   openBrowser,
+  startBridge,
   stopBridge,
   stopUiServer,
 } from './service-manager.js';
@@ -19,7 +20,16 @@ async function main(): Promise<void> {
       const status = await ensureUiServerRunning();
       const url = getUiServerUrl(status.port);
       openBrowser(url);
-      process.stdout.write(`Codex to IM is available at ${url}\n`);
+      try {
+        await startBridge();
+        process.stdout.write(`Codex to IM is available at ${url}\n`);
+      } catch (error) {
+        process.stdout.write(`Codex to IM UI is available at ${url}\n`);
+        process.stderr.write(
+          `Bridge failed to start. Open the UI and check logs/config first: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+        process.exitCode = 1;
+      }
       return;
     }
 
@@ -37,14 +47,6 @@ async function main(): Promise<void> {
       }
       process.stdout.write('UI server is not running and no known URL is available.\n');
       process.exitCode = 1;
-      return;
-    }
-
-    case 'share-feishu': {
-      const status = await ensureUiServerRunning();
-      const url = `${getUiServerUrl(status.port)}/#desktop`;
-      openBrowser(url);
-      process.stdout.write(`Opened Feishu handoff entry at ${url}\n`);
       return;
     }
 
@@ -71,7 +73,7 @@ async function main(): Promise<void> {
     }
 
     default:
-      process.stdout.write('Usage: codex-to-im [open|url|share-feishu|stop|status]\n');
+      process.stdout.write('Usage: codex-to-im [open|url|stop|status]\n');
   }
 }
 

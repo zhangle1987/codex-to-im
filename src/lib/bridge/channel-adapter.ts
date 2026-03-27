@@ -66,10 +66,10 @@ export abstract class BaseChannelAdapter {
   abstract isAuthorized(userId: string, chatId: string): boolean;
 
   /** Called when message processing starts (e.g., typing indicator). */
-  onMessageStart?(_chatId: string): void;
+  onMessageStart?(_chatId: string, _streamKey?: string): void;
 
   /** Called when message processing ends. */
-  onMessageEnd?(_chatId: string): void;
+  onMessageEnd?(_chatId: string, _streamKey?: string): void;
 
   /**
    * Acknowledge that an update has been fully processed.
@@ -102,27 +102,32 @@ export abstract class BaseChannelAdapter {
    * to update a streaming card in real-time. Only called for adapters
    * that support streaming cards (e.g. Feishu CardKit v2).
    */
-  onStreamText?(_chatId: string, _fullText: string): void;
+  onStreamText?(_chatId: string, _fullText: string, _streamKey?: string): void;
 
   /**
    * Start a detached streaming UI cycle that is not tied to the current
    * inbound IM message. Shared desktop-thread mirroring uses this to create
    * a standalone streaming card/message in channels that support it.
    */
-  onMirrorStreamStart?(_chatId: string): void;
+  onMirrorStreamStart?(_chatId: string, _streamKey?: string): void;
 
   /**
    * Called when tool_use / tool_result events arrive during streaming.
    * Adapter can use this to display tool progress in the streaming card.
    */
-  onToolEvent?(_chatId: string, _tools: import('./types.js').ToolCallInfo[]): void;
+  onToolEvent?(_chatId: string, _tools: import('./types.js').ToolCallInfo[], _streamKey?: string): void;
 
   /**
    * Called when streaming ends. Adapter should finalize the streaming card
    * (close streaming mode, add footer, etc.).
    * Returns true if a card was finalized (caller should skip normal delivery).
    */
-  onStreamEnd?(_chatId: string, _status: 'completed' | 'interrupted' | 'error', _responseText: string): Promise<boolean>;
+  onStreamEnd?(
+    _chatId: string,
+    _status: 'completed' | 'interrupted' | 'error',
+    _responseText: string,
+    _streamKey?: string,
+  ): Promise<boolean>;
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

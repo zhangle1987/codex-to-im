@@ -183,8 +183,6 @@ describe('bridge-manager resolveCommandAlias', () => {
   });
 
   it('maps short session and history aliases', () => {
-    assert.equal(_testOnly.resolveCommandAlias('/s', ''), '/sessions');
-    assert.equal(_testOnly.resolveCommandAlias('/s', '2'), '/use');
     assert.equal(_testOnly.resolveCommandAlias('/his', ''), '/history');
     assert.equal(_testOnly.resolveCommandAlias('/his', 'raw'), '/history');
   });
@@ -205,6 +203,20 @@ describe('bridge-manager resolveCommandAlias', () => {
     assert.equal(_testOnly.normalizeReasoningEffort('5'), 'xhigh');
     assert.equal(_testOnly.normalizeReasoningEffort('xhigh'), 'xhigh');
     assert.equal(_testOnly.normalizeReasoningEffort('9'), null);
+  });
+
+  it('builds distinct stream keys for separate IM turns in the same session', () => {
+    const first = _testOnly.buildInteractiveStreamKey('session-1', 'msg-1');
+    const second = _testOnly.buildInteractiveStreamKey('session-1', 'msg-2');
+    assert.notEqual(first, second);
+    assert.equal(first, 'im:session-1:msg-1');
+  });
+
+  it('builds stable mirror stream keys from session and turn identity', () => {
+    const withTurnId = _testOnly.buildMirrorStreamKey('session-1', 'turn-1', '2026-03-27T10:00:00.000Z');
+    const fallback = _testOnly.buildMirrorStreamKey('session-1', null, '2026-03-27T10:00:00.000Z');
+    assert.equal(withTurnId, 'mirror:session-1:turn-1');
+    assert.equal(fallback, 'mirror:session-1:2026-03-27T10:00:00.000Z');
   });
 
   it('surfaces binding conflict errors to the user', () => {
@@ -404,6 +416,7 @@ describe('bridge-manager status formatting', () => {
   it('buffers desktop user mirror text into the active turn instead of finalizing immediately', () => {
     const subscription = {
       pendingTurn: null,
+      sessionId: 'session-1',
       threadId: 'thread-1',
     } as { pendingTurn: unknown; threadId: string };
 
@@ -420,6 +433,7 @@ describe('bridge-manager status formatting', () => {
     assert.deepEqual(finalized, []);
     assert.deepEqual(subscription.pendingTurn, {
       turnId: null,
+      streamKey: 'mirror:session-1:2026-03-25T08:00:00.000Z',
       startedAt: '2026-03-25T08:00:00.000Z',
       lastActivityAt: '2026-03-25T08:00:00.000Z',
       userText: 'desktop prompt',
@@ -434,6 +448,7 @@ describe('bridge-manager status formatting', () => {
   it('buffers mirror records until task_complete arrives', () => {
     const subscription = {
       pendingTurn: null,
+      sessionId: 'session-1',
       threadId: 'thread-1',
     } as { pendingTurn: unknown; threadId: string };
 
@@ -479,6 +494,57 @@ describe('bridge-manager status formatting', () => {
 
     assert.deepEqual(finalized, [
       {
+        streamKey: 'mirror:session-1:turn-1',
+        userText: 'desktop prompt',
+        text: 'final answer',
+        signature: 'complete',
+        timestamp: '2026-03-25T08:00:03.000Z',
+        status: 'completed',
+      },
+    ]);
+    assert.equal(subscription.pendingTurn, null);
+  });
+
+  it('keeps the original mirror stream key when turnId arrives after streaming has started', () => {
+    const subscription = {
+      pendingTurn: null,
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+    } as { pendingTurn: any; threadId: string };
+
+    _testOnly.consumeMirrorRecords(subscription as any, [
+      {
+        signature: 'user',
+        type: 'message',
+        role: 'user',
+        content: 'desktop prompt',
+        timestamp: '2026-03-25T08:00:00.000Z',
+      },
+    ]);
+
+    assert.equal(subscription.pendingTurn?.streamKey, 'mirror:session-1:2026-03-25T08:00:00.000Z');
+
+    const finalized = _testOnly.consumeMirrorRecords(subscription as any, [
+      {
+        signature: 'start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:00.500Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'complete',
+        type: 'task_complete',
+        role: 'assistant',
+        content: 'final answer',
+        timestamp: '2026-03-25T08:00:03.000Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.deepEqual(finalized, [
+      {
+        streamKey: 'mirror:session-1:2026-03-25T08:00:00.000Z',
         userText: 'desktop prompt',
         text: 'final answer',
         signature: 'complete',
@@ -492,6 +558,7 @@ describe('bridge-manager status formatting', () => {
   it('accumulates streamed mirror text instead of replacing earlier chunks', () => {
     const subscription = {
       pendingTurn: null,
+      sessionId: 'session-1',
       threadId: 'thread-1',
     } as { pendingTurn: any; threadId: string };
 
@@ -535,6 +602,7 @@ describe('bridge-manager status formatting', () => {
   it('keeps tool-only mirror turns finalizable so streaming cards can close cleanly', () => {
     const subscription = {
       pendingTurn: null,
+      sessionId: 'session-1',
       threadId: 'thread-1',
     } as { pendingTurn: unknown; threadId: string };
 
@@ -574,6 +642,7 @@ describe('bridge-manager status formatting', () => {
 
     assert.deepEqual(finalized, [
       {
+        streamKey: 'mirror:session-1:turn-1',
         userText: null,
         text: '',
         signature: 'complete',
@@ -587,6 +656,7 @@ describe('bridge-manager status formatting', () => {
   it('drains buffered mirror records after a busy window ends', () => {
     const subscription = {
       pendingTurn: null,
+      sessionId: 'session-1',
       threadId: 'thread-1',
       bufferedRecords: [
         {
@@ -608,6 +678,7 @@ describe('bridge-manager status formatting', () => {
     assert.deepEqual(subscription.bufferedRecords, []);
     assert.deepEqual(subscription.pendingTurn, {
       turnId: null,
+      streamKey: 'mirror:session-1:2026-03-25T08:00:00.000Z',
       startedAt: '2026-03-25T08:00:00.000Z',
       lastActivityAt: '2026-03-25T08:00:00.000Z',
       userText: 'desktop prompt',
@@ -621,10 +692,12 @@ describe('bridge-manager status formatting', () => {
 
   it('checks buffered pending turns for timeout even when no new file data arrived', () => {
     const subscription = {
+      sessionId: 'session-1',
       threadId: 'thread-1',
       bufferedRecords: [],
       pendingTurn: {
         turnId: 'turn-1',
+        streamKey: 'mirror:session-1:turn-1',
         startedAt: '2026-03-25T08:00:00.000Z',
         lastActivityAt: '2026-03-25T08:00:00.000Z',
         userText: null,
@@ -643,11 +716,13 @@ describe('bridge-manager status formatting', () => {
 
     assert.deepEqual(finalized, [
       {
+        streamKey: 'mirror:session-1:turn-1',
         userText: null,
         text: 'stale answer',
         signature: 'timeout:thread-1:turn-1',
         timestamp: '2026-03-25T08:00:00.000Z',
         status: 'interrupted',
+        timedOut: true,
       },
     ]);
     assert.deepEqual(subscription.bufferedRecords, []);
@@ -917,9 +992,11 @@ describe('bridge-manager status formatting', () => {
 
   it('flushes a buffered mirror turn after the idle timeout', () => {
     const subscription = {
+      sessionId: 'session-1',
       threadId: 'thread-1',
       pendingTurn: {
         turnId: 'turn-1',
+        streamKey: 'mirror:session-1:turn-1',
         startedAt: '2026-03-25T08:00:00.000Z',
         lastActivityAt: '2026-03-25T08:00:00.000Z',
         userText: null,
@@ -933,13 +1010,25 @@ describe('bridge-manager status formatting', () => {
     );
 
     assert.deepEqual(flushed, {
+      streamKey: 'mirror:session-1:turn-1',
       userText: null,
       text: 'stale answer',
       signature: 'timeout:thread-1:turn-1',
       timestamp: '2026-03-25T08:00:00.000Z',
       status: 'interrupted',
+      timedOut: true,
     });
     assert.equal(subscription.pendingTurn, null);
+  });
+
+  it('appends a timeout notice after the mirror content', () => {
+    const rendered = _testOnly.formatMirrorMessage('Current Thread', 'Desktop prompt', 'stale answer', true);
+    const withNotice = _testOnly.appendMirrorTimeoutNotice(rendered, true);
+
+    assert.equal(
+      withNotice,
+      '**&lt;Current Thread&gt;**\n\n**我:** Desktop prompt\n\n**codex:** stale answer\n\n> 超时提醒：长时间没有收到新的桌面会话输出，本次流式同步已先结束；如果桌面后续继续产出内容，会重新开始新一轮同步。',
+    );
   });
 });
 

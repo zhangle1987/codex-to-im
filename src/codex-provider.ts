@@ -203,7 +203,9 @@ export class CodexProvider implements LLMProvider {
 
               let sawAnyEvent = false;
               try {
-                const { events } = await thread.runStreamed(input);
+                const { events } = await thread.runStreamed(input, {
+                  signal: params.abortController?.signal,
+                });
 
                 for await (const event of events) {
                   sawAnyEvent = true;
