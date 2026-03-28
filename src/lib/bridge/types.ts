@@ -21,6 +21,8 @@ export type ChannelType = string;
 /** Unique address of a user within a channel */
 export interface ChannelAddress {
   channelType: ChannelType;
+  channelProvider?: string;
+  channelAlias?: string;
   chatId: string;        // Platform-specific chat/channel identifier
   userId?: string;       // Platform-specific user identifier (optional for group chats)
   displayName?: string;  // Human-readable name for audit logs
@@ -100,6 +102,8 @@ export interface SendResult {
 export interface ChannelBinding {
   id: string;
   channelType: ChannelType;
+  channelProvider?: string;
+  channelAlias?: string;
   chatId: string;
   chatUserId?: string;
   chatDisplayName?: string;
@@ -131,6 +135,8 @@ export interface BridgeStatus {
 /** Status of a single channel adapter */
 export interface AdapterStatus {
   channelType: ChannelType;
+  channelProvider?: string;
+  channelAlias?: string;
   running: boolean;
   connectedAt: string | null;
   lastMessageAt: string | null;

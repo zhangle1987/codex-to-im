@@ -12,10 +12,19 @@ import type {
   PreviewCapabilities,
   SendResult,
 } from './types.js';
+import type { ChannelInstance } from '../../config.js';
+
+export interface AdapterRuntimeInstance extends Pick<ChannelInstance, 'id' | 'alias' | 'enabled' | 'config'> {
+  provider: string;
+}
 
 export abstract class BaseChannelAdapter {
   /** Which channel type this adapter handles */
   abstract readonly channelType: ChannelType;
+  /** Underlying provider family (feishu / weixin / telegram / discord / qq). */
+  abstract readonly provider: string;
+  /** Human-readable instance alias, when applicable. */
+  readonly alias?: string;
 
   /**
    * Start the adapter (connect, begin polling/websocket, etc.).
@@ -132,15 +141,15 @@ export abstract class BaseChannelAdapter {
 
 // ── Adapter Registry ────────────────────────────────────────────
 
-const adapterFactories = new Map<string, () => BaseChannelAdapter>();
+const adapterFactories = new Map<string, (instance?: AdapterRuntimeInstance) => BaseChannelAdapter>();
 
-export function registerAdapterFactory(channelType: string, factory: () => BaseChannelAdapter): void {
-  adapterFactories.set(channelType, factory);
+export function registerAdapterFactory(provider: string, factory: (instance?: AdapterRuntimeInstance) => BaseChannelAdapter): void {
+  adapterFactories.set(provider, factory);
 }
 
-export function createAdapter(channelType: string): BaseChannelAdapter | null {
-  const factory = adapterFactories.get(channelType);
-  return factory ? factory() : null;
+export function createAdapter(instance: AdapterRuntimeInstance): BaseChannelAdapter | null {
+  const factory = adapterFactories.get(instance.provider);
+  return factory ? factory(instance) : null;
 }
 
 export function getRegisteredTypes(): string[] {

@@ -72,6 +72,7 @@ const MEDIA_GROUP_DEBOUNCE_MS = 500;
 
 export class TelegramAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'telegram';
+  readonly provider = 'telegram';
 
   private running = false;
   private abortController: AbortController | null = null;

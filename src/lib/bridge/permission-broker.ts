@@ -59,8 +59,8 @@ export async function forwardPermissionRequest(
 
   let result: import('./types.js').SendResult;
 
-  if (adapter.channelType === 'qq' || adapter.channelType === 'weixin') {
-    const channelLabel = adapter.channelType === 'weixin' ? 'WeChat' : 'QQ';
+  if (adapter.provider === 'qq' || adapter.provider === 'weixin') {
+    const channelLabel = adapter.provider === 'weixin' ? 'WeChat' : 'QQ';
     // QQ / WeChat: plain text permission prompt with copyable /perm commands (no inline buttons)
     const plainText = [
       `Permission Required`,

@@ -2,10 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import QRCode from 'qrcode';
-import { CTI_HOME, loadConfig } from './config.js';
+import { CTI_HOME } from './config.js';
 import { startLoginQr, pollLoginQrStatus } from './adapters/weixin/weixin-api.js';
 import { DEFAULT_BASE_URL, DEFAULT_CDN_BASE_URL } from './adapters/weixin/weixin-types.js';
 import { listWeixinAccounts, upsertWeixinAccount } from './weixin-store.js';
+import type { WeixinChannelConfig } from './config.js';
 
 type LoginStatus = 'waiting' | 'scanned' | 'confirmed' | 'failed';
 
@@ -187,10 +188,9 @@ async function refreshSession(previous: LoginSession, baseUrl?: string): Promise
   return next;
 }
 
-export async function runWeixinLogin(): Promise<{ accountId: string; htmlPath: string }> {
+export async function runWeixinLogin(config: WeixinChannelConfig = {}): Promise<{ accountId: string; htmlPath: string }> {
   ensureRuntimeDir();
-  const config = loadConfig();
-  let session = await createSession(0, config.weixinBaseUrl);
+  let session = await createSession(0, config.baseUrl);
   await writeQrHtml(session);
   const opened = openQrHtml();
 
@@ -204,11 +204,11 @@ export async function runWeixinLogin(): Promise<{ accountId: string; htmlPath: s
 
   while (true) {
     if (Date.now() - session.startedAt > QR_TTL_MS) {
-      session = await refreshSession(session, config.weixinBaseUrl);
+      session = await refreshSession(session, config.baseUrl);
       lastStatus = session.status;
     }
 
-    const response = await pollLoginQrStatus(session.qrcode, config.weixinBaseUrl);
+    const response = await pollLoginQrStatus(session.qrcode, config.baseUrl);
     switch (response.status) {
       case 'wait':
         session.status = 'waiting';
@@ -226,8 +226,8 @@ export async function runWeixinLogin(): Promise<{ accountId: string; htmlPath: s
         upsertWeixinAccount({
           accountId,
           userId: response.ilink_user_id || '',
-          baseUrl: config.weixinBaseUrl || response.baseurl || DEFAULT_BASE_URL,
-          cdnBaseUrl: config.weixinCdnBaseUrl || DEFAULT_CDN_BASE_URL,
+          baseUrl: config.baseUrl || response.baseurl || DEFAULT_BASE_URL,
+          cdnBaseUrl: config.cdnBaseUrl || DEFAULT_CDN_BASE_URL,
           token: response.bot_token,
           name: accountId,
           enabled: true,
@@ -240,7 +240,7 @@ export async function runWeixinLogin(): Promise<{ accountId: string; htmlPath: s
         return { accountId, htmlPath: HTML_PATH };
       }
       case 'expired':
-        session = await refreshSession(session, config.weixinBaseUrl);
+        session = await refreshSession(session, config.baseUrl);
         lastStatus = session.status;
         continue;
       default:

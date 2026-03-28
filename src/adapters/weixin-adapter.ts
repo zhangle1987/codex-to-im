@@ -5,7 +5,8 @@ import type {
   OutboundMessage,
   SendResult,
 } from '../lib/bridge/types.js';
-import { BaseChannelAdapter, registerAdapterFactory } from '../lib/bridge/channel-adapter.js';
+import type { WeixinChannelConfig } from '../config.js';
+import { BaseChannelAdapter, registerAdapterFactory, type AdapterRuntimeInstance } from '../lib/bridge/channel-adapter.js';
 import { getBridgeContext } from '../lib/bridge/context.js';
 import {
   getWeixinAccount,
@@ -36,7 +37,10 @@ const BACKOFF_BASE_MS = 2_000;
 const BACKOFF_MAX_MS = 30_000;
 
 export class WeixinAdapter extends BaseChannelAdapter {
-  readonly channelType: ChannelType = 'weixin';
+  readonly channelType: ChannelType;
+  readonly provider = 'weixin';
+  readonly alias?: string;
+  private readonly channelConfig: WeixinChannelConfig;
 
   private _running = false;
   private idleLogged = false;
@@ -55,6 +59,22 @@ export class WeixinAdapter extends BaseChannelAdapter {
     sealed: boolean;
   }>();
   private nextBatchId = 1;
+
+  constructor(instance?: AdapterRuntimeInstance) {
+    super();
+    this.channelType = instance?.id || 'weixin';
+    this.alias = instance?.alias;
+    this.channelConfig = (instance?.config || {}) as WeixinChannelConfig;
+  }
+
+  private get mediaEnabled(): boolean {
+    return this.channelConfig.mediaEnabled === true;
+  }
+
+  private get configuredAccountId(): string | undefined {
+    const value = this.channelConfig.accountId?.trim();
+    return value || undefined;
+  }
 
   async start(): Promise<void> {
     if (this._running) return;
@@ -144,7 +164,9 @@ export class WeixinAdapter extends BaseChannelAdapter {
   }
 
   validateConfig(): string | null {
-    const linkedAccounts = listWeixinAccounts().filter((account) => account.enabled && account.token);
+    const linkedAccounts = this.filterConfiguredAccounts(
+      listWeixinAccounts().filter((account) => account.enabled && account.token),
+    );
     if (linkedAccounts.length === 0) {
       return 'No linked WeChat account. Run the WeChat QR login helper first.';
     }
@@ -180,7 +202,9 @@ export class WeixinAdapter extends BaseChannelAdapter {
   }
 
   private async reconcileAccounts(): Promise<void> {
-    const linkedAccounts = listWeixinAccounts().filter((account) => account.enabled && account.token);
+    const linkedAccounts = this.filterConfiguredAccounts(
+      listWeixinAccounts().filter((account) => account.enabled && account.token),
+    );
     if (linkedAccounts.length === 0 && this.pollAborts.size === 0) {
       if (!this.idleLogged) {
         console.log('[weixin-adapter] No linked WeChat account is enabled, adapter started but idle');
@@ -342,7 +366,7 @@ export class WeixinAdapter extends BaseChannelAdapter {
     const attachments: FileAttachment[] = [];
     let failedCount = 0;
     let missingVoiceTranscriptCount = 0;
-    const mediaEnabled = getBridgeContext().store.getSetting('bridge_weixin_media_enabled') === 'true';
+    const mediaEnabled = this.mediaEnabled;
     const account = mediaEnabled ? getWeixinAccount(accountId) : undefined;
     const creds = account ? this.accountToCreds(account) : undefined;
 
@@ -398,7 +422,9 @@ export class WeixinAdapter extends BaseChannelAdapter {
     const inbound: InboundMessage = {
       messageId: message.message_id || `weixin_${accountId}_${message.seq || Date.now()}`,
       address: {
-        channelType: 'weixin',
+        channelType: this.channelType,
+        channelProvider: this.provider,
+        channelAlias: this.alias,
         chatId,
         userId: message.from_user_id,
         displayName: message.from_user_id.slice(0, 12),
@@ -442,7 +468,9 @@ export class WeixinAdapter extends BaseChannelAdapter {
         ? `[${failedCount} attachment(s) failed]`
         : inbound.text.slice(0, 200);
     getBridgeContext().store.insertAuditLog({
-      channelType: 'weixin',
+      channelType: this.channelType,
+      channelProvider: this.provider,
+      channelAlias: this.alias,
       chatId,
       direction: 'inbound',
       messageId: inbound.messageId,
@@ -524,6 +552,11 @@ export class WeixinAdapter extends BaseChannelAdapter {
     getBridgeContext().store.setChannelOffset(batch.offsetKey, batch.cursor);
     this.pendingCursors.delete(updateId);
   }
+
+  private filterConfiguredAccounts(accounts: ReturnType<typeof listWeixinAccounts>) {
+    if (!this.configuredAccountId) return accounts;
+    return accounts.filter((account) => account.accountId === this.configuredAccountId);
+  }
 }
 
 function stripFormatting(text: string, parseMode?: 'HTML' | 'Markdown' | 'plain'): string {
@@ -536,4 +569,4 @@ function stripFormatting(text: string, parseMode?: 'HTML' | 'Markdown' | 'plain'
   return text;
 }
 
-registerAdapterFactory('weixin', () => new WeixinAdapter());
+registerAdapterFactory('weixin', (instance) => new WeixinAdapter(instance));

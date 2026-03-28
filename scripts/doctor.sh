@@ -317,8 +317,15 @@ if [ -f "$CONFIG_FILE" ]; then
   if echo "$CTI_CHANNELS" | grep -q feishu; then
     FS_APP_ID=$(get_config CTI_FEISHU_APP_ID)
     FS_SECRET=$(get_config CTI_FEISHU_APP_SECRET)
-    FS_DOMAIN=$(get_config CTI_FEISHU_DOMAIN)
-    FS_DOMAIN="${FS_DOMAIN:-https://open.feishu.cn}"
+    FS_SITE=$(get_config CTI_FEISHU_SITE)
+    case "$FS_SITE" in
+      lark|*open.larksuite.com*)
+        FS_DOMAIN="https://open.larksuite.com"
+        ;;
+      *)
+        FS_DOMAIN="https://open.feishu.cn"
+        ;;
+    esac
     if [ -n "$FS_APP_ID" ] && [ -n "$FS_SECRET" ]; then
       FEISHU_RESULT=$(curl -s --max-time 5 -X POST "${FS_DOMAIN}/open-apis/auth/v3/tenant_access_token/internal" \
         -H "Content-Type: application/json" \

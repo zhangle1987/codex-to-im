@@ -35,6 +35,7 @@ import {
 
 export class QQAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'qq';
+  readonly provider = 'qq';
 
   private _running = false;
   private queue: InboundMessage[] = [];

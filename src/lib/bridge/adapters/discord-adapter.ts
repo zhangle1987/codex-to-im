@@ -54,6 +54,7 @@ async function loadDiscordJs() {
 
 export class DiscordAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'discord';
+  readonly provider = 'discord';
 
   private running = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -8,7 +8,7 @@ The product is no longer centered around a Codex skill. The main path is:
 
 1. Install `codex-to-im`
 2. Open the local web workbench
-3. Configure IM channels
+3. Create one or more channel instances in the workbench
 4. Start the bridge in the background
 5. Bind real desktop Codex threads to Feishu or Weixin chats
 
@@ -29,8 +29,8 @@ Windows host installation guide: [docs/install-windows.md](docs/install-windows.
 
 - Local background bridge service
 - Local web workbench for configuration, testing, logs, and bindings
-- Feishu credential setup and connectivity testing
-- Weixin QR login flow
+- Multi-instance Feishu bot setup and connectivity testing
+- Multi-instance Weixin login flow
 - Desktop session discovery from `~/.codex/sessions`
 - Web-side binding updates for IM chats
 
@@ -123,12 +123,13 @@ codex-to-im stop
 ## Main Workflow
 
 1. Open the workbench
-2. Fill in Feishu credentials or trigger Weixin QR login
-3. Save config and test connectivity
-4. Start the bridge
-5. Open the desktop sessions section
-6. Bind a Feishu or Weixin chat to the target thread
-7. Continue the same Codex thread from IM
+2. Create a Feishu or Weixin channel instance in the workbench
+3. Give the instance an alias such as `Feishu Main` or `Weixin Work`
+4. Save config and test connectivity
+5. Start the bridge
+6. Open the desktop sessions section
+7. Bind a Feishu or Weixin chat to the target thread
+8. Continue the same Codex thread from IM
 
 If LAN access is enabled, the easiest path is to copy the LAN login link from the local workbench and open it on your phone or another device on the same network.
 
@@ -179,7 +180,13 @@ The configuration page also includes Codex runtime controls:
   - global default reasoning level
   - can be overridden per IM session with `/reasoning`
   - official runtime levels are `minimal`, `low`, `medium`, `high`, `xhigh`
-  - IM numeric aliases are `1=minimal`, `2=low`, `3=medium`, `4=high`, `5=xhigh`
+- IM numeric aliases are `1=minimal`, `2=low`, `3=medium`, `4=high`, `5=xhigh`
+
+The primary persisted configuration now lives in:
+
+- `~/.codex-to-im/config.v2.json`
+
+The legacy `config.env` file is still written as a compatibility snapshot, but it no longer fully represents multi-instance channel setup.
 
 If you are using `codex-to-im` on your own development machine for real coding work, the more aggressive recommended setup is:
 
@@ -192,6 +199,8 @@ The channel pages also expose a “Use Markdown for bridge feedback” switch:
 - enabled by default for Feishu
 - disabled by default for WeChat
 - affects text sent through the bridge, including normal replies, shared-thread mirror messages, and system feedback such as `/h`, `/status`, and `/threads`
+
+Each channel instance can have its own alias. The alias only identifies which IM entry point handled the chat; it does not change Codex session semantics or model behavior.
 
 ## Update
 

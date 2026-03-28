@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import type { BridgeSession, BridgeStore } from './lib/bridge/host.js';
 import type { ChannelBinding } from './lib/bridge/types.js';
+import { findChannelInstance, loadConfig, type ChannelProvider } from './config.js';
 import {
   getDesktopSessionByThreadId,
   isArchivedDesktopThread,
@@ -22,6 +23,8 @@ export interface BindingTargetOption {
 export interface BindingSummary {
   id: string;
   channelType: string;
+  channelProvider?: string;
+  channelAlias?: string;
   chatId: string;
   chatUserId?: string;
   chatDisplayName?: string;
@@ -39,8 +42,31 @@ export interface BindingSummary {
   mirrorLastEventAt?: string;
 }
 
-function formatChannelLabel(channelType: string): string {
-  return channelType === 'weixin' ? '微信' : channelType === 'feishu' ? '飞书' : channelType;
+function asChannelProvider(value: string | undefined): ChannelProvider | undefined {
+  return value === 'feishu' || value === 'weixin' ? value : undefined;
+}
+
+function resolveChannelMeta(channelType: string, provider?: ChannelProvider): {
+  provider?: ChannelProvider;
+  alias?: string;
+} {
+  const instance = findChannelInstance(channelType, loadConfig());
+  if (instance) {
+    return {
+      provider: instance.provider,
+      alias: instance.alias,
+    };
+  }
+  return {
+    provider,
+    alias: channelType,
+  };
+}
+
+function formatChannelLabel(binding: Pick<ChannelBinding, 'channelType' | 'channelProvider' | 'channelAlias'>): string {
+  return binding.channelAlias?.trim()
+    || resolveChannelMeta(binding.channelType, asChannelProvider(binding.channelProvider)).alias
+    || binding.channelType;
 }
 
 function formatBindingChatTarget(binding: ChannelBinding): string {
@@ -77,7 +103,7 @@ function assertBindingTargetAvailable(
   if (!conflict) return;
 
   throw new Error(
-    `该会话已绑定到 ${formatChannelLabel(conflict.channelType)} 聊天 ${formatBindingChatTarget(conflict)}。一个会话只能绑定一个聊天。`,
+    `该会话已绑定到 ${formatChannelLabel(conflict)} 聊天 ${formatBindingChatTarget(conflict)}。一个会话只能绑定一个聊天。`,
   );
 }
 
@@ -109,9 +135,12 @@ export function bindStoreToSession(
     { channelType, chatId },
     { sessionId: session.id, sdkSessionId: session.sdk_session_id || undefined },
   );
+  const meta = resolveChannelMeta(channelType);
 
   return store.upsertChannelBinding({
     channelType,
+    channelProvider: meta.provider,
+    channelAlias: meta.alias,
     chatId,
     codepilotSessionId: session.id,
     sdkSessionId: session.sdk_session_id || '',
@@ -133,11 +162,14 @@ export function bindStoreToSdkSession(
     { channelType, chatId },
     { sdkSessionId },
   );
+  const meta = resolveChannelMeta(channelType);
 
   const existing = store.findSessionBySdkSessionId(sdkSessionId);
   if (existing) {
       return store.upsertChannelBinding({
         channelType,
+        channelProvider: meta.provider,
+        channelAlias: meta.alias,
         chatId,
         codepilotSessionId: existing.id,
         sdkSessionId,
@@ -164,6 +196,8 @@ export function bindStoreToSdkSession(
 
   return store.upsertChannelBinding({
     channelType,
+    channelProvider: meta.provider,
+    channelAlias: meta.alias,
     chatId,
     codepilotSessionId: session.id,
     sdkSessionId,
@@ -206,6 +240,8 @@ export function listBindingSummaries(store: BridgeStore): BindingSummary[] {
     return {
       id: binding.id,
       channelType: binding.channelType,
+      channelProvider: binding.channelProvider,
+      channelAlias: binding.channelAlias,
       chatId: binding.chatId,
       chatUserId: binding.chatUserId,
       chatDisplayName: binding.chatDisplayName,
@@ -223,7 +259,9 @@ export function listBindingSummaries(store: BridgeStore): BindingSummary[] {
       mirrorLastEventAt: session?.mirror_last_event_at,
     };
   }).sort((a, b) => {
-    if (a.channelType !== b.channelType) return a.channelType.localeCompare(b.channelType);
+    const aLabel = a.channelAlias || a.channelType;
+    const bLabel = b.channelAlias || b.channelType;
+    if (aLabel !== bLabel) return aLabel.localeCompare(bLabel);
     return a.chatId.localeCompare(b.chatId);
   });
 }

@@ -115,6 +115,6 @@ export function stripOutboundArtifactBlocksForStreaming(text: string): string {
   return stripped.replace(/\n{3,}/g, '\n\n').trimEnd();
 }
 
-export function supportsOutboundArtifacts(channelType: string): boolean {
-  return channelType === 'feishu';
+export function supportsOutboundArtifacts(provider: string): boolean {
+  return provider === 'feishu';
 }

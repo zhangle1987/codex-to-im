@@ -28,7 +28,12 @@ import type {
 } from '../types.js';
 import type { FileAttachment } from '../types.js';
 import type { ToolCallInfo } from '../types.js';
-import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
+import {
+  feishuSiteToApiBaseUrl,
+  normalizeFeishuSite,
+  type FeishuChannelConfig,
+} from '../../../config.js';
+import { BaseChannelAdapter, registerAdapterFactory, type AdapterRuntimeInstance } from '../channel-adapter.js';
 import { getBridgeContext } from '../context.js';
 import {
   htmlToFeishuMarkdown,
@@ -105,7 +110,10 @@ const MIME_BY_TYPE: Record<string, string> = {
 };
 
 export class FeishuAdapter extends BaseChannelAdapter {
-  readonly channelType: ChannelType = 'feishu';
+  readonly channelType: ChannelType;
+  readonly provider = 'feishu';
+  readonly alias?: string;
+  private readonly channelConfig: FeishuChannelConfig;
 
   private running = false;
   private queue: InboundMessage[] = [];
@@ -129,8 +137,27 @@ export class FeishuAdapter extends BaseChannelAdapter {
     | { token: string; expiresAt: number; appId: string; appSecret: string; domain: string }
     | null = null;
 
+  constructor(instance?: AdapterRuntimeInstance) {
+    super();
+    this.channelType = instance?.id || 'feishu';
+    this.alias = instance?.alias;
+    this.channelConfig = (instance?.config || {}) as FeishuChannelConfig;
+  }
+
+  private get appId(): string {
+    return this.channelConfig.appId?.trim() || '';
+  }
+
+  private get appSecret(): string {
+    return this.channelConfig.appSecret?.trim() || '';
+  }
+
+  private get site(): 'feishu' | 'lark' {
+    return normalizeFeishuSite(this.channelConfig.site);
+  }
+
   private isStreamingEnabled(): boolean {
-    return getBridgeContext().store.getSetting('bridge_feishu_streaming_enabled') !== 'false';
+    return this.channelConfig.streamingEnabled !== false;
   }
 
   private resolveStreamKey(chatId: string, streamKey?: string): string {
@@ -148,10 +175,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
 
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id') || '';
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret') || '';
-    const domainSetting = getBridgeContext().store.getSetting('bridge_feishu_domain') || 'feishu';
-    const domain = domainSetting === 'lark'
+    const appId = this.appId;
+    const appSecret = this.appSecret;
+    const site = this.site;
+    const domain = site === 'lark'
       ? lark.Domain.Lark
       : lark.Domain.Feishu;
 
@@ -349,7 +376,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const callbackMsg: import('../types.js').InboundMessage = {
         messageId: messageId || `card_action_${Date.now()}`,
         address: {
-          channelType: 'feishu',
+          channelType: this.channelType,
+          channelProvider: this.provider,
+          channelAlias: this.alias,
           chatId,
           userId,
         },
@@ -734,19 +763,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   private getOpenApiBaseUrl(): string {
-    const configured = (getBridgeContext().store.getSetting('bridge_feishu_domain') || '').trim().replace(/\/+$/, '');
-    if (configured.startsWith('http://') || configured.startsWith('https://')) {
-      return configured;
-    }
-    if (configured.toLowerCase() === 'lark') {
-      return 'https://open.larksuite.com';
-    }
-    return 'https://open.feishu.cn';
+    return feishuSiteToApiBaseUrl(this.site);
   }
 
   private async getTenantAccessToken(): Promise<string> {
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id') || '';
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret') || '';
+    const appId = this.appId;
+    const appSecret = this.appSecret;
     const domain = this.getOpenApiBaseUrl();
     if (!appId || !appSecret) {
       throw new Error('Feishu App ID / App Secret not configured');
@@ -1136,20 +1158,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
-    const enabled = getBridgeContext().store.getSetting('bridge_feishu_enabled');
-    if (enabled !== 'true') return 'bridge_feishu_enabled is not true';
+    const appId = this.appId;
+    if (!appId) return 'Feishu App ID 未配置';
 
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id');
-    if (!appId) return 'bridge_feishu_app_id not configured';
-
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret');
-    if (!appSecret) return 'bridge_feishu_app_secret not configured';
+    const appSecret = this.appSecret;
+    if (!appSecret) return 'Feishu App Secret 未配置';
 
     return null;
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    const allowedUsers = getBridgeContext().store.getSetting('bridge_feishu_allowed_users') || '';
+    const allowedUsers = (this.channelConfig.allowedUsers || []).join(',');
     if (!allowedUsers) {
       // No restriction configured — allow all
       return true;
@@ -1229,7 +1248,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
         console.log('[feishu-adapter] Group message ignored (bot not @mentioned), chatId:', chatId, 'msgId:', msg.message_id);
         try {
           getBridgeContext().store.insertAuditLog({
-            channelType: 'feishu',
+            channelType: this.channelType,
+            channelProvider: this.provider,
+            channelAlias: this.alias,
             chatId,
             direction: 'inbound',
             messageId: msg.message_id,
@@ -1263,7 +1284,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
           text = '[image download failed]';
           try {
             getBridgeContext().store.insertAuditLog({
-              channelType: 'feishu',
+              channelType: this.channelType,
+              channelProvider: this.provider,
+              channelAlias: this.alias,
               chatId,
               direction: 'inbound',
               messageId: msg.message_id,
@@ -1286,7 +1309,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
           text = `[${messageType} download failed]`;
           try {
             getBridgeContext().store.insertAuditLog({
-              channelType: 'feishu',
+              channelType: this.channelType,
+              channelProvider: this.provider,
+              channelAlias: this.alias,
               chatId,
               direction: 'inbound',
               messageId: msg.message_id,
@@ -1319,7 +1344,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     const timestamp = parseInt(msg.create_time, 10) || Date.now();
     const address = {
-      channelType: 'feishu' as const,
+      channelType: this.channelType,
+      channelProvider: this.provider,
+      channelAlias: this.alias,
       chatId,
       userId,
     };
@@ -1360,7 +1387,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
         ? `[${attachments.length} attachment(s)] ${text.slice(0, 150)}`
         : text.slice(0, 200);
       getBridgeContext().store.insertAuditLog({
-        channelType: 'feishu',
+        channelType: this.channelType,
+        channelProvider: this.provider,
+        channelAlias: this.alias,
         chatId,
         direction: 'inbound',
         messageId: msg.message_id,
@@ -1628,4 +1657,4 @@ export class FeishuAdapter extends BaseChannelAdapter {
 }
 
 // Self-register so bridge-manager can create FeishuAdapter via the registry.
-registerAdapterFactory('feishu', () => new FeishuAdapter());
+registerAdapterFactory('feishu', (instance) => new FeishuAdapter(instance));

@@ -107,6 +107,8 @@ export interface SettingsProvider {
 /** Input for creating an audit log entry. */
 export interface AuditLogInput {
   channelType: string;
+  channelProvider?: string;
+  channelAlias?: string;
   chatId: string;
   direction: 'inbound' | 'outbound';
   messageId: string;
@@ -117,6 +119,8 @@ export interface AuditLogInput {
 export interface PermissionLinkInput {
   permissionRequestId: string;
   channelType: string;
+  channelProvider?: string;
+  channelAlias?: string;
   chatId: string;
   messageId: string;
   sessionId?: string;
@@ -137,6 +141,8 @@ export interface PermissionLinkRecord {
 /** Input for inserting an outbound reference. */
 export interface OutboundRefInput {
   channelType: string;
+  channelProvider?: string;
+  channelAlias?: string;
   chatId: string;
   codepilotSessionId: string;
   platformMessageId: string;
@@ -146,6 +152,8 @@ export interface OutboundRefInput {
 /** Input for upserting a channel binding. */
 export interface UpsertChannelBindingInput {
   channelType: string;
+  channelProvider?: string;
+  channelAlias?: string;
   chatId: string;
   chatUserId?: string;
   chatDisplayName?: string;

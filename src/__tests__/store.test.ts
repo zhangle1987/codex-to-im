@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { JsonFileStore } from '../store.js';
-import { CTI_HOME } from '../config.js';
+import { CTI_HOME, CONFIG_V2_PATH } from '../config.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 
@@ -143,6 +143,78 @@ describe('JsonFileStore', () => {
     assert.equal(store.listChannelBindings('telegram').length, 1);
     assert.equal(store.listChannelBindings('discord').length, 1);
     assert.equal(store.listChannelBindings().length, 2);
+  });
+
+  it('migrates legacy singleton channel bindings to default v2 channel instances on reload', () => {
+    const configBackup = fs.existsSync(CONFIG_V2_PATH) ? fs.readFileSync(CONFIG_V2_PATH, 'utf-8') : null;
+    try {
+      fs.mkdirSync(path.dirname(CONFIG_V2_PATH), { recursive: true });
+      fs.writeFileSync(
+        CONFIG_V2_PATH,
+        JSON.stringify({
+          schemaVersion: 2,
+          runtime: {
+            provider: 'codex',
+            defaultMode: 'code',
+            historyMessageLimit: 8,
+          },
+          channels: [
+            {
+              id: 'feishu-default',
+              alias: '飞书主机器人',
+              provider: 'feishu',
+              enabled: true,
+              createdAt: '2026-03-28T00:00:00.000Z',
+              updatedAt: '2026-03-28T00:00:00.000Z',
+              config: {
+                appId: 'app-id',
+              },
+            },
+          ],
+        }, null, 2),
+      );
+
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(
+        path.join(DATA_DIR, 'bindings.json'),
+        JSON.stringify({
+          legacy: {
+            id: 'legacy',
+            channelType: 'feishu',
+            chatId: 'oc_legacy',
+            codepilotSessionId: 'sess-legacy',
+            workingDirectory: '/tmp',
+            model: 'gpt-5.4',
+            mode: 'code',
+            active: true,
+            createdAt: '2026-03-28T00:00:00.000Z',
+            updatedAt: '2026-03-28T00:00:00.000Z',
+          },
+        }, null, 2),
+      );
+
+      const store = new JsonFileStore(makeSettings());
+      const binding = store.getChannelBinding('feishu-default', 'oc_legacy');
+      assert.ok(binding);
+      assert.equal(binding.channelType, 'feishu-default');
+      assert.equal(binding.channelProvider, 'feishu');
+      assert.equal(binding.channelAlias, '飞书主机器人');
+
+      const persisted = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'bindings.json'), 'utf-8')) as Record<string, {
+        channelType: string;
+        channelProvider?: string;
+        channelAlias?: string;
+      }>;
+      const persistedBinding = Object.values(persisted).find((entry) => entry.channelType === 'feishu-default');
+      assert.ok(persistedBinding);
+      assert.equal(persistedBinding.channelProvider, 'feishu');
+      assert.equal(persistedBinding.channelAlias, '飞书主机器人');
+    } finally {
+      fs.rmSync(CONFIG_V2_PATH, { force: true });
+      if (configBackup !== null) {
+        fs.writeFileSync(CONFIG_V2_PATH, configBackup);
+      }
+    }
   });
 
   it('addMessage and getMessages', () => {

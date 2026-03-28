@@ -20,7 +20,7 @@ import type {
   UpsertChannelBindingInput,
 } from './lib/bridge/host.js';
 import type { ChannelBinding, ChannelType } from './lib/bridge/types.js';
-import { CTI_HOME, configToSettings, loadConfig } from './config.js';
+import { CTI_HOME, configToSettings, findChannelInstance, loadConfig } from './config.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
@@ -56,6 +56,48 @@ function uuid(): string {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function defaultAliasForProvider(provider: string | undefined): string | undefined {
+  if (provider === 'feishu') return '飞书';
+  if (provider === 'weixin') return '微信';
+  return undefined;
+}
+
+function normalizeLegacyBinding(binding: ChannelBinding): ChannelBinding {
+  const config = loadConfig();
+  const legacyProvider = binding.channelType === 'feishu' || binding.channelType === 'weixin'
+    ? binding.channelType
+    : undefined;
+  const resolvedInstance = legacyProvider
+    ? (config.channels || []).find((channel) => channel.provider === legacyProvider)
+    : findChannelInstance(binding.channelType, config);
+
+  if (!resolvedInstance && !legacyProvider) {
+    return {
+      ...binding,
+      active: binding.active !== false,
+    };
+  }
+
+  const channelType = resolvedInstance?.id || binding.channelType;
+  const channelProvider = resolvedInstance?.provider || legacyProvider || binding.channelProvider;
+  const channelAlias = resolvedInstance?.alias || binding.channelAlias || defaultAliasForProvider(channelProvider);
+
+  return {
+    ...binding,
+    channelType,
+    channelProvider,
+    channelAlias,
+    active: binding.active !== false,
+  };
+}
+
+function didBindingChange(before: ChannelBinding, after: ChannelBinding): boolean {
+  return before.channelType !== after.channelType
+    || before.channelProvider !== after.channelProvider
+    || before.channelAlias !== after.channelAlias
+    || (before.active !== false) !== after.active;
 }
 
 // ── Lock entry ──
@@ -141,7 +183,22 @@ export class JsonFileStore implements BridgeStore {
       path.join(DATA_DIR, 'bindings.json'),
       {},
     );
-    this.bindings = new Map(Object.entries(bindings));
+    const normalized = new Map<string, ChannelBinding>();
+    let changed = false;
+
+    for (const binding of Object.values(bindings)) {
+      const normalizedBinding = normalizeLegacyBinding(binding);
+      if (didBindingChange(binding, normalizedBinding)) {
+        changed = true;
+      }
+
+      normalized.set(`${normalizedBinding.channelType}:${normalizedBinding.chatId}`, normalizedBinding);
+    }
+
+    this.bindings = normalized;
+    if (changed) {
+      this.persistBindings();
+    }
   }
 
   private persistSessions(): void {
@@ -236,6 +293,8 @@ export class JsonFileStore implements BridgeStore {
         ...existing,
         codepilotSessionId: data.codepilotSessionId,
         sdkSessionId: data.sdkSessionId ?? existing.sdkSessionId,
+        channelProvider: data.channelProvider ?? existing.channelProvider,
+        channelAlias: data.channelAlias ?? existing.channelAlias,
         chatUserId: data.chatUserId ?? existing.chatUserId,
         chatDisplayName: data.chatDisplayName ?? existing.chatDisplayName,
         workingDirectory: data.workingDirectory,
@@ -250,6 +309,8 @@ export class JsonFileStore implements BridgeStore {
       const binding: ChannelBinding = {
         id: uuid(),
         channelType: data.channelType,
+        channelProvider: data.channelProvider,
+        channelAlias: data.channelAlias,
         chatId: data.chatId,
         chatUserId: data.chatUserId,
         chatDisplayName: data.chatDisplayName,

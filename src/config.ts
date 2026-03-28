@@ -4,10 +4,11 @@ import path from "node:path";
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ChannelProvider = 'feishu' | 'weixin';
+export type FeishuSite = 'feishu' | 'lark';
 
-export interface Config {
-  runtime: 'claude' | 'codex' | 'auto';
-  enabledChannels: string[];
+export interface RuntimeConfigV2 {
+  provider: 'claude' | 'codex' | 'auto';
   defaultWorkspaceRoot?: string;
   defaultModel?: string;
   defaultMode: string;
@@ -17,35 +18,77 @@ export interface Config {
   codexReasoningEffort?: CodexReasoningEffort;
   uiAllowLan?: boolean;
   uiAccessToken?: string;
-  // Telegram
+  autoApprove?: boolean;
+}
+
+export interface FeishuChannelConfig {
+  appId?: string;
+  appSecret?: string;
+  site?: FeishuSite;
+  allowedUsers?: string[];
+  streamingEnabled?: boolean;
+  feedbackMarkdownEnabled?: boolean;
+}
+
+export interface WeixinChannelConfig {
+  accountId?: string;
+  baseUrl?: string;
+  cdnBaseUrl?: string;
+  mediaEnabled?: boolean;
+  feedbackMarkdownEnabled?: boolean;
+}
+
+export interface ChannelInstance {
+  id: string;
+  alias: string;
+  provider: ChannelProvider;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  config: FeishuChannelConfig | WeixinChannelConfig;
+}
+
+interface ConfigV2File {
+  schemaVersion: 2;
+  runtime: RuntimeConfigV2;
+  channels: ChannelInstance[];
+}
+
+function toFeishuConfig(channel?: ChannelInstance): FeishuChannelConfig | undefined {
+  return channel?.provider === 'feishu' ? channel.config as FeishuChannelConfig : undefined;
+}
+
+function toWeixinConfig(channel?: ChannelInstance): WeixinChannelConfig | undefined {
+  return channel?.provider === 'weixin' ? channel.config as WeixinChannelConfig : undefined;
+}
+
+export interface Config {
+  runtime: RuntimeConfigV2['provider'];
+  defaultWorkspaceRoot?: string;
+  defaultModel?: string;
+  defaultMode: string;
+  historyMessageLimit?: number;
+  codexSkipGitRepoCheck?: boolean;
+  codexSandboxMode?: CodexSandboxMode;
+  codexReasoningEffort?: CodexReasoningEffort;
+  uiAllowLan?: boolean;
+  uiAccessToken?: string;
+  autoApprove?: boolean;
+  schemaVersion?: number;
+  channels?: ChannelInstance[];
+  enabledChannels: string[];
   tgBotToken?: string;
   tgChatId?: string;
   tgAllowedUsers?: string[];
-  // Feishu
-  feishuAppId?: string;
-  feishuAppSecret?: string;
-  feishuDomain?: string;
-  feishuAllowedUsers?: string[];
-  feishuStreamingEnabled?: boolean;
-  feishuCommandMarkdownEnabled?: boolean;
-  // Discord
   discordBotToken?: string;
   discordAllowedUsers?: string[];
   discordAllowedChannels?: string[];
   discordAllowedGuilds?: string[];
-  // QQ
   qqAppId?: string;
   qqAppSecret?: string;
   qqAllowedUsers?: string[];
   qqImageEnabled?: boolean;
   qqMaxImageSize?: number;
-  // WeChat
-  weixinBaseUrl?: string;
-  weixinCdnBaseUrl?: string;
-  weixinMediaEnabled?: boolean;
-  weixinCommandMarkdownEnabled?: boolean;
-  // Auto-approve all tool permission requests without user confirmation
-  autoApprove?: boolean;
 }
 
 const LEGACY_CTI_HOME = path.join(os.homedir(), ".claude-to-im");
@@ -60,6 +103,7 @@ function resolveDefaultCtiHome(): string {
 
 export const CTI_HOME = process.env.CTI_HOME || resolveDefaultCtiHome();
 export const CONFIG_PATH = path.join(CTI_HOME, "config.env");
+export const CONFIG_V2_PATH = path.join(CTI_HOME, "config.v2.json");
 
 export function expandHomePath(value: string | undefined): string | undefined {
   if (!value) return value;
@@ -79,7 +123,6 @@ function parseEnvFile(content: string): Map<string, string> {
     if (eqIdx === -1) continue;
     const key = trimmed.slice(0, eqIdx).trim();
     let value = trimmed.slice(eqIdx + 1).trim();
-    // Strip surrounding quotes
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
@@ -138,64 +181,235 @@ function parseReasoningEffort(value: string | undefined): CodexReasoningEffort |
   return undefined;
 }
 
-export function loadConfig(): Config {
-  const env = loadRawConfigEnv();
+export function normalizeFeishuSite(value: string | undefined): FeishuSite {
+  const normalized = (value || '').trim().replace(/\/+$/, '').toLowerCase();
+  if (!normalized) return 'feishu';
+  if (normalized === 'lark') return 'lark';
+  if (normalized === 'feishu') return 'feishu';
+  if (normalized.includes('open.larksuite.com')) return 'lark';
+  return 'feishu';
+}
 
+export function feishuSiteToApiBaseUrl(site: FeishuSite | string | undefined): string {
+  return normalizeFeishuSite(site) === 'lark'
+    ? 'https://open.larksuite.com'
+    : 'https://open.feishu.cn';
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function ensureConfigDir(): void {
+  fs.mkdirSync(CTI_HOME, { recursive: true });
+}
+
+function readConfigV2File(): ConfigV2File | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(CONFIG_V2_PATH, 'utf-8')) as ConfigV2File;
+    if (parsed && parsed.schemaVersion === 2 && parsed.runtime && Array.isArray(parsed.channels)) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeConfigV2File(config: ConfigV2File): void {
+  ensureConfigDir();
+  const tmpPath = CONFIG_V2_PATH + '.tmp';
+  fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+  fs.renameSync(tmpPath, CONFIG_V2_PATH);
+}
+
+function normalizeChannelId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'channel';
+}
+
+function defaultAliasForProvider(provider: ChannelProvider): string {
+  return provider === 'feishu' ? '飞书' : '微信';
+}
+
+function buildDefaultChannelId(provider: ChannelProvider): string {
+  return `${provider}-default`;
+}
+
+function migrateLegacyEnvToV2(env: Map<string, string>): ConfigV2File {
   const rawRuntime = env.get("CTI_RUNTIME") || "codex";
-  const runtime = (["claude", "codex", "auto"].includes(rawRuntime) ? rawRuntime : "codex") as Config["runtime"];
+  const runtime = (["claude", "codex", "auto"].includes(rawRuntime) ? rawRuntime : "codex") as RuntimeConfigV2["provider"];
+  const enabledChannels = splitCsv(env.get("CTI_ENABLED_CHANNELS")) ?? ["feishu"];
+  const timestamp = nowIso();
+  const channels: ChannelInstance[] = [];
+
+  const hasFeishuConfig = Boolean(
+    env.get("CTI_FEISHU_APP_ID")
+    || env.get("CTI_FEISHU_APP_SECRET")
+    || env.get("CTI_FEISHU_ALLOWED_USERS")
+    || enabledChannels.includes('feishu')
+  );
+  if (hasFeishuConfig) {
+    channels.push({
+      id: buildDefaultChannelId('feishu'),
+      alias: defaultAliasForProvider('feishu'),
+      provider: 'feishu',
+      enabled: enabledChannels.includes('feishu'),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      config: {
+        appId: env.get("CTI_FEISHU_APP_ID") || undefined,
+        appSecret: env.get("CTI_FEISHU_APP_SECRET") || undefined,
+        site: normalizeFeishuSite(env.get("CTI_FEISHU_SITE") || env.get("CTI_FEISHU_DOMAIN")),
+        allowedUsers: splitCsv(env.get("CTI_FEISHU_ALLOWED_USERS")),
+        streamingEnabled: env.has("CTI_FEISHU_STREAMING_ENABLED")
+          ? env.get("CTI_FEISHU_STREAMING_ENABLED") === "true"
+          : true,
+        feedbackMarkdownEnabled: env.has("CTI_FEISHU_COMMAND_MARKDOWN_ENABLED")
+          ? env.get("CTI_FEISHU_COMMAND_MARKDOWN_ENABLED") === "true"
+          : true,
+      },
+    });
+  }
+
+  const hasWeixinConfig = Boolean(
+    env.get("CTI_WEIXIN_BASE_URL")
+    || env.get("CTI_WEIXIN_CDN_BASE_URL")
+    || env.get("CTI_WEIXIN_MEDIA_ENABLED")
+    || enabledChannels.includes('weixin')
+  );
+  if (hasWeixinConfig) {
+    channels.push({
+      id: buildDefaultChannelId('weixin'),
+      alias: defaultAliasForProvider('weixin'),
+      provider: 'weixin',
+      enabled: enabledChannels.includes('weixin'),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      config: {
+        baseUrl: env.get("CTI_WEIXIN_BASE_URL") || undefined,
+        cdnBaseUrl: env.get("CTI_WEIXIN_CDN_BASE_URL") || undefined,
+        mediaEnabled: env.has("CTI_WEIXIN_MEDIA_ENABLED")
+          ? env.get("CTI_WEIXIN_MEDIA_ENABLED") === "true"
+          : undefined,
+        feedbackMarkdownEnabled: env.has("CTI_WEIXIN_COMMAND_MARKDOWN_ENABLED")
+          ? env.get("CTI_WEIXIN_COMMAND_MARKDOWN_ENABLED") === "true"
+          : false,
+      },
+    });
+  }
 
   return {
-    runtime,
-    enabledChannels: splitCsv(env.get("CTI_ENABLED_CHANNELS")) ?? ["feishu"],
-    defaultWorkspaceRoot: expandHomePath(env.get("CTI_DEFAULT_WORKSPACE_ROOT")) || undefined,
-    defaultModel: env.get("CTI_DEFAULT_MODEL") || undefined,
-    defaultMode: env.get("CTI_DEFAULT_MODE") || "code",
-    historyMessageLimit: parsePositiveInt(env.get("CTI_HISTORY_MESSAGE_LIMIT")) ?? 8,
-    codexSkipGitRepoCheck: env.has("CTI_CODEX_SKIP_GIT_REPO_CHECK")
-      ? env.get("CTI_CODEX_SKIP_GIT_REPO_CHECK") === "true"
-      : true,
-    codexSandboxMode: parseSandboxMode(env.get("CTI_CODEX_SANDBOX_MODE")) ?? 'workspace-write',
-    codexReasoningEffort: parseReasoningEffort(env.get("CTI_CODEX_REASONING_EFFORT")) ?? 'medium',
-    uiAllowLan: env.get("CTI_UI_ALLOW_LAN") === "true",
-    uiAccessToken: env.get("CTI_UI_ACCESS_TOKEN") || undefined,
-    tgBotToken: env.get("CTI_TG_BOT_TOKEN") || undefined,
-    tgChatId: env.get("CTI_TG_CHAT_ID") || undefined,
-    tgAllowedUsers: splitCsv(env.get("CTI_TG_ALLOWED_USERS")),
-    feishuAppId: env.get("CTI_FEISHU_APP_ID") || undefined,
-    feishuAppSecret: env.get("CTI_FEISHU_APP_SECRET") || undefined,
-    feishuDomain: env.get("CTI_FEISHU_DOMAIN") || undefined,
-    feishuAllowedUsers: splitCsv(env.get("CTI_FEISHU_ALLOWED_USERS")),
-    feishuStreamingEnabled: env.has("CTI_FEISHU_STREAMING_ENABLED")
-      ? env.get("CTI_FEISHU_STREAMING_ENABLED") === "true"
-      : true,
-    feishuCommandMarkdownEnabled: env.has("CTI_FEISHU_COMMAND_MARKDOWN_ENABLED")
-      ? env.get("CTI_FEISHU_COMMAND_MARKDOWN_ENABLED") === "true"
-      : true,
-    discordBotToken: env.get("CTI_DISCORD_BOT_TOKEN") || undefined,
-    discordAllowedUsers: splitCsv(env.get("CTI_DISCORD_ALLOWED_USERS")),
-    discordAllowedChannels: splitCsv(
-      env.get("CTI_DISCORD_ALLOWED_CHANNELS")
-    ),
-    discordAllowedGuilds: splitCsv(env.get("CTI_DISCORD_ALLOWED_GUILDS")),
-    qqAppId: env.get("CTI_QQ_APP_ID") || undefined,
-    qqAppSecret: env.get("CTI_QQ_APP_SECRET") || undefined,
-    qqAllowedUsers: splitCsv(env.get("CTI_QQ_ALLOWED_USERS")),
-    qqImageEnabled: env.has("CTI_QQ_IMAGE_ENABLED")
-      ? env.get("CTI_QQ_IMAGE_ENABLED") === "true"
-      : undefined,
-    qqMaxImageSize: env.get("CTI_QQ_MAX_IMAGE_SIZE")
-      ? Number(env.get("CTI_QQ_MAX_IMAGE_SIZE"))
-      : undefined,
-    weixinBaseUrl: env.get("CTI_WEIXIN_BASE_URL") || undefined,
-    weixinCdnBaseUrl: env.get("CTI_WEIXIN_CDN_BASE_URL") || undefined,
-    weixinMediaEnabled: env.has("CTI_WEIXIN_MEDIA_ENABLED")
-      ? env.get("CTI_WEIXIN_MEDIA_ENABLED") === "true"
-      : undefined,
-    weixinCommandMarkdownEnabled: env.has("CTI_WEIXIN_COMMAND_MARKDOWN_ENABLED")
-      ? env.get("CTI_WEIXIN_COMMAND_MARKDOWN_ENABLED") === "true"
-      : false,
-    autoApprove: env.get("CTI_AUTO_APPROVE") === "true",
+    schemaVersion: 2,
+    runtime: {
+      provider: runtime,
+      defaultWorkspaceRoot: expandHomePath(env.get("CTI_DEFAULT_WORKSPACE_ROOT")) || undefined,
+      defaultModel: env.get("CTI_DEFAULT_MODEL") || undefined,
+      defaultMode: env.get("CTI_DEFAULT_MODE") || "code",
+      historyMessageLimit: parsePositiveInt(env.get("CTI_HISTORY_MESSAGE_LIMIT")) ?? 8,
+      codexSkipGitRepoCheck: env.has("CTI_CODEX_SKIP_GIT_REPO_CHECK")
+        ? env.get("CTI_CODEX_SKIP_GIT_REPO_CHECK") === "true"
+        : true,
+      codexSandboxMode: parseSandboxMode(env.get("CTI_CODEX_SANDBOX_MODE")) ?? 'workspace-write',
+      codexReasoningEffort: parseReasoningEffort(env.get("CTI_CODEX_REASONING_EFFORT")) ?? 'medium',
+      uiAllowLan: env.get("CTI_UI_ALLOW_LAN") === "true",
+      uiAccessToken: env.get("CTI_UI_ACCESS_TOKEN") || undefined,
+      autoApprove: env.get("CTI_AUTO_APPROVE") === "true",
+    },
+    channels,
   };
+}
+
+function getChannelByProvider(
+  config: ConfigV2File,
+  provider: ChannelProvider,
+): ChannelInstance | undefined {
+  const preferredId = buildDefaultChannelId(provider);
+  return config.channels.find((channel) => channel.id === preferredId)
+    || config.channels.find((channel) => channel.provider === provider);
+}
+
+function expandConfig(v2: ConfigV2File): Config {
+  return {
+    schemaVersion: 2,
+    channels: v2.channels,
+    runtime: v2.runtime.provider,
+    enabledChannels: Array.from(new Set(
+      v2.channels.filter((channel) => channel.enabled).map((channel) => channel.provider),
+    )),
+    defaultWorkspaceRoot: v2.runtime.defaultWorkspaceRoot,
+    defaultModel: v2.runtime.defaultModel,
+    defaultMode: v2.runtime.defaultMode || 'code',
+    historyMessageLimit: v2.runtime.historyMessageLimit ?? 8,
+    codexSkipGitRepoCheck: v2.runtime.codexSkipGitRepoCheck ?? true,
+    codexSandboxMode: v2.runtime.codexSandboxMode ?? 'workspace-write',
+    codexReasoningEffort: v2.runtime.codexReasoningEffort ?? 'medium',
+    uiAllowLan: v2.runtime.uiAllowLan === true,
+    uiAccessToken: v2.runtime.uiAccessToken || undefined,
+    autoApprove: v2.runtime.autoApprove === true,
+  };
+}
+
+function buildV2FileFromExpandedConfig(config: Config, current?: ConfigV2File | null): ConfigV2File {
+  const hasExplicitChannels = Array.isArray(config.channels);
+  let channels = hasExplicitChannels
+    ? [...(config.channels || [])]
+    : [...(current?.channels || [])];
+
+  return {
+    schemaVersion: 2,
+    runtime: {
+      provider: config.runtime,
+      defaultWorkspaceRoot: config.defaultWorkspaceRoot,
+      defaultModel: config.defaultModel,
+      defaultMode: config.defaultMode,
+      historyMessageLimit: config.historyMessageLimit,
+      codexSkipGitRepoCheck: config.codexSkipGitRepoCheck,
+      codexSandboxMode: config.codexSandboxMode,
+      codexReasoningEffort: config.codexReasoningEffort,
+      uiAllowLan: config.uiAllowLan,
+      uiAccessToken: config.uiAccessToken,
+      autoApprove: config.autoApprove,
+    },
+    channels: channels.map((channel) => ({
+      ...channel,
+      id: normalizeChannelId(channel.id),
+      alias: channel.alias?.trim() || defaultAliasForProvider(channel.provider),
+    })),
+  };
+}
+
+export function loadConfig(): Config {
+  const current = readConfigV2File();
+  if (current) return expandConfig(current);
+
+  const legacyEnv = loadRawConfigEnv();
+  if (legacyEnv.size > 0) {
+    const migrated = migrateLegacyEnvToV2(legacyEnv);
+    writeConfigV2File(migrated);
+    return expandConfig(migrated);
+  }
+
+  const empty: ConfigV2File = {
+    schemaVersion: 2,
+    runtime: {
+      provider: 'codex',
+      defaultWorkspaceRoot: DEFAULT_WORKSPACE_ROOT,
+      defaultMode: 'code',
+      historyMessageLimit: 8,
+      codexSkipGitRepoCheck: true,
+      codexSandboxMode: 'workspace-write',
+      codexReasoningEffort: 'medium',
+      uiAllowLan: false,
+      autoApprove: false,
+    },
+    channels: [],
+  };
+  return expandConfig(empty);
 }
 
 function formatEnvLine(key: string, value: string | undefined): string {
@@ -204,81 +418,61 @@ function formatEnvLine(key: string, value: string | undefined): string {
 }
 
 export function saveConfig(config: Config): void {
+  const current = readConfigV2File();
+  const next = buildV2FileFromExpandedConfig(config, current);
+  writeConfigV2File(next);
+
+  // Keep a lightweight legacy env snapshot for operational visibility and fallback tools.
   let out = "";
-  out += formatEnvLine("CTI_RUNTIME", config.runtime);
+  out += formatEnvLine("CTI_RUNTIME", next.runtime.provider);
   out += formatEnvLine(
     "CTI_ENABLED_CHANNELS",
-    config.enabledChannels.join(",")
+    Array.from(new Set(next.channels.filter((channel) => channel.enabled).map((channel) => channel.provider))).join(","),
   );
-  out += formatEnvLine("CTI_DEFAULT_WORKSPACE_ROOT", config.defaultWorkspaceRoot);
-  if (config.defaultModel) out += formatEnvLine("CTI_DEFAULT_MODEL", config.defaultModel);
-  out += formatEnvLine("CTI_DEFAULT_MODE", config.defaultMode);
-  if (config.historyMessageLimit !== undefined)
-    out += formatEnvLine("CTI_HISTORY_MESSAGE_LIMIT", String(config.historyMessageLimit));
-  if (config.codexSkipGitRepoCheck !== undefined)
-    out += formatEnvLine("CTI_CODEX_SKIP_GIT_REPO_CHECK", String(config.codexSkipGitRepoCheck));
-  out += formatEnvLine("CTI_CODEX_SANDBOX_MODE", config.codexSandboxMode);
-  out += formatEnvLine("CTI_CODEX_REASONING_EFFORT", config.codexReasoningEffort);
-  out += formatEnvLine("CTI_UI_ALLOW_LAN", String(config.uiAllowLan === true));
-  out += formatEnvLine("CTI_UI_ACCESS_TOKEN", config.uiAccessToken);
-  out += formatEnvLine("CTI_TG_BOT_TOKEN", config.tgBotToken);
-  out += formatEnvLine("CTI_TG_CHAT_ID", config.tgChatId);
-  out += formatEnvLine(
-    "CTI_TG_ALLOWED_USERS",
-    config.tgAllowedUsers?.join(",")
-  );
-  out += formatEnvLine("CTI_FEISHU_APP_ID", config.feishuAppId);
-  out += formatEnvLine("CTI_FEISHU_APP_SECRET", config.feishuAppSecret);
-  out += formatEnvLine("CTI_FEISHU_DOMAIN", config.feishuDomain);
-  out += formatEnvLine(
-    "CTI_FEISHU_ALLOWED_USERS",
-    config.feishuAllowedUsers?.join(",")
-  );
-  if (config.feishuStreamingEnabled !== undefined)
-    out += formatEnvLine(
-      "CTI_FEISHU_STREAMING_ENABLED",
-      String(config.feishuStreamingEnabled)
-    );
-  if (config.feishuCommandMarkdownEnabled !== undefined)
-    out += formatEnvLine(
-      "CTI_FEISHU_COMMAND_MARKDOWN_ENABLED",
-      String(config.feishuCommandMarkdownEnabled)
-    );
-  out += formatEnvLine("CTI_DISCORD_BOT_TOKEN", config.discordBotToken);
-  out += formatEnvLine(
-    "CTI_DISCORD_ALLOWED_USERS",
-    config.discordAllowedUsers?.join(",")
-  );
-  out += formatEnvLine(
-    "CTI_DISCORD_ALLOWED_CHANNELS",
-    config.discordAllowedChannels?.join(",")
-  );
-  out += formatEnvLine(
-    "CTI_DISCORD_ALLOWED_GUILDS",
-    config.discordAllowedGuilds?.join(",")
-  );
-  out += formatEnvLine("CTI_QQ_APP_ID", config.qqAppId);
-  out += formatEnvLine("CTI_QQ_APP_SECRET", config.qqAppSecret);
-  out += formatEnvLine(
-    "CTI_QQ_ALLOWED_USERS",
-    config.qqAllowedUsers?.join(",")
-  );
-  if (config.qqImageEnabled !== undefined)
-    out += formatEnvLine("CTI_QQ_IMAGE_ENABLED", String(config.qqImageEnabled));
-  if (config.qqMaxImageSize !== undefined)
-    out += formatEnvLine("CTI_QQ_MAX_IMAGE_SIZE", String(config.qqMaxImageSize));
-  out += formatEnvLine("CTI_WEIXIN_BASE_URL", config.weixinBaseUrl);
-  out += formatEnvLine("CTI_WEIXIN_CDN_BASE_URL", config.weixinCdnBaseUrl);
-  if (config.weixinMediaEnabled !== undefined)
-    out += formatEnvLine("CTI_WEIXIN_MEDIA_ENABLED", String(config.weixinMediaEnabled));
-  if (config.weixinCommandMarkdownEnabled !== undefined)
-    out += formatEnvLine(
-      "CTI_WEIXIN_COMMAND_MARKDOWN_ENABLED",
-      String(config.weixinCommandMarkdownEnabled)
-    );
-  out += formatEnvLine("CTI_AUTO_APPROVE", String(config.autoApprove === true));
+  out += formatEnvLine("CTI_DEFAULT_WORKSPACE_ROOT", next.runtime.defaultWorkspaceRoot);
+  out += formatEnvLine("CTI_DEFAULT_MODEL", next.runtime.defaultModel);
+  out += formatEnvLine("CTI_DEFAULT_MODE", next.runtime.defaultMode);
+  if (next.runtime.historyMessageLimit !== undefined) {
+    out += formatEnvLine("CTI_HISTORY_MESSAGE_LIMIT", String(next.runtime.historyMessageLimit));
+  }
+  if (next.runtime.codexSkipGitRepoCheck !== undefined) {
+    out += formatEnvLine("CTI_CODEX_SKIP_GIT_REPO_CHECK", String(next.runtime.codexSkipGitRepoCheck));
+  }
+  out += formatEnvLine("CTI_CODEX_SANDBOX_MODE", next.runtime.codexSandboxMode);
+  out += formatEnvLine("CTI_CODEX_REASONING_EFFORT", next.runtime.codexReasoningEffort);
+  out += formatEnvLine("CTI_UI_ALLOW_LAN", String(next.runtime.uiAllowLan === true));
+  out += formatEnvLine("CTI_UI_ACCESS_TOKEN", next.runtime.uiAccessToken);
 
-  fs.mkdirSync(CTI_HOME, { recursive: true });
+  const feishu = getChannelByProvider(next, 'feishu');
+  const feishuConfig = toFeishuConfig(feishu);
+  if (feishuConfig) {
+    out += formatEnvLine("CTI_FEISHU_APP_ID", feishuConfig.appId);
+    out += formatEnvLine("CTI_FEISHU_APP_SECRET", feishuConfig.appSecret);
+    out += formatEnvLine("CTI_FEISHU_SITE", feishuConfig.site);
+    out += formatEnvLine("CTI_FEISHU_ALLOWED_USERS", feishuConfig.allowedUsers?.join(","));
+    if (feishuConfig.streamingEnabled !== undefined) {
+      out += formatEnvLine("CTI_FEISHU_STREAMING_ENABLED", String(feishuConfig.streamingEnabled));
+    }
+    if (feishuConfig.feedbackMarkdownEnabled !== undefined) {
+      out += formatEnvLine("CTI_FEISHU_COMMAND_MARKDOWN_ENABLED", String(feishuConfig.feedbackMarkdownEnabled));
+    }
+  }
+
+  const weixin = getChannelByProvider(next, 'weixin');
+  const weixinConfig = toWeixinConfig(weixin);
+  if (weixinConfig) {
+    out += formatEnvLine("CTI_WEIXIN_BASE_URL", weixinConfig.baseUrl);
+    out += formatEnvLine("CTI_WEIXIN_CDN_BASE_URL", weixinConfig.cdnBaseUrl);
+    if (weixinConfig.mediaEnabled !== undefined) {
+      out += formatEnvLine("CTI_WEIXIN_MEDIA_ENABLED", String(weixinConfig.mediaEnabled));
+    }
+    if (weixinConfig.feedbackMarkdownEnabled !== undefined) {
+      out += formatEnvLine("CTI_WEIXIN_COMMAND_MARKDOWN_ENABLED", String(weixinConfig.feedbackMarkdownEnabled));
+    }
+  }
+
+  out += formatEnvLine("CTI_AUTO_APPROVE", String(next.runtime.autoApprove === true));
+  ensureConfigDir();
   const tmpPath = CONFIG_PATH + ".tmp";
   fs.writeFileSync(tmpPath, out, { mode: 0o600 });
   fs.renameSync(tmpPath, CONFIG_PATH);
@@ -289,105 +483,29 @@ export function maskSecret(value: string): string {
   return "*".repeat(value.length - 4) + value.slice(-4);
 }
 
+export function listChannelInstances(config?: Config): ChannelInstance[] {
+  return [...(config?.channels || loadConfig().channels || [])];
+}
+
+export function findChannelInstance(channelId: string, config?: Config): ChannelInstance | undefined {
+  return listChannelInstances(config).find((channel) => channel.id === channelId);
+}
+
 export function configToSettings(config: Config): Map<string, string> {
   const m = new Map<string, string>();
+  const current: ConfigV2File = {
+    schemaVersion: 2,
+    runtime: {
+      provider: config.runtime,
+      defaultMode: config.defaultMode,
+    },
+    channels: config.channels || [],
+  };
+  const feishu = getChannelByProvider(current, 'feishu');
+  const weixin = getChannelByProvider(current, 'weixin');
+  const feishuConfig = toFeishuConfig(feishu);
+  const weixinConfig = toWeixinConfig(weixin);
   m.set("remote_bridge_enabled", "true");
-
-  // ── Telegram ──
-  // Upstream keys: telegram_bot_token, bridge_telegram_enabled,
-  //   telegram_bridge_allowed_users, telegram_chat_id
-  m.set(
-    "bridge_telegram_enabled",
-    config.enabledChannels.includes("telegram") ? "true" : "false"
-  );
-  if (config.tgBotToken) m.set("telegram_bot_token", config.tgBotToken);
-  if (config.tgAllowedUsers)
-    m.set("telegram_bridge_allowed_users", config.tgAllowedUsers.join(","));
-  if (config.tgChatId) m.set("telegram_chat_id", config.tgChatId);
-
-  // ── Discord ──
-  // Upstream keys: bridge_discord_bot_token, bridge_discord_enabled,
-  //   bridge_discord_allowed_users, bridge_discord_allowed_channels,
-  //   bridge_discord_allowed_guilds
-  m.set(
-    "bridge_discord_enabled",
-    config.enabledChannels.includes("discord") ? "true" : "false"
-  );
-  if (config.discordBotToken)
-    m.set("bridge_discord_bot_token", config.discordBotToken);
-  if (config.discordAllowedUsers)
-    m.set("bridge_discord_allowed_users", config.discordAllowedUsers.join(","));
-  if (config.discordAllowedChannels)
-    m.set(
-      "bridge_discord_allowed_channels",
-      config.discordAllowedChannels.join(",")
-    );
-  if (config.discordAllowedGuilds)
-    m.set(
-      "bridge_discord_allowed_guilds",
-      config.discordAllowedGuilds.join(",")
-    );
-
-  // ── Feishu ──
-  // Upstream keys: bridge_feishu_app_id, bridge_feishu_app_secret,
-  //   bridge_feishu_domain, bridge_feishu_enabled, bridge_feishu_allowed_users
-  m.set(
-    "bridge_feishu_enabled",
-    config.enabledChannels.includes("feishu") ? "true" : "false"
-  );
-  if (config.feishuAppId) m.set("bridge_feishu_app_id", config.feishuAppId);
-  if (config.feishuAppSecret)
-    m.set("bridge_feishu_app_secret", config.feishuAppSecret);
-  if (config.feishuDomain) m.set("bridge_feishu_domain", config.feishuDomain);
-  if (config.feishuAllowedUsers)
-    m.set("bridge_feishu_allowed_users", config.feishuAllowedUsers.join(","));
-  m.set(
-    "bridge_feishu_streaming_enabled",
-    config.feishuStreamingEnabled === false ? "false" : "true"
-  );
-  m.set(
-    "bridge_feishu_command_markdown_enabled",
-    config.feishuCommandMarkdownEnabled === false ? "false" : "true"
-  );
-
-  // ── QQ ──
-  // Upstream keys: bridge_qq_enabled, bridge_qq_app_id, bridge_qq_app_secret,
-  //   bridge_qq_allowed_users, bridge_qq_image_enabled, bridge_qq_max_image_size
-  m.set(
-    "bridge_qq_enabled",
-    config.enabledChannels.includes("qq") ? "true" : "false"
-  );
-  if (config.qqAppId) m.set("bridge_qq_app_id", config.qqAppId);
-  if (config.qqAppSecret) m.set("bridge_qq_app_secret", config.qqAppSecret);
-  if (config.qqAllowedUsers)
-    m.set("bridge_qq_allowed_users", config.qqAllowedUsers.join(","));
-  if (config.qqImageEnabled !== undefined)
-    m.set("bridge_qq_image_enabled", String(config.qqImageEnabled));
-  if (config.qqMaxImageSize !== undefined)
-    m.set("bridge_qq_max_image_size", String(config.qqMaxImageSize));
-
-  // ── WeChat ──
-  // Upstream keys: bridge_weixin_enabled, bridge_weixin_media_enabled,
-  //   bridge_weixin_base_url, bridge_weixin_cdn_base_url
-  m.set(
-    "bridge_weixin_enabled",
-    config.enabledChannels.includes("weixin") ? "true" : "false"
-  );
-  if (config.weixinMediaEnabled !== undefined)
-    m.set("bridge_weixin_media_enabled", String(config.weixinMediaEnabled));
-  m.set(
-    "bridge_weixin_command_markdown_enabled",
-    config.weixinCommandMarkdownEnabled === true ? "true" : "false"
-  );
-  if (config.weixinBaseUrl)
-    m.set("bridge_weixin_base_url", config.weixinBaseUrl);
-  if (config.weixinCdnBaseUrl)
-    m.set("bridge_weixin_cdn_base_url", config.weixinCdnBaseUrl);
-
-  // ── Defaults ──
-  // Upstream keys: bridge_default_workspace_root,
-  // bridge_default_model, default_model, bridge_codex_sandbox_mode,
-  // bridge_codex_reasoning_effort
   if (config.defaultWorkspaceRoot) {
     m.set("bridge_default_workspace_root", config.defaultWorkspaceRoot);
   }
@@ -398,11 +516,11 @@ export function configToSettings(config: Config): Map<string, string> {
   m.set("bridge_default_mode", config.defaultMode);
   m.set(
     "bridge_history_message_limit",
-    String(config.historyMessageLimit && config.historyMessageLimit > 0 ? config.historyMessageLimit : 8)
+    String(config.historyMessageLimit && config.historyMessageLimit > 0 ? config.historyMessageLimit : 8),
   );
   m.set(
     "bridge_codex_skip_git_repo_check",
-    config.codexSkipGitRepoCheck === true ? "true" : "false"
+    config.codexSkipGitRepoCheck === true ? "true" : "false",
   );
   m.set(
     "bridge_codex_sandbox_mode",
@@ -412,6 +530,73 @@ export function configToSettings(config: Config): Map<string, string> {
     "bridge_codex_reasoning_effort",
     config.codexReasoningEffort || 'medium',
   );
+  m.set(
+    "bridge_channel_instances_json",
+    JSON.stringify(config.channels || []),
+  );
+
+  // Phase-1 compatibility settings for the still-legacy UI/runtime surfaces.
+  m.set(
+    "bridge_telegram_enabled",
+    config.enabledChannels.includes("telegram") ? "true" : "false",
+  );
+  if (config.tgBotToken) m.set("telegram_bot_token", config.tgBotToken);
+  if (config.tgAllowedUsers) m.set("telegram_bridge_allowed_users", config.tgAllowedUsers.join(","));
+  if (config.tgChatId) m.set("telegram_chat_id", config.tgChatId);
+
+  m.set(
+    "bridge_discord_enabled",
+    config.enabledChannels.includes("discord") ? "true" : "false",
+  );
+  if (config.discordBotToken) m.set("bridge_discord_bot_token", config.discordBotToken);
+  if (config.discordAllowedUsers) m.set("bridge_discord_allowed_users", config.discordAllowedUsers.join(","));
+  if (config.discordAllowedChannels) m.set("bridge_discord_allowed_channels", config.discordAllowedChannels.join(","));
+  if (config.discordAllowedGuilds) m.set("bridge_discord_allowed_guilds", config.discordAllowedGuilds.join(","));
+
+  m.set(
+    "bridge_feishu_enabled",
+    feishu?.enabled === true ? "true" : "false",
+  );
+  if (feishuConfig?.appId) m.set("bridge_feishu_app_id", feishuConfig.appId);
+  if (feishuConfig?.appSecret) m.set("bridge_feishu_app_secret", feishuConfig.appSecret);
+  if (feishuConfig?.site) m.set("bridge_feishu_site", feishuConfig.site);
+  if (feishuConfig?.allowedUsers) m.set("bridge_feishu_allowed_users", feishuConfig.allowedUsers.join(","));
+  m.set(
+    "bridge_feishu_streaming_enabled",
+    feishuConfig?.streamingEnabled === false ? "false" : "true",
+  );
+  m.set(
+    "bridge_feishu_command_markdown_enabled",
+    feishuConfig?.feedbackMarkdownEnabled === false ? "false" : "true",
+  );
+
+  m.set(
+    "bridge_qq_enabled",
+    config.enabledChannels.includes("qq") ? "true" : "false",
+  );
+  if (config.qqAppId) m.set("bridge_qq_app_id", config.qqAppId);
+  if (config.qqAppSecret) m.set("bridge_qq_app_secret", config.qqAppSecret);
+  if (config.qqAllowedUsers) m.set("bridge_qq_allowed_users", config.qqAllowedUsers.join(","));
+  if (config.qqImageEnabled !== undefined) {
+    m.set("bridge_qq_image_enabled", String(config.qqImageEnabled));
+  }
+  if (config.qqMaxImageSize !== undefined) {
+    m.set("bridge_qq_max_image_size", String(config.qqMaxImageSize));
+  }
+
+  m.set(
+    "bridge_weixin_enabled",
+    weixin?.enabled === true ? "true" : "false",
+  );
+  if (weixinConfig?.mediaEnabled !== undefined) {
+    m.set("bridge_weixin_media_enabled", String(weixinConfig.mediaEnabled));
+  }
+  m.set(
+    "bridge_weixin_command_markdown_enabled",
+    weixinConfig?.feedbackMarkdownEnabled === true ? "true" : "false",
+  );
+  if (weixinConfig?.baseUrl) m.set("bridge_weixin_base_url", weixinConfig.baseUrl);
+  if (weixinConfig?.cdnBaseUrl) m.set("bridge_weixin_cdn_base_url", weixinConfig.cdnBaseUrl);
 
   return m;
 }

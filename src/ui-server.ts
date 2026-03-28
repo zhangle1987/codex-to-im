@@ -4,7 +4,22 @@ import net from 'node:net';
 import os from 'node:os';
 import fs from 'node:fs';
 
-import { CTI_HOME, DEFAULT_WORKSPACE_ROOT, configToSettings, loadConfig, saveConfig, type Config } from './config.js';
+import {
+  CTI_HOME,
+  DEFAULT_WORKSPACE_ROOT,
+  configToSettings,
+  feishuSiteToApiBaseUrl,
+  findChannelInstance,
+  loadConfig,
+  normalizeFeishuSite,
+  saveConfig,
+  type ChannelInstance,
+  type ChannelProvider,
+  type Config,
+  type FeishuChannelConfig,
+  type FeishuSite,
+  type WeixinChannelConfig,
+} from './config.js';
 import { PendingPermissions } from './permission-gateway.js';
 import { CodexProvider } from './codex-provider.js';
 import { getCodexSessionsRoot, listDesktopSessions } from './desktop-sessions.js';
@@ -35,21 +50,18 @@ import { listSelectableCodexModels, readConfiguredCodexModel } from './codex-mod
 
 let port = 4781;
 const serverStartTime = new Date().toISOString();
-const supportedChannels = ['feishu', 'weixin'] as const;
 const AUTH_COOKIE_NAME = 'cti_ui_auth';
 const availableCodexModels = listSelectableCodexModels();
 const availableCodexModelSlugs = new Set(availableCodexModels.map((model) => model.slug));
 const FEISHU_CHAT_LABEL_TTL_MS = 5 * 60 * 1000;
 const feishuChatLabelCache = new Map<string, { label: string; userId?: string; expiresAt: number }>();
-let feishuTenantTokenCache:
-  | {
-      appId: string;
-      appSecret: string;
-      domain: string;
-      token: string;
-      expiresAt: number;
-    }
-  | null = null;
+const feishuTenantTokenCache = new Map<
+  string,
+  {
+    token: string;
+    expiresAt: number;
+  }
+>();
 
 function parsePreferredPort(): number {
   const raw = Number(process.env.CTI_UI_PORT || '4781');
@@ -147,8 +159,57 @@ function parsePositiveInt(value: string | null, fallback: number): number {
   return Math.floor(parsed);
 }
 
+function normalizeChannelAlias(value: string | undefined, provider: ChannelProvider): string {
+  const trimmed = value?.trim();
+  if (trimmed) return trimmed;
+  return provider === 'feishu' ? '飞书' : '微信';
+}
+
+function normalizeChannelId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'channel';
+}
+
+function buildChannelId(provider: ChannelProvider, alias: string, takenIds: Set<string>, currentId?: string): string {
+  const base = normalizeChannelId(`${provider}-${alias}`);
+  if (!takenIds.has(base) || base === currentId) return base;
+  let suffix = 2;
+  while (takenIds.has(`${base}-${suffix}`) && `${base}-${suffix}` !== currentId) {
+    suffix += 1;
+  }
+  return `${base}-${suffix}`;
+}
+
+function parseChannelProvider(value: unknown): ChannelProvider | undefined {
+  if (value === 'feishu' || value === 'weixin') return value;
+  return undefined;
+}
+
 function createUiStore(): JsonFileStore {
   return new JsonFileStore(configToSettings(loadConfig()));
+}
+
+function cloneChannel(channel: ChannelInstance): ChannelInstance {
+  return {
+    ...channel,
+    config: { ...channel.config } as ChannelInstance['config'],
+  };
+}
+
+function channelToPayload(channel: ChannelInstance) {
+  return {
+    id: channel.id,
+    alias: channel.alias,
+    provider: channel.provider,
+    enabled: channel.enabled,
+    createdAt: channel.createdAt,
+    updatedAt: channel.updatedAt,
+    config: { ...channel.config },
+  };
 }
 
 function generateAccessToken(): string {
@@ -245,7 +306,6 @@ function isRemoteAuthenticated(request: IncomingMessage, config: Config): boolea
 function configToPayload(config: Config) {
   return {
     runtime: config.runtime,
-    enabledChannels: config.enabledChannels,
     defaultWorkspaceRoot: config.defaultWorkspaceRoot || '',
     defaultModel: config.defaultModel || '',
     codexDefaultModel: readConfiguredCodexModel() || '',
@@ -258,14 +318,7 @@ function configToPayload(config: Config) {
     uiAllowLan: config.uiAllowLan === true,
     uiAccessToken: config.uiAccessToken || '',
     autoApprove: config.autoApprove === true,
-    feishuAppId: config.feishuAppId || '',
-    feishuAppSecret: config.feishuAppSecret || '',
-    feishuDomain: config.feishuDomain || 'https://open.feishu.cn',
-    feishuAllowedUsers: config.feishuAllowedUsers?.join(',') || '',
-    feishuStreamingEnabled: config.feishuStreamingEnabled !== false,
-    feishuCommandMarkdownEnabled: config.feishuCommandMarkdownEnabled !== false,
-    weixinMediaEnabled: config.weixinMediaEnabled === true,
-    weixinCommandMarkdownEnabled: config.weixinCommandMarkdownEnabled === true,
+    channels: (config.channels || []).map(channelToPayload),
   };
 }
 
@@ -274,9 +327,6 @@ function mergeConfig(payload: Record<string, unknown>): Config {
   const rawDefaultModel = typeof payload.defaultModel === 'string'
     ? payload.defaultModel.trim()
     : undefined;
-  const requestedChannels = Array.isArray(payload.enabledChannels)
-    ? payload.enabledChannels.filter((value): value is string => typeof value === 'string')
-    : current.enabledChannels;
   const uiAllowLan = payload.uiAllowLan === true;
   const requestedUiAccessToken = asString(payload.uiAccessToken);
   const uiAccessToken = requestedUiAccessToken
@@ -286,7 +336,7 @@ function mergeConfig(payload: Record<string, unknown>): Config {
   return {
     ...current,
     runtime: payload.runtime === 'claude' || payload.runtime === 'auto' ? payload.runtime : 'codex',
-    enabledChannels: requestedChannels.filter((channel) => supportedChannels.includes(channel as typeof supportedChannels[number])),
+    enabledChannels: current.enabledChannels,
     defaultWorkspaceRoot: asString(payload.defaultWorkspaceRoot),
     defaultModel: rawDefaultModel === undefined
       ? current.defaultModel
@@ -311,14 +361,68 @@ function mergeConfig(payload: Record<string, unknown>): Config {
     uiAllowLan,
     uiAccessToken,
     autoApprove: payload.autoApprove === true,
-    feishuAppId: asString(payload.feishuAppId),
-    feishuAppSecret: asString(payload.feishuAppSecret),
-    feishuDomain: asString(payload.feishuDomain) || 'https://open.feishu.cn',
-    feishuAllowedUsers: parseCsv(payload.feishuAllowedUsers),
-    feishuStreamingEnabled: payload.feishuStreamingEnabled !== false,
-    feishuCommandMarkdownEnabled: payload.feishuCommandMarkdownEnabled !== false,
-    weixinMediaEnabled: payload.weixinMediaEnabled === true,
-    weixinCommandMarkdownEnabled: payload.weixinCommandMarkdownEnabled === true,
+    channels: current.channels,
+  };
+}
+
+function mergeChannelInstance(
+  payload: Record<string, unknown>,
+  current: Config,
+): { config: Config; channel: ChannelInstance } {
+  const provider = parseChannelProvider(payload.provider);
+  if (!provider) {
+    throw new Error('通道提供方只能是飞书或微信。');
+  }
+
+  const existingId = asString(payload.id);
+  const existing = existingId ? findChannelInstance(existingId, current) : undefined;
+  const alias = normalizeChannelAlias(asString(payload.alias), provider);
+  const baseChannels = (current.channels || []).map(cloneChannel);
+  const takenIds = new Set(baseChannels.map((channel) => channel.id));
+  const channelId = existing?.id || buildChannelId(provider, alias, takenIds);
+  const now = new Date().toISOString();
+
+  let nextConfig: FeishuChannelConfig | WeixinChannelConfig;
+  if (provider === 'feishu') {
+    nextConfig = {
+      appId: asString(payload.appId),
+      appSecret: asString(payload.appSecret),
+      site: normalizeFeishuSite(asString(payload.site) || asString(payload.domain)),
+      allowedUsers: parseCsv(payload.allowedUsers),
+      streamingEnabled: payload.streamingEnabled !== false,
+      feedbackMarkdownEnabled: payload.feedbackMarkdownEnabled !== false,
+    };
+  } else {
+    nextConfig = {
+      accountId: asString(payload.accountId),
+      baseUrl: asString(payload.baseUrl),
+      cdnBaseUrl: asString(payload.cdnBaseUrl),
+      mediaEnabled: payload.mediaEnabled === true,
+      feedbackMarkdownEnabled: payload.feedbackMarkdownEnabled === true,
+    };
+  }
+
+  const nextChannel: ChannelInstance = {
+    id: channelId,
+    alias,
+    provider,
+    enabled: payload.enabled !== false,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+    config: nextConfig,
+  };
+
+  const nextChannels = existing
+    ? baseChannels.map((channel) => channel.id === existing.id ? nextChannel : channel)
+    : [...baseChannels, nextChannel];
+
+  return {
+    config: {
+      ...current,
+      channels: nextChannels,
+      enabledChannels: Array.from(new Set(nextChannels.filter((channel) => channel.enabled).map((channel) => channel.provider))),
+    },
+    channel: nextChannel,
   };
 }
 
@@ -335,18 +439,43 @@ function getWeixinAccountsPayload() {
   }));
 }
 
-async function validateFeishuCredentials(config: Config): Promise<{ ok: boolean; message: string }> {
-  if (!config.feishuAppId || !config.feishuAppSecret) {
+function getChannelLabel(channel: Pick<ChannelInstance, 'alias' | 'provider'>): string {
+  const providerLabel = channel.provider === 'weixin' ? '微信' : '飞书';
+  return channel.alias?.trim() ? `${channel.alias} · ${providerLabel}` : providerLabel;
+}
+
+function getFeishuSite(channel: ChannelInstance): FeishuSite {
+  const feishu = channel.config as FeishuChannelConfig;
+  return normalizeFeishuSite(feishu.site);
+}
+
+function getFeishuDomain(channel: ChannelInstance): string {
+  return feishuSiteToApiBaseUrl(getFeishuSite(channel));
+}
+
+function getFeishuTokenCacheKey(channel: ChannelInstance): string {
+  const feishu = channel.config as FeishuChannelConfig;
+  return [
+    channel.id,
+    feishu.appId || '',
+    feishu.appSecret || '',
+    getFeishuDomain(channel),
+  ].join(':');
+}
+
+async function validateFeishuCredentials(channel: ChannelInstance): Promise<{ ok: boolean; message: string }> {
+  const feishu = channel.config as FeishuChannelConfig;
+  if (!feishu.appId || !feishu.appSecret) {
     return { ok: false, message: 'Feishu App ID / App Secret 不能为空。' };
   }
 
-  const domain = config.feishuDomain || 'https://open.feishu.cn';
+  const domain = getFeishuDomain(channel);
   const response = await fetch(`${domain}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      app_id: config.feishuAppId,
-      app_secret: config.feishuAppSecret,
+      app_id: feishu.appId,
+      app_secret: feishu.appSecret,
     }),
   });
 
@@ -357,35 +486,28 @@ async function validateFeishuCredentials(config: Config): Promise<{ ok: boolean;
 
   return {
     ok: false,
-    message: data.msg || `飞书校验失败，HTTP ${response.status}`,
+    message: `${getChannelLabel(channel)} 校验失败：${data.msg || `HTTP ${response.status}`}`,
   };
 }
 
-function getFeishuDomain(config: Config): string {
-  return (config.feishuDomain || 'https://open.feishu.cn').replace(/\/+$/, '');
-}
+async function getFeishuTenantAccessToken(channel: ChannelInstance): Promise<string | null> {
+  const feishu = channel.config as FeishuChannelConfig;
+  if (!feishu.appId || !feishu.appSecret) return null;
 
-async function getFeishuTenantAccessToken(config: Config): Promise<string | null> {
-  if (!config.feishuAppId || !config.feishuAppSecret) return null;
-
-  const domain = getFeishuDomain(config);
+  const domain = getFeishuDomain(channel);
+  const cacheKey = getFeishuTokenCacheKey(channel);
   const now = Date.now();
-  if (
-    feishuTenantTokenCache
-    && feishuTenantTokenCache.appId === config.feishuAppId
-    && feishuTenantTokenCache.appSecret === config.feishuAppSecret
-    && feishuTenantTokenCache.domain === domain
-    && feishuTenantTokenCache.expiresAt > now + 60_000
-  ) {
-    return feishuTenantTokenCache.token;
+  const cached = feishuTenantTokenCache.get(cacheKey);
+  if (cached && cached.expiresAt > now + 60_000) {
+    return cached.token;
   }
 
   const response = await fetch(`${domain}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      app_id: config.feishuAppId,
-      app_secret: config.feishuAppSecret,
+      app_id: feishu.appId,
+      app_secret: feishu.appSecret,
     }),
   });
 
@@ -399,13 +521,10 @@ async function getFeishuTenantAccessToken(config: Config): Promise<string | null
     return null;
   }
 
-  feishuTenantTokenCache = {
-    appId: config.feishuAppId,
-    appSecret: config.feishuAppSecret,
-    domain,
+  feishuTenantTokenCache.set(cacheKey, {
     token: data.tenant_access_token,
     expiresAt: now + Math.max(60, Number(data.expire || 7200)) * 1000,
-  };
+  });
   return data.tenant_access_token;
 }
 
@@ -413,7 +532,8 @@ async function resolveFeishuBindingDisplay(
   config: Config,
   binding: BindingSummary,
 ): Promise<Pick<BindingSummary, 'chatDisplayName' | 'chatUserId'>> {
-  if (binding.channelType !== 'feishu') {
+  const channel = findChannelInstance(binding.channelType, config);
+  if (!channel || channel.provider !== 'feishu') {
     return {
       chatDisplayName: binding.chatDisplayName,
       chatUserId: binding.chatUserId,
@@ -428,7 +548,7 @@ async function resolveFeishuBindingDisplay(
     };
   }
 
-  const token = await getFeishuTenantAccessToken(config);
+  const token = await getFeishuTenantAccessToken(channel);
   if (!token) {
     return {
       chatDisplayName: binding.chatDisplayName,
@@ -436,7 +556,7 @@ async function resolveFeishuBindingDisplay(
     };
   }
 
-  const domain = getFeishuDomain(config);
+  const domain = getFeishuDomain(channel);
   try {
     const chatResponse = await fetch(
       `${domain}/open-apis/im/v1/chats/${encodeURIComponent(binding.chatId)}`,
@@ -507,8 +627,7 @@ async function buildBindingsPayload(store: JsonFileStore, config: Config) {
   const enriched = await Promise.all(bindings.map(async (binding) => {
     const resolved = await resolveFeishuBindingDisplay(config, binding);
     if (
-      binding.channelType === 'feishu'
-      && (
+      (
         resolved.chatDisplayName !== binding.chatDisplayName
         || resolved.chatUserId !== binding.chatUserId
       )
@@ -528,11 +647,30 @@ async function buildBindingsPayload(store: JsonFileStore, config: Config) {
 
   return {
     bindings: enriched,
-    channels: {
-      feishu: enriched.filter((binding) => binding.channelType === 'feishu'),
-      weixin: enriched.filter((binding) => binding.channelType === 'weixin'),
-    },
     options: listBindingTargetOptions(store, 12),
+  };
+}
+
+function syncBindingChannelMeta(store: JsonFileStore, channel: ChannelInstance): void {
+  for (const binding of store.listChannelBindings(channel.id)) {
+    store.updateChannelBinding(binding.id, {
+      channelProvider: channel.provider,
+      channelAlias: channel.alias,
+    });
+  }
+}
+
+function deleteChannelInstance(current: Config, channelId: string): Config {
+  const channels = current.channels || [];
+  const nextChannels = channels.filter((channel) => channel.id !== channelId);
+  if (nextChannels.length === channels.length) {
+    throw new Error('指定的通道不存在。');
+  }
+
+  return {
+    ...current,
+    channels: nextChannels,
+    enabledChannels: Array.from(new Set(nextChannels.filter((channel) => channel.enabled).map((channel) => channel.provider))),
   };
 }
 
@@ -1441,6 +1579,155 @@ function renderHtml(): string {
         overflow: hidden;
       }
 
+      .channel-layout {
+        display: grid;
+        grid-template-columns: 280px minmax(0, 1fr);
+        gap: 20px;
+      }
+
+      .channel-sidebar {
+        border-right: 1px solid var(--border);
+        padding-right: 20px;
+        display: grid;
+        gap: 12px;
+        align-content: start;
+      }
+
+      .channel-sidebar-meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .channel-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .channel-list-item {
+        width: 100%;
+        text-align: left;
+        border-radius: 10px;
+        padding: 12px 14px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .channel-list-item.active {
+        border-color: rgba(22, 119, 255, 0.30);
+        background: rgba(22, 119, 255, 0.06);
+        color: var(--text);
+      }
+
+      .channel-list-item-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .channel-list-item-title {
+        font-weight: 700;
+        min-width: 0;
+        word-break: break-word;
+      }
+
+      .channel-list-item-provider,
+      .channel-list-item-meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .channel-list-item-stats {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .channel-list-item-status {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .channel-editor {
+        min-width: 0;
+      }
+
+      .channel-editor-summary {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+
+      .channel-editor-stat {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-soft);
+        padding: 12px 14px;
+        display: grid;
+        gap: 4px;
+      }
+
+      .channel-editor-stat strong {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      .channel-editor-stat span {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--text);
+      }
+
+      .editor-section {
+        border-top: 1px solid var(--border);
+        padding-top: 16px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .editor-section-title {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .toolbar-split {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .toolbar-danger {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      button.danger {
+        border-color: rgba(220, 38, 38, 0.24);
+        color: var(--danger);
+      }
+
+      button.danger:hover {
+        border-color: var(--danger);
+        color: var(--danger);
+      }
+
+      .inline-select {
+        display: inline-grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 500;
+      }
+
       .channel-tabs {
         display: flex;
         align-items: flex-end;
@@ -1703,6 +1990,9 @@ function renderHtml(): string {
         .sidebar { border-right: 0; border-bottom: 1px solid var(--sidebar-border); }
         .nav { grid-template-columns: repeat(6, minmax(0, 1fr)); }
         .main { padding: 20px 20px 28px; }
+        .channel-layout { grid-template-columns: 1fr; }
+        .channel-sidebar { border-right: 0; padding-right: 0; }
+        .channel-editor-summary { grid-template-columns: 1fr; }
         .field-row,
         .field-row.triple,
         .command-item,
@@ -1944,10 +2234,8 @@ function renderHtml(): string {
                 </label>
               </div>
               <div class="small">未绑定的 IM 聊天会先进入临时草稿线程（等同 <code>/t 0</code>）；“默认工作空间”只用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。默认模型候选项来自启动时读取的 Codex 模型缓存：隐藏模型不会展示，CLI only 模型会标成“仅 IM / CLI”。留空则继续跟随 Codex 当前默认模型。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。</div>
-              <div class="small">当前需要重启 Bridge 的配置：<code>Runtime</code>、<code>自动批准工具权限</code>、<code>允许在未信任 Git 目录运行 Codex</code>、飞书 <code>App ID</code>/<code>App Secret</code>/<code>Domain</code>。</div>
+              <div class="small">当前需要重启 Bridge 的配置：<code>Runtime</code>、<code>自动批准工具权限</code>、<code>允许在未信任 Git 目录运行 Codex</code>。通道实例的接入配置请在“通道”页维护。</div>
               <div class="checkbox-row">
-                <label class="checkbox"><input id="channelFeishu" type="checkbox" checked /> 启用飞书</label>
-                <label class="checkbox"><input id="channelWeixin" type="checkbox" /> 启用微信</label>
                 <label class="checkbox"><input id="autoApprove" type="checkbox" /> 自动批准工具权限</label>
               </div>
               <div class="checkbox-row">
@@ -2052,112 +2340,35 @@ function renderHtml(): string {
             </div>
           </div>
 
-          <section class="panel channel-shell">
-            <div class="channel-tabs" role="tablist" aria-label="通道配置">
-              <button type="button" class="channel-tab active" data-channel="feishu" role="tab" aria-selected="true">飞书</button>
-              <button type="button" class="channel-tab" data-channel="weixin" role="tab" aria-selected="false">微信</button>
+          <section class="panel channel-workspace">
+            <div class="panel-header">
+              <div>
+                <h2>通道实例</h2>
+                <p>这里管理多个飞书或微信机器人实例。实例只是不同聊天入口，不会改变 Codex 的会话语义。</p>
+              </div>
+              <div class="toolbar">
+                <label class="inline-select">
+                  新通道
+                  <select id="newChannelProvider">
+                    <option value="feishu">飞书</option>
+                    <option value="weixin">微信</option>
+                  </select>
+                </label>
+                <button id="createChannelBtn">新增通道</button>
+                <button id="refreshChannelsBtn">刷新状态</button>
+              </div>
             </div>
 
-            <div class="channel-view active" data-channel="feishu" role="tabpanel">
-              <section id="feishu">
-              <div class="panel-header">
-                <div>
-                  <h2>飞书 / Lark</h2>
-                  <p>填写凭据、测试可用性，并查看当前飞书聊天绑定到哪条会话。</p>
-                </div>
-                <div class="toolbar">
-                  <button id="saveFeishuChannelBtn">保存通道配置</button>
-                  <button id="testFeishuBtn">测试飞书凭据</button>
-                  <button id="refreshFeishuStateBtn">刷新状态</button>
-                </div>
-              </div>
-
-              <div class="fields">
-                <div class="field-row">
-                  <label>
-                    App ID
-                    <input id="feishuAppId" />
-                  </label>
-                  <label>
-                    App Secret
-                    <input id="feishuAppSecret" />
-                  </label>
-                </div>
-                <div class="field-row">
-                  <label>
-                    Domain
-                    <input id="feishuDomain" value="https://open.feishu.cn" />
-                  </label>
-                  <label>
-                    Allowed Users
-                    <input id="feishuAllowedUsers" placeholder="多个 user_id 用逗号分隔" />
-                  </label>
-                </div>
-                <div class="checkbox-row">
-                  <label class="checkbox"><input id="feishuStreamingEnabled" type="checkbox" checked /> 启用飞书流式响应卡片</label>
-                </div>
-                <div class="checkbox-row">
-                  <label class="checkbox"><input id="feishuCommandMarkdownEnabled" type="checkbox" checked /> 反馈使用markdown</label>
-                </div>
-                <div class="small">需要飞书侧已开通可更新卡片的相关能力；如果权限不足，会自动回退为最终结果消息。</div>
-                <div class="small">影响通过 bridge 发送到飞书的文本反馈，包括普通回复、共享桌面线程镜像和 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈。</div>
-                <div class="small">修改飞书 <code>App ID</code>、<code>App Secret</code>、<code>Domain</code> 后，需要重启 Bridge 让客户端重新初始化；白名单、流式开关、markdown 开关会即时生效。</div>
-              </div>
-
-              <div class="panel-block">
-                <p class="panel-subtitle">通道状态</p>
-                <div class="small" id="feishuRuntimeMeta">正在加载…</div>
-              </div>
-              <div class="panel-block">
-                <p class="panel-subtitle">当前飞书绑定</p>
-                <div class="small" id="feishuBindingMeta">正在加载…</div>
-                <div class="binding-list" id="feishuBindings" style="margin-top: 12px;"></div>
-              </div>
-
-              <div class="message" id="feishuMessage"></div>
+            <div class="channel-layout">
+              <aside class="channel-sidebar">
+                <div class="channel-sidebar-meta" id="channelListMeta">正在加载…</div>
+                <div class="channel-list" id="channelList"></div>
+              </aside>
+              <section class="channel-editor" id="channelEditor">
+                <div class="binding-empty">正在加载通道配置…</div>
               </section>
             </div>
-
-            <div class="channel-view" data-channel="weixin" role="tabpanel">
-              <section id="wechat">
-              <div class="panel-header">
-                <div>
-                  <h2>微信</h2>
-                  <p>扫码登录微信并查看当前聊天绑定的会话。</p>
-                </div>
-                <div class="toolbar">
-                  <button id="saveWeixinChannelBtn">保存通道配置</button>
-                  <button id="weixinLoginBtn">开始微信扫码</button>
-                  <button id="refreshWeixinStateBtn">刷新状态</button>
-                </div>
-              </div>
-
-              <div class="fields">
-                <div class="checkbox-row">
-                  <label class="checkbox"><input id="weixinMediaEnabled" type="checkbox" /> 启用图片 / 文件 / 视频入站下载</label>
-                </div>
-                <div class="checkbox-row">
-                  <label class="checkbox"><input id="weixinCommandMarkdownEnabled" type="checkbox" /> 反馈使用markdown</label>
-                </div>
-              </div>
-              <div class="small">影响通过 bridge 发送到微信的文本反馈，包括普通回复、共享桌面线程镜像和 <code>/h</code>、<code>/status</code>、<code>/threads</code> 这类系统反馈。默认关闭。</div>
-              <div class="panel-block">
-                <p class="panel-subtitle">通道状态</p>
-                <div class="small" id="weixinRuntimeMeta">正在加载…</div>
-              </div>
-              <div class="panel-block">
-                <p class="panel-subtitle">已登录微信账号</p>
-                <div class="small" id="weixinAccountMeta">正在加载…</div>
-                <div class="binding-list" id="weixinAccounts" style="margin-top: 12px;"></div>
-              </div>
-              <div class="panel-block">
-                <p class="panel-subtitle">当前微信绑定</p>
-                <div class="small" id="weixinBindingMeta">正在加载…</div>
-                <div class="binding-list" id="weixinBindings" style="margin-top: 12px;"></div>
-              </div>
-              <div class="message" id="weixinMessage"></div>
-              </section>
-            </div>
+            <div class="message" id="channelMessage"></div>
           </section>
         </section>
 
@@ -2189,14 +2400,12 @@ function renderHtml(): string {
         desktopSessions: [],
         bindings: [],
         bindingOptions: [],
-        activeBindingByChannel: {
-          feishu: '',
-          weixin: '',
-        },
+        activeBindingByChannelId: {},
         weixinAccounts: [],
         desktopRoot: '',
         activePage: 'overview',
-        activeChannel: 'feishu',
+        activeChannelId: '',
+        channelDraft: null,
       };
 
       function escapeHtml(value) {
@@ -2307,16 +2516,6 @@ function renderHtml(): string {
         return binding.chatDisplayName || binding.chatId || binding.id;
       }
 
-      function ensureActiveBinding(channelType, bindings) {
-        const current = state.activeBindingByChannel[channelType];
-        if (current && bindings.some((binding) => binding.id === current)) {
-          return current;
-        }
-        const next = bindings[0] ? bindings[0].id : '';
-        state.activeBindingByChannel[channelType] = next;
-        return next;
-      }
-
       function renderBindingCard(binding) {
         return ''
           + '<article class="binding-item" data-binding-id="' + escapeHtml(binding.id) + '">'
@@ -2338,13 +2537,6 @@ function renderHtml(): string {
           + '</article>';
       }
 
-      function enabledChannelsFromForm() {
-        const channels = [];
-        if (document.getElementById('channelFeishu').checked) channels.push('feishu');
-        if (document.getElementById('channelWeixin').checked) channels.push('weixin');
-        return channels;
-      }
-
       function formPayload() {
         return {
           runtime: document.getElementById('runtime').value,
@@ -2357,16 +2549,7 @@ function renderHtml(): string {
           codexReasoningEffort: document.getElementById('codexReasoningEffort').value,
           uiAllowLan: document.getElementById('uiAllowLan').checked,
           uiAccessToken: document.getElementById('uiAccessToken').value,
-          enabledChannels: enabledChannelsFromForm(),
           autoApprove: document.getElementById('autoApprove').checked,
-          feishuAppId: document.getElementById('feishuAppId').value,
-          feishuAppSecret: document.getElementById('feishuAppSecret').value,
-          feishuDomain: document.getElementById('feishuDomain').value,
-          feishuAllowedUsers: document.getElementById('feishuAllowedUsers').value,
-          feishuStreamingEnabled: document.getElementById('feishuStreamingEnabled').checked,
-          feishuCommandMarkdownEnabled: document.getElementById('feishuCommandMarkdownEnabled').checked,
-          weixinMediaEnabled: document.getElementById('weixinMediaEnabled').checked,
-          weixinCommandMarkdownEnabled: document.getElementById('weixinCommandMarkdownEnabled').checked,
         };
       }
 
@@ -2418,7 +2601,7 @@ function renderHtml(): string {
 
         if (syncHash !== false) {
           const hash = nextPage === 'channels'
-            ? '#channels/' + state.activeChannel
+            ? '#channels/' + (state.activeChannelId || '')
             : '#' + nextPage;
           if (window.location.hash !== hash) {
             history.replaceState(null, '', hash);
@@ -2426,26 +2609,12 @@ function renderHtml(): string {
         }
       }
 
-      function setActiveChannel(channel, syncHash) {
-        const nextChannel = channel === 'weixin' ? 'weixin' : 'feishu';
-        state.activeChannel = nextChannel;
-
-        document.querySelectorAll('.channel-tab').forEach((element) => {
-          const node = element;
-          const active = node.dataset.channel === nextChannel;
-          node.classList.toggle('active', active);
-          node.setAttribute('aria-selected', active ? 'true' : 'false');
-        });
-
-        document.querySelectorAll('.channel-view').forEach((element) => {
-          const node = element;
-          const active = node.dataset.channel === nextChannel;
-          node.classList.toggle('active', active);
-          node.hidden = !active;
-        });
+      function setActiveChannel(channelId, syncHash) {
+        state.activeChannelId = channelId || '';
+        renderChannelsWorkspace();
 
         if (syncHash !== false && state.activePage === 'channels') {
-          const hash = '#channels/' + nextChannel;
+          const hash = '#channels/' + (state.activeChannelId || '');
           if (window.location.hash !== hash) {
             history.replaceState(null, '', hash);
           }
@@ -2456,13 +2625,12 @@ function renderHtml(): string {
         const raw = String(window.location.hash || '').replace(/^#/, '');
         if (!raw) {
           setActivePage('overview', false);
-          setActiveChannel('feishu', false);
           return;
         }
 
         if (raw.startsWith('channels/')) {
           setActivePage('channels', false);
-          setActiveChannel(raw.split('/')[1] || 'feishu', false);
+          setActiveChannel(raw.split('/')[1] || '', false);
           return;
         }
 
@@ -2509,21 +2677,44 @@ function renderHtml(): string {
           });
       }
 
-      function isChannelEnabled(channelType) {
-        return Boolean(state.config && (state.config.enabledChannels || []).includes(channelType));
+      function providerLabel(provider) {
+        if (provider === 'weixin') return '微信';
+        if (provider === 'feishu') return '飞书';
+        return '通道';
       }
 
-      function runningChannels() {
-        return state.bridgeStatus && Array.isArray(state.bridgeStatus.channels) ? state.bridgeStatus.channels : [];
+      function configuredChannels() {
+        return Array.isArray(state.config && state.config.channels) ? state.config.channels : [];
       }
 
-      function isChannelRunning(channelType) {
-        return Boolean(state.bridgeStatus && state.bridgeStatus.running && runningChannels().includes(channelType));
+      function visibleChannels() {
+        const channels = configuredChannels().slice();
+        if (state.channelDraft) {
+          channels.push(state.channelDraft);
+        }
+        return channels;
+      }
+
+      function getChannelById(channelId) {
+        if (state.channelDraft && state.channelDraft.id === channelId) return state.channelDraft;
+        return configuredChannels().find((channel) => channel.id === channelId) || null;
+      }
+
+      function adapterStatuses() {
+        return state.bridgeStatus && Array.isArray(state.bridgeStatus.adapters) ? state.bridgeStatus.adapters : [];
+      }
+
+      function getAdapterStatus(channelId) {
+        return adapterStatuses().find((item) => item.channelType === channelId) || null;
+      }
+
+      function isChannelRunning(channelId) {
+        const status = getAdapterStatus(channelId);
+        return Boolean(state.bridgeStatus && state.bridgeStatus.running && status && status.running);
       }
 
       const CONFIG_FIELD_LABELS = {
         runtime: 'Runtime',
-        enabledChannels: '通道启用状态',
         defaultWorkspaceRoot: '默认工作空间',
         defaultModel: '默认模型',
         defaultMode: '默认模式',
@@ -2534,28 +2725,15 @@ function renderHtml(): string {
         uiAllowLan: '允许局域网访问 Web 控制台',
         uiAccessToken: '局域网访问 token',
         autoApprove: '自动批准工具权限',
-        feishuAppId: '飞书 App ID',
-        feishuAppSecret: '飞书 App Secret',
-        feishuDomain: '飞书 Domain',
-        feishuAllowedUsers: '飞书 Allowed Users',
-        feishuStreamingEnabled: '飞书流式响应卡片',
-        feishuCommandMarkdownEnabled: '飞书反馈markdown',
-        weixinMediaEnabled: '微信图片/文件/视频入站下载',
-        weixinCommandMarkdownEnabled: '微信反馈markdown',
       };
 
       const BRIDGE_RESTART_FIELDS = new Set([
         'runtime',
         'codexSkipGitRepoCheck',
         'autoApprove',
-        'feishuAppId',
-        'feishuAppSecret',
-        'feishuDomain',
       ]);
 
-      const AUTO_SYNC_FIELDS = new Set([
-        'enabledChannels',
-      ]);
+      const AUTO_SYNC_FIELDS = new Set([]);
 
       const IMMEDIATE_FIELDS = new Set([
         'defaultWorkspaceRoot',
@@ -2566,29 +2744,12 @@ function renderHtml(): string {
         'codexReasoningEffort',
         'uiAllowLan',
         'uiAccessToken',
-        'feishuAllowedUsers',
-        'feishuStreamingEnabled',
-        'feishuCommandMarkdownEnabled',
-        'weixinMediaEnabled',
-        'weixinCommandMarkdownEnabled',
       ]);
 
       const SAVE_SCOPE_FIELDS = {
         all: null,
-        feishu: new Set([
-          'enabledChannels',
-          'feishuAppId',
-          'feishuAppSecret',
-          'feishuDomain',
-          'feishuAllowedUsers',
-          'feishuStreamingEnabled',
-          'feishuCommandMarkdownEnabled',
-        ]),
-        weixin: new Set([
-          'enabledChannels',
-          'weixinMediaEnabled',
-          'weixinCommandMarkdownEnabled',
-        ]),
+        feishu: new Set([]),
+        weixin: new Set([]),
       };
 
       function normalizeConfigValue(value) {
@@ -2651,63 +2812,40 @@ function renderHtml(): string {
         return '配置已保存。' + (notes.length > 0 ? ' ' + notes.join('；') + '。' : '');
       }
 
-      function channelLabel(channelType) {
-        return channelType === 'weixin' ? '微信' : '飞书';
+      function channelDisplayLabel(channel) {
+        const alias = String(channel.alias || '').trim();
+        const provider = providerLabel(channel.provider);
+        if (!alias) return provider;
+        return alias === provider ? alias : alias + ' · ' + provider;
       }
 
-      function channelRuntimeText(channelType) {
-        const label = channelLabel(channelType);
-        if (!isChannelEnabled(channelType)) {
-          return label + '在配置中未启用。';
+      function formatChannelRuntimeLabel(channel) {
+        const label = channelDisplayLabel(channel);
+        if (channel.enabled === false) {
+          return label + '已停用。';
         }
         if (!state.bridgeStatus || !state.bridgeStatus.running) {
-          return label + '已启用，但 Bridge 还没启动。启动 Bridge 后才会真正接通。';
+          return label + '已配置，但 Bridge 还没启动。';
         }
-        if (!isChannelRunning(channelType)) {
-          return label + '已写入配置，Bridge 会在几秒内自动同步这个通道；如果页面还没更新，可手动点“刷新状态”。';
+        const status = getAdapterStatus(channel.id);
+        if (!status || !status.running) {
+          return label + '已保存，Bridge 会在几秒内自动同步。';
         }
         return label + '已接通到当前运行中的 Bridge。';
       }
 
-      function emptyBindingText(channelType) {
-        const label = channelLabel(channelType);
-        if (!isChannelEnabled(channelType)) {
-          return label + '未启用。先在“配置”里勾选后保存。';
+      function emptyBindingText(channel) {
+        const label = channelDisplayLabel(channel);
+        if (channel.enabled === false) {
+          return label + '已停用。启用后才会创建聊天绑定。';
         }
         if (!state.bridgeStatus || !state.bridgeStatus.running) {
-          return label + '已启用，但 Bridge 还没启动。启动后才会创建绑定。';
+          return label + '已配置，但 Bridge 还没启动。启动后才会创建绑定。';
         }
-        if (!isChannelRunning(channelType)) {
-          return label + '已启用，Bridge 会在几秒内自动同步这个通道；如果页面还没更新，可手动点“刷新状态”。';
+        if (!isChannelRunning(channel.id)) {
+          return label + '已配置，Bridge 会在几秒内自动同步；如果页面还没更新，可手动点“刷新状态”。';
         }
-        return label + '当前还没有聊天接入。先从' + label + '发一条消息，bridge 才会创建绑定。';
-      }
-
-      function quickSwitchState(channelType) {
-        const label = channelLabel(channelType);
-        if (!isChannelEnabled(channelType)) {
-          return { disabled: true, title: label + '未启用。' };
-        }
-        if (!state.bridgeStatus || !state.bridgeStatus.running) {
-          return { disabled: true, title: 'Bridge 还没启动。启动后再切换' + label + '会话。' };
-        }
-        if (!isChannelRunning(channelType)) {
-          return { disabled: true, title: label + '已写入配置，Bridge 会在几秒内自动同步；同步完成后再切换会话。' };
-        }
-
-        const bindings = state.bindings.filter((item) => item.channelType === channelType);
-        if (bindings.length === 0) {
-          return { disabled: true, title: '当前还没有' + label + '聊天绑定。先让' + label + '发来一条消息。' };
-        }
-        if (bindings.length > 1) {
-          return { disabled: true, title: label + '有多个绑定，请到通道页切换。' };
-        }
-
-        return {
-          disabled: false,
-          title: '切换' + label + '到当前会话',
-          bindingId: bindings[0].id,
-        };
+        return label + '当前还没有聊天接入。先从这个机器人发一条消息。';
       }
 
       function currentThreadMarks(threadId) {
@@ -2718,11 +2856,11 @@ function renderHtml(): string {
         for (const binding of state.bindings || []) {
           const matchesThread = binding.currentThreadId === threadId || binding.currentTargetKey === currentTargetKey;
           if (!matchesThread) continue;
-          counts.set(binding.channelType, (counts.get(binding.channelType) || 0) + 1);
+          const label = (binding.channelAlias || providerLabel(binding.channelProvider)) + ' 当前';
+          counts.set(label, (counts.get(label) || 0) + 1);
         }
 
-        for (const [channelType, count] of counts.entries()) {
-          const label = channelType === 'weixin' ? '微信当前' : '飞书当前';
+        for (const [label, count] of counts.entries()) {
           marks.push(count > 1 ? label + ' x' + count : label);
         }
 
@@ -2744,7 +2882,10 @@ function renderHtml(): string {
       }
 
       function formatBindingAccount(binding) {
-        return channelLabel(binding.channelType) + ' · ' + (binding.chatDisplayName || binding.chatId);
+        const alias = String(binding.channelAlias || '').trim();
+        const provider = providerLabel(binding.channelProvider);
+        const channel = alias ? (alias === provider ? alias : alias + ' · ' + provider) : provider;
+        return channel + ' · ' + (binding.chatDisplayName || binding.chatId);
       }
 
       function bindingRuntimeText(binding) {
@@ -2772,9 +2913,6 @@ function renderHtml(): string {
       }
 
       function renderDesktopSessionCard(session) {
-        const feishuSwitch = quickSwitchState('feishu');
-        const weixinSwitch = quickSwitchState('weixin');
-        const targetKey = 'desktop:' + session.threadId;
         const originator = session.originator || 'Codex Desktop';
         const marks = currentThreadMarks(session.threadId);
         const markHtml = marks.map((mark) => '<span class="session-mark">' + escapeHtml(mark) + '</span>').join('');
@@ -2795,8 +2933,7 @@ function renderHtml(): string {
           +       '<div class="session-path">' + escapeHtml(session.cwd || '(no cwd)') + '</div>'
           +     '</div>'
           +     '<div class="session-actions">'
-          +       '<button type="button" data-action="bind-channel" data-channel="feishu" data-binding-id="' + escapeHtml(feishuSwitch.bindingId || '') + '" data-target-key="' + escapeHtml(targetKey) + '" title="' + escapeHtml(feishuSwitch.title) + '"' + (feishuSwitch.disabled ? ' disabled' : '') + '>飞书切到此会话</button>'
-          +       '<button type="button" data-action="bind-channel" data-channel="weixin" data-binding-id="' + escapeHtml(weixinSwitch.bindingId || '') + '" data-target-key="' + escapeHtml(targetKey) + '" title="' + escapeHtml(weixinSwitch.title) + '"' + (weixinSwitch.disabled ? ' disabled' : '') + '>微信切到此会话</button>'
+          +       '<button type="button" data-action="copy-thread" data-thread-id="' + escapeHtml(session.threadId) + '">复制 thread</button>'
           +       '<button type="button" data-action="copy-bind-command" data-thread-id="' + escapeHtml(session.threadId) + '">复制命令</button>'
           +   '</div>'
           + '</div>'
@@ -2881,14 +3018,14 @@ function renderHtml(): string {
         allMeta.textContent = '按最近活动排序，共 ' + sessions.length + ' 条。';
 
         if (boundSessions.length === 0) {
-          boundList.innerHTML = '<div class="binding-empty">当前没有任何桌面会话正在绑定到飞书或微信聊天。</div>';
+          boundList.innerHTML = '<div class="binding-empty">当前没有任何桌面会话正在绑定到聊天入口。</div>';
         } else {
           boundList.innerHTML = boundSessions.map((session) => renderBoundDesktopSessionCard(session)).join('');
         }
 
         if (state.desktopSessions.length === 0) {
           list.innerHTML = '<div class="notice ghost">当前没有发现桌面端会话。先在 Codex Desktop App 中打开或运行一个会话，再回到这里刷新。</div>';
-          rerenderBindingPanels();
+          renderChannelsWorkspace();
           return;
         }
 
@@ -2896,7 +3033,7 @@ function renderHtml(): string {
           + sessions.map((session) => renderDesktopSessionListItem(session)).join('')
           + '</div>';
 
-        rerenderBindingPanels();
+        renderChannelsWorkspace();
       }
 
       function rerenderDesktopSessions() {
@@ -2907,42 +3044,91 @@ function renderHtml(): string {
         });
       }
 
-      function rerenderBindingPanels() {
-        renderChannelBindings(
-          'feishu',
-          'feishuBindings',
-          'feishuBindingMeta',
-          emptyBindingText('feishu')
-        );
-        renderChannelBindings(
-          'weixin',
-          'weixinBindings',
-          'weixinBindingMeta',
-          emptyBindingText('weixin')
-        );
+      function bindingsForChannel(channelId) {
+        return (state.bindings || []).filter((item) => item.channelType === channelId);
       }
 
-      function renderChannelBindings(channelType, listId, metaId, emptyText) {
-        const bindings = state.bindings.filter((item) => item.channelType === channelType);
-        const list = document.getElementById(listId);
-        const meta = document.getElementById(metaId);
-        meta.textContent = bindings.length > 0
-          ? '当前已发现 ' + bindings.length + ' 个聊天绑定。一个会话只能绑定一个聊天。这里只显示和会话页一致的命名桌面线程。'
-          : emptyText;
+      function ensureActiveBinding(channelId, bindings) {
+        const current = state.activeBindingByChannelId[channelId];
+        if (current && bindings.some((binding) => binding.id === current)) {
+          return current;
+        }
+        const next = bindings[0] ? bindings[0].id : '';
+        state.activeBindingByChannelId[channelId] = next;
+        return next;
+      }
 
-        if (bindings.length === 0) {
-          state.activeBindingByChannel[channelType] = '';
-          list.innerHTML = '<div class="binding-empty">' + escapeHtml(emptyText) + '</div>';
+      function ensureActiveChannelId() {
+        if (state.channelDraft && state.activeChannelId === state.channelDraft.id) {
+          return state.activeChannelId;
+        }
+        const channels = visibleChannels();
+        if (state.activeChannelId && channels.some((channel) => channel.id === state.activeChannelId)) {
+          return state.activeChannelId;
+        }
+        state.activeChannelId = channels[0] ? channels[0].id : '';
+        return state.activeChannelId;
+      }
+
+      function getWeixinAccountOptions() {
+        return Array.isArray(state.weixinAccounts) ? state.weixinAccounts : [];
+      }
+
+      function renderChannelList() {
+        const list = document.getElementById('channelList');
+        const meta = document.getElementById('channelListMeta');
+        const channels = visibleChannels();
+
+        meta.textContent = channels.length > 0
+          ? '共 ' + channels.length + ' 个通道实例。每个实例是一个独立聊天入口。'
+          : '当前还没有通道实例。先新增一个飞书或微信机器人。';
+
+        if (channels.length === 0) {
+          list.innerHTML = '<div class="binding-empty">当前还没有可用通道实例。</div>';
           return;
         }
 
-        const activeBindingId = ensureActiveBinding(channelType, bindings);
+        ensureActiveChannelId();
+        list.innerHTML = channels.map((channel) => {
+          const adapter = getAdapterStatus(channel.id);
+          const active = channel.id === state.activeChannelId;
+          const bindingCount = bindingsForChannel(channel.id).length;
+          const statusText = channel.enabled === false
+            ? '已停用'
+            : adapter && adapter.running
+              ? '运行中'
+              : state.bridgeStatus && state.bridgeStatus.running
+                ? '等待同步'
+                : 'Bridge 未启动';
+          return ''
+            + '<button type="button" class="channel-list-item' + (active ? ' active' : '') + '" data-action="select-channel" data-channel-id="' + escapeHtml(channel.id) + '">'
+            +   '<div class="channel-list-item-head">'
+            +     '<div class="channel-list-item-title">' + escapeHtml(channel.alias) + '</div>'
+            +     '<span class="channel-list-item-provider">' + escapeHtml(providerLabel(channel.provider)) + '</span>'
+            +   '</div>'
+            +   '<div class="channel-list-item-stats">'
+            +     '<span class="channel-list-item-status">' + escapeHtml(statusText) + '</span>'
+            +     '<span>' + escapeHtml(bindingCount === 0 ? '未绑定聊天' : ('已绑定 ' + bindingCount + ' 个聊天')) + '</span>'
+            +   '</div>'
+            +   '<div class="channel-list-item-meta">' + escapeHtml(channel.id) + '</div>'
+            + '</button>';
+        }).join('');
+      }
+
+      function renderChannelBindingsV2(channel) {
+        const bindings = bindingsForChannel(channel.id);
+        const emptyText = emptyBindingText(channel);
+        if (bindings.length === 0) {
+          return '<div class="binding-empty">' + escapeHtml(emptyText) + '</div>';
+        }
+
+        const activeBindingId = ensureActiveBinding(channel.id, bindings);
         const activeBinding = bindings.find((binding) => binding.id === activeBindingId) || bindings[0];
         const tabs = bindings.length > 1
           ? '<div class="binding-tabs">' + bindings.map((binding) => (
               '<button type="button" class="binding-tab' + (binding.id === activeBinding.id ? ' active' : '') + '"'
                 + ' data-action="select-binding-tab"'
-                + ' data-channel="' + escapeHtml(channelType) + '"'
+                + ' data-channel-id="' + escapeHtml(channel.id) + '"'
                 + ' data-binding-id="' + escapeHtml(binding.id) + '"'
                 + ' title="' + escapeHtml(binding.chatId) + '">'
                 + escapeHtml(bindingTabLabel(binding))
@@ -2950,51 +3136,129 @@ function renderHtml(): string {
             )).join('') + '</div>'
           : '';
 
-        list.innerHTML = tabs + renderBindingCard(activeBinding);
+        return ''
+          + '<div class="small">当前已发现 ' + bindings.length + ' 个聊天绑定。一个会话同一时刻只能绑定一个聊天。</div>'
+          + tabs
+          + renderBindingCard(activeBinding);
       }
 
-      function renderWeixinAccounts() {
-        const meta = document.getElementById('weixinAccountMeta');
-        const list = document.getElementById('weixinAccounts');
-        const accounts = state.weixinAccounts || [];
-
-        if (accounts.length === 0) {
-          meta.textContent = '当前还没有已保存的微信账号。先点击“开始微信扫码”，然后在手机上确认。';
-          list.innerHTML = '<div class="binding-empty">扫码成功后，这里会显示当前已保存的微信账号。</div>';
+      function renderChannelEditor() {
+        const editor = document.getElementById('channelEditor');
+        const channel = getChannelById(ensureActiveChannelId());
+        if (!channel) {
+          editor.innerHTML = '<div class="binding-empty">请选择一个通道实例，或先创建新通道。</div>';
           return;
         }
 
-        meta.textContent = '当前已保存 ' + accounts.length + ' 个微信账号。微信桥接是单账号模式，最新启用的账号会生效。';
-        list.innerHTML = accounts.map((account) => ''
-          + '<article class="binding-item">'
-          +   '<div class="binding-head">'
-          +     '<div class="binding-title">' + escapeHtml(account.name || account.accountId) + '</div>'
-          +     '<div class="small">' + (account.enabled ? '已启用' : '已停用') + '</div>'
-          +   '</div>'
-          +   '<div class="binding-detail">账号 ID：<code>' + escapeHtml(account.accountId) + '</code></div>'
-          +   '<div class="binding-detail">用户 ID：<code>' + escapeHtml(account.userId || '-') + '</code></div>'
-          +   '<div class="binding-detail">Base URL：' + escapeHtml(account.baseUrl || '-') + '</div>'
-          +   '<div class="binding-detail">最近登录：' + escapeHtml(formatTime(account.lastLoginAt || account.updatedAt)) + '</div>'
-          + '</article>'
+        const adapter = getAdapterStatus(channel.id);
+        const statusText = formatChannelRuntimeLabel(channel);
+        const feishu = channel.provider === 'feishu' ? (channel.config || {}) : {};
+        const weixin = channel.provider === 'weixin' ? (channel.config || {}) : {};
+        const weixinAccounts = getWeixinAccountOptions();
+        const weixinAccountOptions = ['<option value="">未绑定账号</option>'].concat(
+          weixinAccounts.map((account) => (
+            '<option value="' + escapeHtml(account.accountId) + '"' + (account.accountId === weixin.accountId ? ' selected' : '') + '>'
+              + escapeHtml(account.name || account.accountId)
+            + '</option>'
+          )),
         ).join('');
+        const bindingsHtml = renderChannelBindingsV2(channel);
+        const bindingCount = bindingsForChannel(channel.id).length;
+        const detailsHtml = channel.provider === 'feishu'
+          ? ''
+            + '<div class="editor-section">'
+            +   '<p class="editor-section-title">连接配置</p>'
+            +   '<div class="field-row">'
+            +     '<label>App ID<input id="channelAppId" value="' + escapeHtml(feishu.appId || '') + '" /></label>'
+            +     '<label>App Secret<input id="channelAppSecret" value="' + escapeHtml(feishu.appSecret || '') + '" /></label>'
+            +   '</div>'
+            +   '<div class="field-row">'
+            +     '<label>站点<select id="channelSite">'
+            +       '<option value="feishu"' + ((feishu.site || 'feishu') === 'feishu' ? ' selected' : '') + '>Feishu</option>'
+            +       '<option value="lark"' + (feishu.site === 'lark' ? ' selected' : '') + '>Lark</option>'
+            +     '</select></label>'
+            +     '<label>Allowed Users<input id="channelAllowedUsers" value="' + escapeHtml(Array.isArray(feishu.allowedUsers) ? feishu.allowedUsers.join(', ') : '') + '" placeholder="多个 user_id 用逗号分隔" /></label>'
+            +   '</div>'
+            + '</div>'
+            + '<div class="editor-section">'
+            +   '<p class="editor-section-title">行为开关</p>'
+            +   '<div class="checkbox-row">'
+            +     '<label class="checkbox"><input id="channelStreamingEnabled" type="checkbox"' + (feishu.streamingEnabled !== false ? ' checked' : '') + ' /> 启用飞书流式响应卡片</label>'
+            +     '<label class="checkbox"><input id="channelFeedbackMarkdownEnabled" type="checkbox"' + (feishu.feedbackMarkdownEnabled !== false ? ' checked' : '') + ' /> 反馈使用markdown</label>'
+            +   '</div>'
+            + '</div>'
+          : ''
+            + '<div class="editor-section">'
+            +   '<p class="editor-section-title">连接配置</p>'
+            +   '<div class="field-row">'
+            +     '<label>微信账号<select id="channelAccountId">' + weixinAccountOptions + '</select></label>'
+            +     '<label>Base URL<input id="channelBaseUrl" value="' + escapeHtml(weixin.baseUrl || '') + '" /></label>'
+            +   '</div>'
+            +   '<div class="field-row">'
+            +     '<label>CDN Base URL<input id="channelCdnBaseUrl" value="' + escapeHtml(weixin.cdnBaseUrl || '') + '" /></label>'
+            +     '<div></div>'
+            +   '</div>'
+            + '</div>'
+            + '<div class="editor-section">'
+            +   '<p class="editor-section-title">行为开关</p>'
+            +   '<div class="checkbox-row">'
+            +     '<label class="checkbox"><input id="channelMediaEnabled" type="checkbox"' + (weixin.mediaEnabled === true ? ' checked' : '') + ' /> 启用图片 / 文件 / 视频入站下载</label>'
+            +     '<label class="checkbox"><input id="channelFeedbackMarkdownEnabled" type="checkbox"' + (weixin.feedbackMarkdownEnabled === true ? ' checked' : '') + ' /> 反馈使用markdown</label>'
+            +   '</div>'
+            + '</div>';
+
+        editor.innerHTML = ''
+          + '<div class="panel-header">'
+          +   '<div>'
+            +     '<h2>' + escapeHtml(channel.alias) + '</h2>'
+            +     '<p>' + escapeHtml(statusText) + (adapter && adapter.lastMessageAt ? ' · 最近消息 ' + escapeHtml(formatTime(adapter.lastMessageAt)) : '') + '</p>'
+          +   '</div>'
+          +   '<div class="toolbar-split">'
+          +     '<div class="toolbar">'
+          +       '<button type="button" data-action="channel-save" data-channel-id="' + escapeHtml(channel.id) + '" class="primary">保存通道</button>'
+          +       '<button type="button" data-action="channel-test" data-channel-id="' + escapeHtml(channel.id) + '">测试当前通道</button>'
+          +       (channel.provider === 'weixin' ? '<button type="button" data-action="channel-weixin-login" data-channel-id="' + escapeHtml(channel.id) + '">开始微信扫码</button>' : '')
+          +     '</div>'
+          +     '<div class="toolbar-danger">'
+          +       '<button type="button" data-action="channel-delete" data-channel-id="' + escapeHtml(channel.id) + '" class="danger">删除通道</button>'
+          +     '</div>'
+          +   '</div>'
+          + '</div>'
+          + '<div class="channel-editor-summary">'
+          +   '<div class="channel-editor-stat"><strong>当前状态</strong><span>' + escapeHtml(statusText) + '</span></div>'
+          +   '<div class="channel-editor-stat"><strong>聊天绑定</strong><span>' + escapeHtml(String(bindingCount)) + '</span></div>'
+          +   '<div class="channel-editor-stat"><strong>Provider</strong><span>' + escapeHtml(providerLabel(channel.provider)) + '</span></div>'
+          + '</div>'
+          + '<div class="fields">'
+          +   '<div class="editor-section">'
+          +     '<p class="editor-section-title">基础信息</p>'
+          +     '<div class="field-row triple">'
+          +       '<label>别名<input id="channelAliasInput" value="' + escapeHtml(channel.alias) + '" /></label>'
+          +       '<label>实例 ID<input value="' + escapeHtml(channel.id) + '" disabled /></label>'
+          +       '<label>Provider<input value="' + escapeHtml(providerLabel(channel.provider)) + '" disabled /></label>'
+          +     '</div>'
+          +     '<div class="checkbox-row">'
+          +       '<label class="checkbox"><input id="channelEnabledInput" type="checkbox"' + (channel.enabled !== false ? ' checked' : '') + ' /> 启用当前通道</label>'
+          +     '</div>'
+          +   '</div>'
+          +   detailsHtml
+          + '</div>'
+          + '<div class="panel-block">'
+          +   '<p class="panel-subtitle">当前绑定</p>'
+          +   bindingsHtml
+          + '</div>';
+      }
+
+      function renderChannelsWorkspace() {
+        renderChannelList();
+        renderChannelEditor();
       }
 
       function renderBindings(result) {
         state.bindings = result.bindings || [];
         state.bindingOptions = result.options || [];
         document.getElementById('bindingCount').textContent = String(state.bindings.length);
-        renderChannelBindings(
-          'feishu',
-          'feishuBindings',
-          'feishuBindingMeta',
-          emptyBindingText('feishu')
-        );
-        renderChannelBindings(
-          'weixin',
-          'weixinBindings',
-          'weixinBindingMeta',
-          emptyBindingText('weixin')
-        );
+        renderChannelsWorkspace();
         rerenderDesktopSessions();
       }
 
@@ -3054,18 +3318,10 @@ function renderHtml(): string {
         document.getElementById('codexReasoningEffort').value = config.codexReasoningEffort || 'medium';
         document.getElementById('uiAllowLan').checked = config.uiAllowLan === true;
         document.getElementById('uiAccessToken').value = config.uiAccessToken || '';
-        document.getElementById('channelFeishu').checked = (config.enabledChannels || []).includes('feishu');
-        document.getElementById('channelWeixin').checked = (config.enabledChannels || []).includes('weixin');
         document.getElementById('autoApprove').checked = config.autoApprove === true;
-        document.getElementById('feishuAppId').value = config.feishuAppId || '';
-        document.getElementById('feishuAppSecret').value = config.feishuAppSecret || '';
-        document.getElementById('feishuDomain').value = config.feishuDomain || 'https://open.feishu.cn';
-        document.getElementById('feishuAllowedUsers').value = config.feishuAllowedUsers || '';
-        document.getElementById('feishuStreamingEnabled').checked = config.feishuStreamingEnabled !== false;
-        document.getElementById('feishuCommandMarkdownEnabled').checked = config.feishuCommandMarkdownEnabled !== false;
-        document.getElementById('weixinMediaEnabled').checked = config.weixinMediaEnabled === true;
-        document.getElementById('weixinCommandMarkdownEnabled').checked = config.weixinCommandMarkdownEnabled === true;
         renderUiAccess();
+        ensureActiveChannelId();
+        renderChannelsWorkspace();
         rerenderDesktopSessions();
       }
 
@@ -3088,16 +3344,15 @@ function renderHtml(): string {
         state.bridgeStatus = status.bridge || null;
         state.weixinAccounts = status.weixin && Array.isArray(status.weixin.linkedAccounts) ? status.weixin.linkedAccounts : [];
         fillForm(config);
-        const runningChannelText = runningChannels().length ? ' · ' + runningChannels().join(', ') : '';
+        const runningChannelText = adapterStatuses().length
+          ? ' · ' + adapterStatuses().filter((item) => item.running).map((item) => item.channelAlias || item.channelType).join(', ')
+          : '';
         document.getElementById('bridgeStatus').textContent = status.bridge.running ? 'Running' + runningChannelText : 'Stopped';
         document.getElementById('integrationStatus').textContent = status.codexIntegrationInstalled ? '已安装' : '未安装';
         document.getElementById('runtimeStatus').textContent = config.runtime || 'codex';
         document.getElementById('homeStatus').textContent = status.home;
         document.getElementById('overviewHomeStatus').textContent = status.home;
         document.getElementById('packageRoot').textContent = status.packageRoot;
-        document.getElementById('feishuRuntimeMeta').textContent = channelRuntimeText('feishu');
-        document.getElementById('weixinRuntimeMeta').textContent = channelRuntimeText('weixin');
-        renderWeixinAccounts();
         renderBindings({
           bindings: state.bindings,
           options: state.bindingOptions,
@@ -3137,16 +3392,187 @@ function renderHtml(): string {
         return saved;
       }
 
+      function createChannelDraft(provider) {
+        state.channelDraft = {
+          id: '__draft__:' + provider,
+          alias: providerLabel(provider),
+          provider,
+          enabled: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          config: provider === 'feishu'
+            ? {
+                appId: '',
+                appSecret: '',
+                site: 'feishu',
+                allowedUsers: [],
+                streamingEnabled: true,
+                feedbackMarkdownEnabled: true,
+              }
+            : {
+                accountId: '',
+                baseUrl: '',
+                cdnBaseUrl: '',
+                mediaEnabled: false,
+                feedbackMarkdownEnabled: false,
+              },
+        };
+        state.activeChannelId = state.channelDraft.id;
+        renderChannelsWorkspace();
+      }
+
+      function currentChannelEditorPayload(channel) {
+        const payload = {
+          provider: channel.provider,
+          alias: document.getElementById('channelAliasInput').value,
+          enabled: document.getElementById('channelEnabledInput').checked,
+        };
+
+        if (!String(channel.id || '').startsWith('__draft__:')) {
+          payload.id = channel.id;
+        }
+
+        if (channel.provider === 'feishu') {
+          payload.appId = document.getElementById('channelAppId').value;
+          payload.appSecret = document.getElementById('channelAppSecret').value;
+          payload.site = document.getElementById('channelSite').value;
+          payload.allowedUsers = document.getElementById('channelAllowedUsers').value;
+          payload.streamingEnabled = document.getElementById('channelStreamingEnabled').checked;
+          payload.feedbackMarkdownEnabled = document.getElementById('channelFeedbackMarkdownEnabled').checked;
+          return payload;
+        }
+
+        payload.accountId = document.getElementById('channelAccountId').value;
+        payload.baseUrl = document.getElementById('channelBaseUrl').value;
+        payload.cdnBaseUrl = document.getElementById('channelCdnBaseUrl').value;
+        payload.mediaEnabled = document.getElementById('channelMediaEnabled').checked;
+        payload.feedbackMarkdownEnabled = document.getElementById('channelFeedbackMarkdownEnabled').checked;
+        return payload;
+      }
+
+      async function saveChannel(channel) {
+        const result = await api('/api/channels/save', {
+          method: 'POST',
+          body: JSON.stringify(currentChannelEditorPayload(channel)),
+        });
+        state.channelDraft = null;
+        fillForm(result.config);
+        renderBindings(result);
+        setActiveChannel(result.channel.id, false);
+        return result;
+      }
+
+      async function deleteCurrentChannel(channel) {
+        if (String(channel.id || '').startsWith('__draft__:')) {
+          state.channelDraft = null;
+          state.activeChannelId = '';
+          renderChannelsWorkspace();
+          showMessage('channelMessage', 'success', '未保存的新通道已取消。');
+          return;
+        }
+
+        const result = await api('/api/channels/delete', {
+          method: 'POST',
+          body: JSON.stringify({ channelId: channel.id }),
+        });
+        state.channelDraft = null;
+        fillForm(result.config);
+        renderBindings(result);
+        showMessage('channelMessage', 'success', '通道已删除。');
+      }
+
+      async function testCurrentChannel(channel) {
+        if (String(channel.id || '').startsWith('__draft__:')) {
+          const saved = await saveChannel(channel);
+          channel = getChannelById(saved.channel.id);
+        } else {
+          await saveChannel(channel);
+          channel = getChannelById(channel.id);
+        }
+        const result = await api('/api/channels/test', {
+          method: 'POST',
+          body: JSON.stringify({ channelId: channel.id }),
+        });
+        showMessage('channelMessage', result.ok ? 'success' : 'error', result.message);
+      }
+
+      async function loginWeixinForChannel(channel) {
+        if (String(channel.id || '').startsWith('__draft__:')) {
+          const saved = await saveChannel(channel);
+          channel = getChannelById(saved.channel.id);
+        } else {
+          await saveChannel(channel);
+          channel = getChannelById(channel.id);
+        }
+        const result = await api('/api/channels/weixin-login', {
+          method: 'POST',
+          body: JSON.stringify({ channelId: channel.id }),
+        });
+        fillForm(result.config || state.config);
+        await loadStatus();
+        showMessage('channelMessage', result.ok ? 'success' : 'error', result.message);
+      }
+
+      async function handleChannelEditorAction(event) {
+        const source = event.target instanceof Element ? event.target : null;
+        const target = source ? source.closest('button[data-action]') : null;
+        if (!target) return;
+
+        const channelId = target.dataset.channelId || state.activeChannelId;
+        const channel = getChannelById(channelId);
+        if (!channel) return;
+
+        try {
+          if (target.dataset.action === 'channel-save') {
+            await saveChannel(channel);
+            showMessage('channelMessage', 'success', '通道已保存。');
+            return;
+          }
+          if (target.dataset.action === 'channel-test') {
+            await testCurrentChannel(channel);
+            return;
+          }
+          if (target.dataset.action === 'channel-delete') {
+            await deleteCurrentChannel(channel);
+            return;
+          }
+          if (target.dataset.action === 'channel-weixin-login') {
+            await loginWeixinForChannel(channel);
+            return;
+          }
+          if (target.dataset.action === 'select-binding-tab') {
+            state.activeBindingByChannelId[channel.id] = target.dataset.bindingId || '';
+            renderChannelsWorkspace();
+            return;
+          }
+          if (target.dataset.action === 'unbind-binding') {
+            const result = await api('/api/bindings/delete', {
+              method: 'POST',
+              body: JSON.stringify({ bindingId: target.dataset.bindingId }),
+            });
+            renderBindings(result);
+            showMessage('channelMessage', 'success', '聊天绑定已解绑。');
+            return;
+          }
+          if (target.dataset.action === 'switch-binding-target') {
+            const result = await api('/api/bindings/update', {
+              method: 'POST',
+              body: JSON.stringify({
+                bindingId: target.dataset.bindingId,
+                targetKey: target.dataset.targetKey,
+              }),
+            });
+            renderBindings(result);
+            showMessage('channelMessage', 'success', '聊天绑定已更新。');
+          }
+        } catch (error) {
+          showMessage('channelMessage', 'error', error.message);
+        }
+      }
+
       document.querySelectorAll('.nav-link').forEach((element) => {
         element.addEventListener('click', () => {
           setActivePage(element.dataset.page || 'overview', true);
-        });
-      });
-
-      document.querySelectorAll('.channel-tab').forEach((element) => {
-        element.addEventListener('click', () => {
-          setActivePage('channels', false);
-          setActiveChannel(element.dataset.channel || 'feishu', true);
         });
       });
 
@@ -3191,76 +3617,6 @@ function renderHtml(): string {
           await loadBindings();
         } catch (error) {
           showMessage('configMessage', 'error', error.message);
-        }
-      });
-
-      document.getElementById('saveFeishuChannelBtn').addEventListener('click', async () => {
-        try {
-          await saveConfig({ messageId: 'feishuMessage', scope: 'feishu' });
-          await loadStatus();
-          await loadBindings();
-        } catch (error) {
-          showMessage('feishuMessage', 'error', error.message);
-        }
-      });
-
-      document.getElementById('testFeishuBtn').addEventListener('click', async () => {
-        try {
-          await saveConfig();
-          await loadStatus();
-          await loadBindings();
-          const result = await api('/api/test/feishu', { method: 'POST' });
-          showMessage('feishuMessage', result.ok ? 'success' : 'error', result.message);
-        } catch (error) {
-          showMessage('feishuMessage', 'error', error.message);
-        }
-      });
-
-      document.getElementById('refreshFeishuStateBtn').addEventListener('click', async () => {
-        try {
-          await loadStatus();
-          await loadBindings();
-          await loadDesktopSessions();
-          showMessage('feishuMessage', 'success', '飞书通道状态已刷新。');
-        } catch (error) {
-          showMessage('feishuMessage', 'error', error.message);
-        }
-      });
-
-      document.getElementById('saveWeixinChannelBtn').addEventListener('click', async () => {
-        try {
-          await saveConfig({ messageId: 'weixinMessage', scope: 'weixin' });
-          await loadStatus();
-          await loadBindings();
-        } catch (error) {
-          showMessage('weixinMessage', 'error', error.message);
-        }
-      });
-
-      document.getElementById('refreshWeixinStateBtn').addEventListener('click', async () => {
-        try {
-          await loadStatus();
-          await loadBindings();
-          await loadDesktopSessions();
-          showMessage('weixinMessage', 'success', '微信通道状态已刷新。');
-        } catch (error) {
-          showMessage('weixinMessage', 'error', error.message);
-        }
-      });
-
-      document.getElementById('weixinLoginBtn').addEventListener('click', async () => {
-        try {
-          await saveConfig();
-          showMessage('weixinMessage', 'success', '微信扫码流程已启动，浏览器会打开二维码页面。');
-          const result = await api('/api/test/weixin', { method: 'POST' });
-          await loadStatus();
-          await loadBindings();
-          const followup = isChannelRunning('weixin')
-            ? '微信账号已保存。当前 Bridge 已加载微信通道，几秒后会自动接入新账号。'
-            : '微信账号已保存。Bridge 会在几秒内自动同步微信通道；如果页面还没更新，可手动点“刷新状态”。';
-          showMessage('weixinMessage', result.ok ? 'success' : 'error', followup);
-        } catch (error) {
-          showMessage('weixinMessage', 'error', error.message);
         }
       });
 
@@ -3352,6 +3708,35 @@ function renderHtml(): string {
         }
       });
 
+      document.getElementById('createChannelBtn').addEventListener('click', () => {
+        const provider = document.getElementById('newChannelProvider').value === 'weixin' ? 'weixin' : 'feishu';
+        createChannelDraft(provider);
+        setActivePage('channels', false);
+        setActiveChannel(state.activeChannelId, true);
+      });
+
+      document.getElementById('refreshChannelsBtn').addEventListener('click', async () => {
+        try {
+          await loadStatus();
+          await loadBindings();
+          showMessage('channelMessage', 'success', '通道状态已刷新。');
+        } catch (error) {
+          showMessage('channelMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('channelList').addEventListener('click', (event) => {
+        const source = event.target instanceof Element ? event.target : null;
+        const target = source ? source.closest('button[data-channel-id]') : null;
+        if (!target) return;
+        setActivePage('channels', false);
+        setActiveChannel(target.dataset.channelId || '', true);
+      });
+
+      document.getElementById('channelEditor').addEventListener('click', (event) => {
+        handleChannelEditorAction(event);
+      });
+
       async function handleSessionListAction(event) {
         const source = event.target instanceof Element ? event.target : null;
         const target = source ? source.closest('button[data-action]') : null;
@@ -3378,59 +3763,20 @@ function renderHtml(): string {
         if (!target) return;
 
         if (target.dataset.action === 'unbind-binding') {
-          const channelType = target.dataset.channel || 'feishu';
-          await handleBindingAction(event, channelType, 'desktopMessage');
+          try {
+            const result = await api('/api/bindings/delete', {
+              method: 'POST',
+              body: JSON.stringify({ bindingId: target.dataset.bindingId }),
+            });
+            renderBindings(result);
+            showMessage('desktopMessage', 'success', '聊天绑定已解绑。');
+          } catch (error) {
+            showMessage('desktopMessage', 'error', error.message);
+          }
           return;
         }
 
         await handleSessionListAction(event);
-      });
-
-      async function handleBindingAction(event, channelType, messageId) {
-        const source = event.target instanceof Element ? event.target : null;
-        const target = source ? source.closest('button[data-action]') : null;
-        if (!target) return;
-
-        try {
-          if (target.dataset.action === 'select-binding-tab') {
-            state.activeBindingByChannel[channelType] = target.dataset.bindingId || '';
-            rerenderBindingPanels();
-            return;
-          }
-          if (target.dataset.action === 'unbind-binding') {
-            const result = await api('/api/bindings/delete', {
-              method: 'POST',
-              body: JSON.stringify({
-                bindingId: target.dataset.bindingId,
-              }),
-            });
-            renderBindings(result);
-            showMessage(messageId, 'success', channelType === 'feishu' ? '飞书绑定已解绑。' : '微信绑定已解绑。');
-            return;
-          }
-          if (target.dataset.action !== 'switch-binding-target') {
-            return;
-          }
-          const result = await api('/api/bindings/update', {
-            method: 'POST',
-            body: JSON.stringify({
-              bindingId: target.dataset.bindingId,
-              targetKey: target.dataset.targetKey,
-            }),
-          });
-          renderBindings(result);
-          showMessage(messageId, 'success', channelType === 'feishu' ? '飞书绑定已更新。' : '微信绑定已更新。');
-        } catch (error) {
-          showMessage(messageId, 'error', error.message);
-        }
-      }
-
-      document.getElementById('feishuBindings').addEventListener('click', (event) => {
-        handleBindingAction(event, 'feishu', 'feishuMessage');
-      });
-
-      document.getElementById('weixinBindings').addEventListener('click', (event) => {
-        handleBindingAction(event, 'weixin', 'weixinMessage');
       });
 
       syncPageFromHash();
@@ -3582,18 +3928,104 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
-    if (request.method === 'POST' && url.pathname === '/api/test/feishu') {
-      const result = await validateFeishuCredentials(loadConfig());
-      json(response, 200, result);
+    if (request.method === 'POST' && url.pathname === '/api/channels/save') {
+      const payload = await readJsonBody<Record<string, unknown>>(request);
+      const current = loadConfig();
+      const merged = mergeChannelInstance(payload, current);
+      saveConfig(merged.config);
+      const store = createUiStore();
+      syncBindingChannelMeta(store, merged.channel);
+      json(response, 200, {
+        ok: true,
+        channel: channelToPayload(merged.channel),
+        config: configToPayload(loadConfig()),
+        ...(await buildBindingsPayload(store, loadConfig())),
+      });
       return;
     }
 
-    if (request.method === 'POST' && url.pathname === '/api/test/weixin') {
-      const result = await runWeixinLogin();
+    if (request.method === 'POST' && url.pathname === '/api/channels/delete') {
+      const payload = await readJsonBody<Record<string, unknown>>(request);
+      const channelId = asString(payload.channelId);
+      if (!channelId) {
+        json(response, 400, { error: 'channelId 不能为空。' });
+        return;
+      }
+
+      const store = createUiStore();
+      const bindings = store.listChannelBindings(channelId);
+      if (bindings.length > 0) {
+        json(response, 400, { error: '该通道仍有聊天绑定，请先解绑后再删除。' });
+        return;
+      }
+
+      const next = deleteChannelInstance(loadConfig(), channelId);
+      saveConfig(next);
+      json(response, 200, {
+        ok: true,
+        config: configToPayload(loadConfig()),
+        ...(await buildBindingsPayload(store, loadConfig())),
+      });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/channels/test') {
+      const payload = await readJsonBody<Record<string, unknown>>(request);
+      const channelId = asString(payload.channelId);
+      if (!channelId) {
+        json(response, 400, { error: 'channelId 不能为空。' });
+        return;
+      }
+      const channel = findChannelInstance(channelId, loadConfig());
+      if (!channel) {
+        json(response, 404, { error: '指定的通道不存在。' });
+        return;
+      }
+
+      if (channel.provider === 'feishu') {
+        json(response, 200, await validateFeishuCredentials(channel));
+        return;
+      }
+
+      json(response, 200, {
+        ok: true,
+        message: '微信通道请使用“开始微信扫码”并选择登录账号进行验证。',
+      });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/channels/weixin-login') {
+      const payload = await readJsonBody<Record<string, unknown>>(request);
+      const channelId = asString(payload.channelId);
+      const current = loadConfig();
+      const channel = channelId ? findChannelInstance(channelId, current) : undefined;
+      const loginConfig = channel?.provider === 'weixin'
+        ? channel.config as WeixinChannelConfig
+        : {};
+      const result = await runWeixinLogin(loginConfig);
+
+      if (channelId) {
+        if (channel && channel.provider === 'weixin') {
+          const merged = mergeChannelInstance({
+            id: channel.id,
+            provider: channel.provider,
+            alias: channel.alias,
+            enabled: channel.enabled,
+            accountId: result.accountId,
+            baseUrl: (channel.config as WeixinChannelConfig).baseUrl,
+            cdnBaseUrl: (channel.config as WeixinChannelConfig).cdnBaseUrl,
+            mediaEnabled: (channel.config as WeixinChannelConfig).mediaEnabled === true,
+            feedbackMarkdownEnabled: (channel.config as WeixinChannelConfig).feedbackMarkdownEnabled === true,
+          }, current);
+          saveConfig(merged.config);
+        }
+      }
+
       json(response, 200, {
         ok: true,
         message: `微信扫码成功，账号 ${result.accountId} 已保存。`,
         htmlPath: result.htmlPath,
+        config: configToPayload(loadConfig()),
       });
       return;
     }

@@ -156,11 +156,11 @@ export async function deliver(
     try { store.cleanupExpiredDedup(); } catch { /* best effort */ }
   }
 
-  const limit = limits[adapter.channelType] || 4096;
+  const limit = limits[adapter.provider] || limits[adapter.channelType] || 4096;
   let chunks = chunkText(message.text, limit);
 
   // QQ: limit to max 3 segments to avoid flooding
-  if (adapter.channelType === 'qq' && chunks.length > 3) {
+  if (adapter.provider === 'qq' && chunks.length > 3) {
     const first2 = chunks.slice(0, 2);
     let merged = chunks.slice(2).join('\n');
     if (merged.length > limit) {

@@ -219,6 +219,53 @@ describe('bridge-manager resolveCommandAlias', () => {
     assert.equal(fallback, 'mirror:session-1:2026-03-27T10:00:00.000Z');
   });
 
+  it('changes adapter config fingerprint when alias or config changes', () => {
+    const base = _testOnly.buildAdapterConfigFingerprint({
+      id: 'feishu-main',
+      provider: 'feishu',
+      alias: '主飞书',
+      enabled: true,
+      config: {
+        appId: 'app-id',
+        appSecret: 'secret',
+        site: 'feishu',
+        allowedUsers: ['u1'],
+        streamingEnabled: true,
+        feedbackMarkdownEnabled: true,
+      },
+    });
+    const changedAlias = _testOnly.buildAdapterConfigFingerprint({
+      id: 'feishu-main',
+      provider: 'feishu',
+      alias: '备份飞书',
+      enabled: true,
+      config: {
+        appId: 'app-id',
+        appSecret: 'secret',
+        site: 'feishu',
+        allowedUsers: ['u1'],
+        streamingEnabled: true,
+        feedbackMarkdownEnabled: true,
+      },
+    });
+    const changedConfig = _testOnly.buildAdapterConfigFingerprint({
+      id: 'feishu-main',
+      provider: 'feishu',
+      alias: '主飞书',
+      enabled: true,
+      config: {
+        appId: 'app-id',
+        appSecret: 'secret',
+        site: 'lark',
+        allowedUsers: ['u1'],
+        streamingEnabled: true,
+        feedbackMarkdownEnabled: true,
+      },
+    });
+    assert.notEqual(base, changedAlias);
+    assert.notEqual(base, changedConfig);
+  });
+
   it('surfaces binding conflict errors to the user', () => {
     const message = _testOnly.toUserVisibleBindingError(
       new Error('该会话已绑定到飞书聊天 oc_xxx。一个会话只能绑定一个聊天。'),
@@ -234,7 +281,9 @@ describe('bridge-manager resolveCommandAlias', () => {
 
   it('formats chat labels with display names when available', () => {
     const label = _testOnly.formatBindingChatLabel({
-      channelType: 'feishu',
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      channelAlias: '飞书',
       chatId: 'oc_xxx',
       chatDisplayName: '张乐',
     } as never);

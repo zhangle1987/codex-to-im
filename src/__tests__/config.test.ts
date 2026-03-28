@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { maskSecret, configToSettings, type Config } from '../config.js';
+import {
+  CONFIG_PATH,
+  CONFIG_V2_PATH,
+  loadConfig,
+  maskSecret,
+  saveConfig,
+  configToSettings,
+  type Config,
+} from '../config.js';
 
 // ── maskSecret ──
 
@@ -29,6 +37,7 @@ describe('maskSecret', () => {
 describe('configToSettings', () => {
   const base: Config = {
     runtime: 'claude',
+    channels: [],
     enabledChannels: [],
     defaultMode: 'code',
   };
@@ -76,17 +85,28 @@ describe('configToSettings', () => {
   it('maps feishu config', () => {
     const m = configToSettings({
       ...base,
-      enabledChannels: ['feishu'],
-      feishuAppId: 'app-id',
-      feishuAppSecret: 'app-secret',
-      feishuDomain: 'example.com',
-      feishuAllowedUsers: ['fu1'],
-      feishuStreamingEnabled: false,
-      feishuCommandMarkdownEnabled: true,
+      channels: [
+        {
+          id: 'feishu-default',
+          alias: '飞书',
+          provider: 'feishu',
+          enabled: true,
+          createdAt: '2026-03-28T00:00:00.000Z',
+          updatedAt: '2026-03-28T00:00:00.000Z',
+          config: {
+            appId: 'app-id',
+            appSecret: 'app-secret',
+            site: 'lark',
+            allowedUsers: ['fu1'],
+            streamingEnabled: false,
+            feedbackMarkdownEnabled: true,
+          },
+        },
+      ],
     });
     assert.equal(m.get('bridge_feishu_app_id'), 'app-id');
     assert.equal(m.get('bridge_feishu_app_secret'), 'app-secret');
-    assert.equal(m.get('bridge_feishu_domain'), 'example.com');
+    assert.equal(m.get('bridge_feishu_site'), 'lark');
     assert.equal(m.get('bridge_feishu_allowed_users'), 'fu1');
     assert.equal(m.get('bridge_feishu_streaming_enabled'), 'false');
     assert.equal(m.get('bridge_feishu_command_markdown_enabled'), 'true');
@@ -132,11 +152,22 @@ describe('configToSettings', () => {
   it('maps weixin settings', () => {
     const m = configToSettings({
       ...base,
-      enabledChannels: ['weixin'],
-      weixinBaseUrl: 'https://example.weixin.test',
-      weixinCdnBaseUrl: 'https://cdn.weixin.test',
-      weixinMediaEnabled: true,
-      weixinCommandMarkdownEnabled: false,
+      channels: [
+        {
+          id: 'weixin-default',
+          alias: '微信',
+          provider: 'weixin',
+          enabled: true,
+          createdAt: '2026-03-28T00:00:00.000Z',
+          updatedAt: '2026-03-28T00:00:00.000Z',
+          config: {
+            baseUrl: 'https://example.weixin.test',
+            cdnBaseUrl: 'https://cdn.weixin.test',
+            mediaEnabled: true,
+            feedbackMarkdownEnabled: false,
+          },
+        },
+      ],
     });
     assert.equal(m.get('bridge_weixin_enabled'), 'true');
     assert.equal(m.get('bridge_weixin_base_url'), 'https://example.weixin.test');
@@ -213,22 +244,35 @@ describe('configToSettings', () => {
 describe('loadConfig/saveConfig round-trip', () => {
   let tmpDir: string;
   let origHome: string;
+  let configBackup: string | null;
+  let configV2Backup: string | null;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-config-test-'));
     origHome = process.env.HOME || '';
-    // We can't easily override CTI_HOME since it's a const,
-    // so we test the parsing logic indirectly through configToSettings
+    configBackup = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null;
+    configV2Backup = fs.existsSync(CONFIG_V2_PATH) ? fs.readFileSync(CONFIG_V2_PATH, 'utf-8') : null;
+    fs.rmSync(CONFIG_PATH, { force: true });
+    fs.rmSync(CONFIG_V2_PATH, { force: true });
   });
 
   afterEach(() => {
     process.env.HOME = origHome;
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(CONFIG_PATH, { force: true });
+    fs.rmSync(CONFIG_V2_PATH, { force: true });
+    if (configBackup !== null) {
+      fs.writeFileSync(CONFIG_PATH, configBackup);
+    }
+    if (configV2Backup !== null) {
+      fs.writeFileSync(CONFIG_V2_PATH, configV2Backup);
+    }
   });
 
   it('configToSettings returns correct defaults', () => {
     const m = configToSettings({
       runtime: 'claude',
+      channels: [],
       enabledChannels: [],
       defaultMode: 'code',
     });
@@ -237,5 +281,127 @@ describe('loadConfig/saveConfig round-trip', () => {
     assert.equal(m.get('bridge_feishu_enabled'), 'false');
     assert.equal(m.get('bridge_qq_enabled'), 'false');
     assert.equal(m.get('bridge_weixin_enabled'), 'false');
+  });
+
+  it('migrates legacy env config into config.v2.json default channel instances', () => {
+    fs.writeFileSync(
+      CONFIG_PATH,
+      [
+        'CTI_RUNTIME=codex',
+        'CTI_ENABLED_CHANNELS=feishu,weixin',
+        'CTI_FEISHU_APP_ID=app-id',
+        'CTI_FEISHU_APP_SECRET=app-secret',
+        'CTI_FEISHU_DOMAIN=lark',
+        'CTI_FEISHU_ALLOWED_USERS=u1,u2',
+        'CTI_WEIXIN_BASE_URL=https://wx.example.test',
+        'CTI_WEIXIN_CDN_BASE_URL=https://cdn.example.test',
+        'CTI_WEIXIN_MEDIA_ENABLED=true',
+      ].join('\n'),
+    );
+
+    const loaded = loadConfig();
+    assert.equal(loaded.schemaVersion, 2);
+    assert.ok(fs.existsSync(CONFIG_V2_PATH));
+    assert.deepEqual(
+      loaded.channels?.map((channel) => ({
+        id: channel.id,
+        alias: channel.alias,
+        provider: channel.provider,
+        enabled: channel.enabled,
+        config: channel.provider === 'feishu' ? (channel.config as any).site : undefined,
+      })),
+      [
+        {
+          id: 'feishu-default',
+          alias: '飞书',
+          provider: 'feishu',
+          enabled: true,
+          config: 'lark',
+        },
+        {
+          id: 'weixin-default',
+          alias: '微信',
+          provider: 'weixin',
+          enabled: true,
+          config: undefined,
+        },
+      ],
+    );
+  });
+
+  it('preserves custom v2 channel instances when saving runtime settings', () => {
+    fs.mkdirSync(path.dirname(CONFIG_V2_PATH), { recursive: true });
+    fs.writeFileSync(
+      CONFIG_V2_PATH,
+      JSON.stringify({
+        schemaVersion: 2,
+        runtime: {
+          provider: 'codex',
+          defaultMode: 'code',
+          historyMessageLimit: 8,
+        },
+        channels: [
+          {
+            id: 'feishu-rd',
+            alias: '研发飞书',
+            provider: 'feishu',
+            enabled: true,
+            createdAt: '2026-03-28T00:00:00.000Z',
+            updatedAt: '2026-03-28T00:00:00.000Z',
+            config: {
+              appId: 'rd-app',
+              appSecret: 'rd-secret',
+              feedbackMarkdownEnabled: true,
+            },
+          },
+          {
+            id: 'feishu-cs',
+            alias: '客服飞书',
+            provider: 'feishu',
+            enabled: true,
+            createdAt: '2026-03-28T00:00:00.000Z',
+            updatedAt: '2026-03-28T00:00:00.000Z',
+            config: {
+              appId: 'cs-app',
+              appSecret: 'cs-secret',
+              feedbackMarkdownEnabled: false,
+            },
+          },
+        ],
+      }, null, 2),
+    );
+
+    const loaded = loadConfig();
+    saveConfig({
+      ...loaded,
+      defaultMode: 'plan',
+      historyMessageLimit: 12,
+    });
+
+    const reloaded = loadConfig();
+    assert.deepEqual(
+      reloaded.channels?.map((channel) => ({
+        id: channel.id,
+        alias: channel.alias,
+        provider: channel.provider,
+        appId: (channel.config as { appId?: string }).appId,
+      })),
+      [
+        {
+          id: 'feishu-rd',
+          alias: '研发飞书',
+          provider: 'feishu',
+          appId: 'rd-app',
+        },
+        {
+          id: 'feishu-cs',
+          alias: '客服飞书',
+          provider: 'feishu',
+          appId: 'cs-app',
+        },
+      ],
+    );
+    assert.equal(reloaded.defaultMode, 'plan');
+    assert.equal(reloaded.historyMessageLimit, 12);
   });
 });

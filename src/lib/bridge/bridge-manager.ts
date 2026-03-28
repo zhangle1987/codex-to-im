@@ -19,7 +19,7 @@ import type {
   ToolCallInfo,
 } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
-import type { BaseChannelAdapter } from './channel-adapter.js';
+import type { AdapterRuntimeInstance, BaseChannelAdapter } from './channel-adapter.js';
 import type { BridgeMessage, BridgeSession, LLMProvider, PermissionLinkRecord, StreamChatParams } from './host.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -57,7 +57,7 @@ import {
   sanitizeInput,
   validateMode,
 } from './security/validators.js';
-import { DEFAULT_WORKSPACE_ROOT } from '../../config.js';
+import { DEFAULT_WORKSPACE_ROOT, type ChannelInstance, type ChannelProvider } from '../../config.js';
 import {
   cleanupHiddenSessions,
   getInternalScratchDir,
@@ -118,6 +118,31 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
   const minDeltaChars = parseInt(store.getSetting(`${prefix}min_delta_chars`) || '', 10) || defaults.minDeltaChars;
   const maxChars = parseInt(store.getSetting(`${prefix}max_chars`) || '', 10) || defaults.maxChars;
   return { intervalMs, minDeltaChars, maxChars };
+}
+
+function listConfiguredChannelInstances(): ChannelInstance[] {
+  const { store } = getBridgeContext();
+  const raw = store.getSetting('bridge_channel_instances_json');
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed as ChannelInstance[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function getConfiguredChannelInstance(channelType: string): ChannelInstance | null {
+  return listConfiguredChannelInstances().find((channel) => channel.id === channelType) || null;
+}
+
+function inferChannelProvider(channelType: string): ChannelProvider | undefined {
+  const instance = getConfiguredChannelInstance(channelType);
+  return instance?.provider;
+}
+
+function getChannelProviderKey(channelType: string): string {
+  return inferChannelProvider(channelType) || channelType;
 }
 
 function parseListIndex(raw: string): number | null {
@@ -370,12 +395,12 @@ function buildDesktopThreadsCommandResponse(
 }
 
 function isFeedbackMarkdownEnabled(channelType: string): boolean {
-  const { store } = getBridgeContext();
-  if (channelType === 'feishu') {
-    return store.getSetting('bridge_feishu_command_markdown_enabled') !== 'false';
+  const instance = getConfiguredChannelInstance(channelType);
+  if (instance?.provider === 'feishu') {
+    return (instance.config as ChannelInstance['config'] & { feedbackMarkdownEnabled?: boolean }).feedbackMarkdownEnabled !== false;
   }
-  if (channelType === 'weixin') {
-    return store.getSetting('bridge_weixin_command_markdown_enabled') === 'true';
+  if (instance?.provider === 'weixin') {
+    return (instance.config as ChannelInstance['config'] & { feedbackMarkdownEnabled?: boolean }).feedbackMarkdownEnabled === true;
   }
   return false;
 }
@@ -402,12 +427,15 @@ function toUserVisibleBindingError(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function formatBindingChatLabel(binding: Pick<ChannelBinding, 'channelType' | 'chatId' | 'chatDisplayName'>): string {
-  const channelLabel = binding.channelType === 'weixin'
-    ? '微信'
-    : binding.channelType === 'feishu'
+function formatBindingChatLabel(binding: Pick<ChannelBinding, 'channelType' | 'channelProvider' | 'channelAlias' | 'chatId' | 'chatDisplayName'>): string {
+  const instance = getConfiguredChannelInstance(binding.channelType);
+  const channelLabel = binding.channelAlias
+    || instance?.alias
+    || (binding.channelProvider === 'feishu'
       ? '飞书'
-      : binding.channelType;
+      : binding.channelProvider === 'weixin'
+        ? '微信'
+        : binding.channelType);
   const chatLabel = binding.chatDisplayName?.trim() || binding.chatId;
   return `${channelLabel} 聊天 ${chatLabel}`;
 }
@@ -880,7 +908,7 @@ async function deliverTextResponse(
     }
     return { ok: true };
   }
-  if (parseMode === 'Markdown' && adapter.channelType === 'feishu') {
+  if (parseMode === 'Markdown' && adapter.provider === 'feishu') {
     // Feishu: pass markdown through for adapter to format as post/card
     return deliver(adapter, {
       address,
@@ -920,7 +948,7 @@ async function deliverResponse(
       lastResult = captionResult;
     }
 
-    if (!supportsOutboundArtifacts(adapter.channelType)) {
+    if (!supportsOutboundArtifacts(adapter.provider)) {
       lastResult = await deliverTextResponse(
         adapter,
         address,
@@ -959,6 +987,7 @@ async function deliverResponse(
 interface AdapterMeta {
   lastMessageAt: string | null;
   lastError: string | null;
+  configFingerprint: string;
 }
 
 interface DesktopMirrorSubscription {
@@ -1659,7 +1688,7 @@ function getMirrorStreamingAdapter(subscription: DesktopMirrorSubscription): Bas
   const state = getState();
   const adapter = state.adapters.get(subscription.channelType);
   if (!adapter || !adapter.isRunning()) return null;
-  if (subscription.channelType !== 'feishu') return null;
+  if (getChannelProviderKey(subscription.channelType) !== 'feishu') return null;
   if (typeof adapter.onStreamText !== 'function' || typeof adapter.onStreamEnd !== 'function') {
     return null;
   }
@@ -1772,7 +1801,7 @@ async function deliverMirrorTurn(
     responseParseMode,
   );
 
-  if (subscription.channelType === 'feishu' && typeof adapter.onStreamEnd === 'function') {
+  if (getChannelProviderKey(subscription.channelType) === 'feishu' && typeof adapter.onStreamEnd === 'function') {
     try {
       const finalized = await adapter.onStreamEnd(
         subscription.chatId,
@@ -2366,6 +2395,60 @@ function notifyAdapterSetChanged(): void {
   lifecycle.onBridgeAdaptersChanged?.(getActiveChannelTypes());
 }
 
+function stableFingerprintValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stableFingerprintValue);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, entryValue]) => [key, stableFingerprintValue(entryValue)]),
+    );
+  }
+  return value;
+}
+
+function buildAdapterConfigFingerprint(instance: AdapterRuntimeInstance): string {
+  const normalizedConfig = stableFingerprintValue(instance.config);
+  return JSON.stringify({
+    provider: instance.provider,
+    alias: instance.alias,
+    enabled: instance.enabled,
+    config: normalizedConfig,
+  });
+}
+
+function listEnabledAdapterInstances(): AdapterRuntimeInstance[] {
+  const { store } = getBridgeContext();
+  const configured = listConfiguredChannelInstances()
+    .filter((channel) => channel.enabled)
+    .map<AdapterRuntimeInstance>((channel) => ({
+      id: channel.id,
+      provider: channel.provider,
+      alias: channel.alias,
+      enabled: channel.enabled,
+      config: channel.config,
+    }));
+  const configuredProviders = new Set(configured.map((channel) => channel.provider));
+
+  for (const provider of getRegisteredTypes()) {
+    if (provider === 'feishu' || provider === 'weixin') continue;
+    if (configuredProviders.has(provider)) continue;
+    const enabled = store.getSetting(`bridge_${provider}_enabled`) === 'true';
+    if (!enabled) continue;
+    configured.push({
+      id: provider,
+      provider,
+      alias: provider,
+      enabled: true,
+      config: {},
+    });
+  }
+
+  return configured;
+}
+
 async function stopAdapterInstance(channelType: string): Promise<void> {
   const state = getState();
   const adapter = state.adapters.get(channelType);
@@ -2387,50 +2470,55 @@ async function stopAdapterInstance(channelType: string): Promise<void> {
 
 async function syncConfiguredAdapters(options: { startLoops: boolean }): Promise<void> {
   const state = getState();
-  const { store } = getBridgeContext();
   let changed = false;
+  const desiredInstances = listEnabledAdapterInstances();
+  const desiredKeys = new Set(desiredInstances.map((channel) => channel.id));
+  const desiredFingerprints = new Map(
+    desiredInstances.map((instance) => [instance.id, buildAdapterConfigFingerprint(instance)]),
+  );
 
-  for (const channelType of getRegisteredTypes()) {
-    const enabled = store.getSetting(`bridge_${channelType}_enabled`) === 'true';
-    const existing = state.adapters.get(channelType);
+  for (const existingKey of Array.from(state.adapters.keys())) {
+    if (desiredKeys.has(existingKey)) continue;
+    await stopAdapterInstance(existingKey);
+    changed = true;
+  }
 
-    if (!enabled) {
-      if (existing) {
-        await stopAdapterInstance(channelType);
-        changed = true;
-      }
-      continue;
-    }
-
+  for (const instance of desiredInstances) {
+    const existing = state.adapters.get(instance.id);
+    const desiredFingerprint = desiredFingerprints.get(instance.id) || '';
+    const existingMeta = state.adapterMeta.get(instance.id);
+    if (existing && existingMeta?.configFingerprint === desiredFingerprint) continue;
     if (existing) {
-      continue;
+      await stopAdapterInstance(instance.id);
+      changed = true;
     }
 
-    const adapter = createAdapter(channelType);
+    const adapter = createAdapter(instance);
     if (!adapter) continue;
 
     const configError = adapter.validateConfig();
     if (configError) {
-      console.warn(`[bridge-manager] ${channelType} adapter not valid:`, configError);
+      console.warn(`[bridge-manager] ${instance.id} adapter not valid:`, configError);
       continue;
     }
 
     try {
-      state.adapters.set(channelType, adapter);
-      state.adapterMeta.set(channelType, {
+      state.adapters.set(instance.id, adapter);
+      state.adapterMeta.set(instance.id, {
         lastMessageAt: null,
         lastError: null,
+        configFingerprint: desiredFingerprint,
       });
       await adapter.start();
-      console.log(`[bridge-manager] Started adapter: ${channelType}`);
+      console.log(`[bridge-manager] Started adapter: ${instance.id}`);
       if (options.startLoops && state.running && adapter.isRunning()) {
         runAdapterLoop(adapter);
       }
       changed = true;
     } catch (err) {
-      state.adapters.delete(channelType);
-      state.adapterMeta.delete(channelType);
-      console.error(`[bridge-manager] Failed to start adapter ${channelType}:`, err);
+      state.adapters.delete(instance.id);
+      state.adapterMeta.delete(instance.id);
+      console.error(`[bridge-manager] Failed to start adapter ${instance.id}:`, err);
     }
   }
 
@@ -2608,6 +2696,7 @@ export function registerAdapter(adapter: BaseChannelAdapter): void {
   state.adapterMeta.set(adapter.channelType, {
     lastMessageAt: null,
     lastError: null,
+    configFingerprint: '',
   });
 }
 
@@ -2638,7 +2727,7 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
         if (
           msg.callbackData ||
           msg.text.trim().startsWith('/') ||
-          isNumericPermissionShortcut(adapter.channelType, msg.text.trim(), msg.address.chatId)
+        isNumericPermissionShortcut(adapter.provider, msg.text.trim(), msg.address.chatId)
         ) {
           await handleMessage(adapter, msg);
         } else {
@@ -2656,7 +2745,7 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error(`[bridge-manager] Error in ${adapter.channelType} loop:`, err);
         // Track last error per adapter
-        const meta = state.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null };
+        const meta = state.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null, configFingerprint: '' };
         meta.lastError = errMsg;
         state.adapterMeta.set(adapter.channelType, meta);
         // Brief delay to prevent tight error loops
@@ -2667,7 +2756,7 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
     if (!abort.signal.aborted) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[bridge-manager] ${adapter.channelType} loop crashed:`, err);
-      const meta = state.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null };
+      const meta = state.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null, configFingerprint: '' };
       meta.lastError = errMsg;
       state.adapterMeta.set(adapter.channelType, meta);
     }
@@ -2685,7 +2774,7 @@ async function handleMessage(
 
   // Update lastMessageAt for this adapter
   const adapterState = getState();
-  const meta = adapterState.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null };
+  const meta = adapterState.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null, configFingerprint: '' };
   meta.lastMessageAt = new Date().toISOString();
   adapterState.adapterMeta.set(adapter.channelType, meta);
 
@@ -2755,9 +2844,9 @@ async function handleMessage(
   // digits (１２３), digits with zero-width joiners, or other Unicode
   // variants. NFKC normalization folds them all to ASCII 1/2/3.
   if (
-    adapter.channelType === 'feishu'
-    || adapter.channelType === 'qq'
-    || adapter.channelType === 'weixin'
+          adapter.provider === 'feishu'
+          || adapter.provider === 'qq'
+          || adapter.provider === 'weixin'
   ) {
     // eslint-disable-next-line no-control-regex
     const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
@@ -2892,7 +2981,7 @@ async function handleMessage(
     };
   }
 
-  const streamCfg = previewState ? getStreamConfig(adapter.channelType) : null;
+    const streamCfg = previewState ? getStreamConfig(adapter.provider) : null;
 
   // Build the preview onPartialText callback (or undefined if preview not supported)
   const previewOnPartialText = (previewState && streamCfg) ? (fullText: string) => {
@@ -3831,6 +3920,7 @@ export const _testOnly = {
   buildInteractiveStreamKey,
   buildMirrorStreamKey,
   appendMirrorTimeoutNotice,
+  buildAdapterConfigFingerprint,
   consumeMirrorRecords,
   consumeBufferedMirrorTurns,
   flushTimedOutMirrorTurn,
