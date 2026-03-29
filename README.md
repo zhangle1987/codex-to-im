@@ -58,6 +58,29 @@ npm install -g codex-to-im
 codex-to-im
 ```
 
+如果只想启动后台 bridge，不打开 UI：
+
+```bash
+codex-to-im start
+```
+
+### 开机自启动（Windows）
+
+当前支持把 **bridge** 注册为 Windows 开机启动任务，UI 仍然按需通过 `codex-to-im` 打开。
+
+```powershell
+codex-to-im autostart status
+codex-to-im autostart install
+codex-to-im autostart uninstall
+```
+
+说明：
+
+- `codex-to-im autostart install` 会要求输入当前 Windows 登录密码，用于创建开机任务。
+- 自动启动只拉起 bridge，不会自动打开 Web UI。
+- 手动再次执行 `codex-to-im` 只会补启动 UI，不会重复启动 bridge。
+- 当前实现基于 Windows 自带任务计划程序，不依赖 WinSW、NSSM 等第三方组件。
+
 默认会打开本地工作台：
 
 ```text

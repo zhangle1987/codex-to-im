@@ -31,9 +31,11 @@ import {
   updateBindingTarget,
 } from './session-bindings.js';
 import {
+  getBridgeAutostartStatus,
   getBridgeLogs,
   getBridgeStatus,
   installCodexIntegration,
+  installBridgeAutostart,
   isCodexIntegrationInstalled,
   getPackageRoot,
   getUiServerStatus,
@@ -41,6 +43,7 @@ import {
   restartBridge,
   startBridge,
   stopBridge,
+  uninstallBridgeAutostart,
   writeUiServerStatus,
 } from './service-manager.js';
 import { JsonFileStore } from './store.js';
@@ -2046,6 +2049,10 @@ function renderHtml(): string {
               <div class="status-value" id="bridgeStatus">-</div>
             </div>
             <div class="status-card">
+              <strong>Bridge 开机自启动</strong>
+              <div class="status-value" id="autostartStatus">-</div>
+            </div>
+            <div class="status-card">
               <strong>Codex Skill</strong>
               <div class="status-value" id="integrationStatus">-</div>
             </div>
@@ -2086,6 +2093,33 @@ function renderHtml(): string {
               <div class="panel-block">
                 <p class="panel-subtitle">当前能力</p>
                 <div class="notice">已接通：保存配置、后台启停、飞书凭据测试、微信扫码、Codex 连接测试、桌面会话发现、IM 绑定查看与网页侧切换。</div>
+              </div>
+
+              <div class="panel-block">
+                <p class="panel-subtitle">Bridge 开机自启动</p>
+                <div class="notice" id="autostartNotice">正在检查当前 Windows 任务计划程序状态…</div>
+                <div class="actions" style="margin-top: 12px;">
+                  <button id="installAutostartBtn">启用开机自启动</button>
+                  <button id="refreshAutostartBtn">刷新开机自启动状态</button>
+                  <button id="removeAutostartBtn" class="danger">关闭开机自启动</button>
+                </div>
+                <div class="panel-block" id="autostartInstallForm" style="display: none; margin-top: 12px;">
+                  <p class="panel-subtitle">输入当前 Windows 登录密码</p>
+                  <div class="field-grid two-up" style="margin-top: 8px;">
+                    <div class="field">
+                      <label>当前账号</label>
+                      <input id="autostartRunAsUser" type="text" readonly value="" />
+                    </div>
+                    <div class="field">
+                      <label>登录密码</label>
+                      <input id="autostartPassword" type="password" placeholder="请输入当前 Windows 登录密码" />
+                    </div>
+                  </div>
+                  <div class="actions" style="margin-top: 12px;">
+                    <button id="confirmAutostartBtn" class="primary">确认启用</button>
+                    <button id="cancelAutostartBtn">取消</button>
+                  </div>
+                </div>
               </div>
 
               <div class="panel-block">
@@ -2397,6 +2431,7 @@ function renderHtml(): string {
         availableModels: [],
         uiAccess: null,
         bridgeStatus: null,
+        autostartStatus: null,
         desktopSessions: [],
         bindings: [],
         bindingOptions: [],
@@ -3342,12 +3377,14 @@ function renderHtml(): string {
         const config = await api('/api/config');
         state.uiAccess = status.uiAccess || null;
         state.bridgeStatus = status.bridge || null;
+        state.autostartStatus = status.autostart || null;
         state.weixinAccounts = status.weixin && Array.isArray(status.weixin.linkedAccounts) ? status.weixin.linkedAccounts : [];
         fillForm(config);
         const runningChannelText = adapterStatuses().length
           ? ' · ' + adapterStatuses().filter((item) => item.running).map((item) => item.channelAlias || item.channelType).join(', ')
           : '';
         document.getElementById('bridgeStatus').textContent = status.bridge.running ? 'Running' + runningChannelText : 'Stopped';
+        renderAutostartStatus(status.autostart || null);
         document.getElementById('integrationStatus').textContent = status.codexIntegrationInstalled ? '已安装' : '未安装';
         document.getElementById('runtimeStatus').textContent = config.runtime || 'codex';
         document.getElementById('homeStatus').textContent = status.home;
@@ -3357,6 +3394,66 @@ function renderHtml(): string {
           bindings: state.bindings,
           options: state.bindingOptions,
         });
+      }
+
+      function renderAutostartStatus(status) {
+        const valueEl = document.getElementById('autostartStatus');
+        const noticeEl = document.getElementById('autostartNotice');
+        const installBtn = document.getElementById('installAutostartBtn');
+        const removeBtn = document.getElementById('removeAutostartBtn');
+        const runAsInput = document.getElementById('autostartRunAsUser');
+        const localOnly = !state.uiAccess || state.uiAccess.requestIsLocal === true;
+
+        runAsInput.value = status && status.runAsUser ? status.runAsUser : '';
+
+        if (!status || status.supported !== true) {
+          valueEl.textContent = '不支持';
+          noticeEl.textContent = status && status.error
+            ? status.error
+            : '当前系统暂不支持 Bridge 开机自启动。';
+          installBtn.disabled = true;
+          removeBtn.disabled = true;
+          return;
+        }
+
+        if (status.error) {
+          valueEl.textContent = '配置异常';
+          noticeEl.textContent = status.error;
+          installBtn.disabled = !localOnly;
+          removeBtn.disabled = !localOnly || status.installed !== true;
+          return;
+        }
+
+        if (!status.installed) {
+          valueEl.textContent = '未启用';
+          noticeEl.textContent = localOnly
+            ? '会创建一个 Windows 开机任务，只自动启动 Bridge，不自动打开 UI。启用时需要输入当前 Windows 登录密码。'
+            : '出于安全原因，只能在本机浏览器里启用或关闭开机自启动。';
+          installBtn.disabled = !localOnly;
+          removeBtn.disabled = true;
+          return;
+        }
+
+        valueEl.textContent = status.enabled ? '已启用' : '已禁用';
+        noticeEl.textContent = [
+          '方式：Windows 任务计划程序（开机触发）',
+          status.runAsUser ? '运行账号：' + status.runAsUser : '',
+          status.state ? '任务状态：' + status.state : '',
+          status.error ? '异常：' + status.error : '',
+        ].filter(Boolean).join(' · ');
+        installBtn.disabled = !localOnly;
+        removeBtn.disabled = !localOnly;
+      }
+
+      function showAutostartInstallForm(visible) {
+        const form = document.getElementById('autostartInstallForm');
+        const passwordInput = document.getElementById('autostartPassword');
+        form.style.display = visible ? 'block' : 'none';
+        if (!visible) {
+          passwordInput.value = '';
+          return;
+        }
+        passwordInput.focus();
       }
 
       async function loadLogs() {
@@ -3681,6 +3778,67 @@ function renderHtml(): string {
         }
       });
 
+      document.getElementById('installAutostartBtn').addEventListener('click', async () => {
+        try {
+          if (state.uiAccess && state.uiAccess.requestIsLocal !== true) {
+            throw new Error('请在本机浏览器中操作开机自启动。');
+          }
+          showAutostartInstallForm(true);
+        } catch (error) {
+          showMessage('opsMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('confirmAutostartBtn').addEventListener('click', async () => {
+        try {
+          const password = document.getElementById('autostartPassword').value;
+          if (!password) {
+            throw new Error('当前 Windows 登录密码不能为空。');
+          }
+          const result = await api('/api/autostart/install', {
+            method: 'POST',
+            body: JSON.stringify({ password }),
+          });
+          showAutostartInstallForm(false);
+          showMessage('opsMessage', 'success', 'Bridge 开机自启动已启用。任务：' + result.status.taskName);
+          await loadStatus();
+        } catch (error) {
+          showMessage('opsMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('cancelAutostartBtn').addEventListener('click', () => {
+        showAutostartInstallForm(false);
+        showMessage('opsMessage', 'success', '已取消启用开机自启动。');
+      });
+
+      document.getElementById('removeAutostartBtn').addEventListener('click', async () => {
+        try {
+          if (state.uiAccess && state.uiAccess.requestIsLocal !== true) {
+            throw new Error('请在本机浏览器中操作开机自启动。');
+          }
+          showAutostartInstallForm(false);
+          const confirmed = window.confirm('确定要关闭 Bridge 开机自启动吗？');
+          if (!confirmed) {
+            return;
+          }
+          const result = await api('/api/autostart/uninstall', { method: 'POST' });
+          showMessage('opsMessage', 'success', result.status.installed ? '开机自启动仍存在，请检查任务计划程序。' : 'Bridge 开机自启动已关闭。');
+          await loadStatus();
+        } catch (error) {
+          showMessage('opsMessage', 'error', error.message);
+        }
+      });
+
+      document.getElementById('refreshAutostartBtn').addEventListener('click', async () => {
+        try {
+          await loadStatus();
+          showMessage('opsMessage', 'success', '开机自启动状态已刷新。');
+        } catch (error) {
+          showMessage('opsMessage', 'error', error.message);
+        }
+      });
+
       document.getElementById('installIntegrationBtn').addEventListener('click', async () => {
         try {
           const result = await api('/api/install-codex-integration', { method: 'POST' });
@@ -3886,6 +4044,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/status') {
       json(response, 200, {
         bridge: getBridgeStatus(),
+        autostart: await getBridgeAutostartStatus(),
         ui: getUiServerStatus(),
         uiAccess: buildUiAccessInfo(port, config, request),
         home: CTI_HOME,
@@ -3896,6 +4055,32 @@ const server = http.createServer(async (request, response) => {
         },
         startedAt: serverStartTime,
       });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/autostart/install') {
+      if (!isLocalRequest(request)) {
+        json(response, 403, { error: '出于安全原因，请在本机浏览器中启用开机自启动。' });
+        return;
+      }
+      const payload = await readJsonBody<Record<string, unknown>>(request);
+      const password = asString(payload.password);
+      if (!password) {
+        json(response, 400, { error: '当前 Windows 登录密码不能为空。' });
+        return;
+      }
+      const status = await installBridgeAutostart(password);
+      json(response, 200, { ok: true, status });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/autostart/uninstall') {
+      if (!isLocalRequest(request)) {
+        json(response, 403, { error: '出于安全原因，请在本机浏览器中关闭开机自启动。' });
+        return;
+      }
+      const status = await uninstallBridgeAutostart();
+      json(response, 200, { ok: true, status });
       return;
     }
 

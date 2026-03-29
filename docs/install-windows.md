@@ -163,11 +163,27 @@ codex-to-im url
 codex-to-im status
 ```
 
+如果只想启动后台 bridge，不打开 Web 工作台：
+
+```powershell
+codex-to-im start
+```
+
 停止后台 UI 和 bridge：
 
 ```powershell
 codex-to-im stop
 ```
+
+可选：启用 Bridge 开机自启动（只自动启动 bridge，不自动打开 UI）：
+
+```powershell
+codex-to-im autostart status
+codex-to-im autostart install
+codex-to-im autostart uninstall
+```
+
+启用时会要求输入当前 Windows 登录密码，用于创建“开机自动启动 Bridge”的任务计划程序任务。
 
 ## 6. 在目标机上的首次配置
 
@@ -299,7 +315,8 @@ codex-to-im stop
 当前版本有几个需要提前说明的点：
 
 - 默认不是 Windows Service，而是本地 detached 进程
-- 机器重启后，不会自动恢复，需要再次运行 `codex-to-im`
+- 如果**未启用**开机自启动，机器重启后需要再次运行 `codex-to-im`
+- 如果启用了 `codex-to-im autostart install`，开机只会自动拉起 bridge，UI 仍需按需运行 `codex-to-im`
 - 当前主路径是“本地工作台 + IM 配置 + Bridge 启动”
 
 ## 9.1 Windows 上的更新方式

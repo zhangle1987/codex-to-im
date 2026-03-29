@@ -85,6 +85,29 @@ codex-to-im
 
 This launches the local workbench and opens it in your browser.
 
+If you only want the background bridge without opening the UI:
+
+```bash
+codex-to-im start
+```
+
+### Boot Autostart on Windows
+
+The bridge can be registered as a Windows boot task. The Web UI remains on-demand and is still opened manually with `codex-to-im`.
+
+```powershell
+codex-to-im autostart status
+codex-to-im autostart install
+codex-to-im autostart uninstall
+```
+
+Notes:
+
+- `codex-to-im autostart install` prompts for the current Windows account password so the startup task can be created.
+- Autostart only launches the bridge; it does not open the Web UI.
+- Running `codex-to-im` manually later only starts the UI if needed and will not duplicate the bridge.
+- The current implementation uses Windows Task Scheduler and does not require WinSW, NSSM, or PM2.
+
 By default the workbench runs at:
 
 ```text

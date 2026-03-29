@@ -22,6 +22,18 @@ export interface UiServerStatus {
   startedAt?: string;
 }
 
+export interface BridgeAutostartStatus {
+  supported: boolean;
+  installed: boolean;
+  enabled: boolean;
+  mode: 'startup';
+  taskName: string;
+  runAsUser?: string;
+  state?: string;
+  launcherPath?: string;
+  error?: string;
+}
+
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(moduleDir, '..');
 const runtimeDir = path.join(CTI_HOME, 'runtime');
@@ -30,6 +42,8 @@ const bridgePidFile = path.join(runtimeDir, 'bridge.pid');
 const bridgeStatusFile = path.join(runtimeDir, 'status.json');
 const uiStatusFile = path.join(runtimeDir, 'ui-server.json');
 const uiPort = 4781;
+const bridgeAutostartTaskName = 'CodexToIMBridge';
+const bridgeAutostartLauncherFile = path.join(runtimeDir, 'bridge-autostart.ps1');
 const WINDOWS_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
 
 function ensureDirs(): void {
@@ -67,6 +81,97 @@ function isProcessAlive(pid?: number): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getCurrentWindowsUser(): string {
+  const user = process.env.USERNAME || os.userInfo().username;
+  const domain = process.env.USERDOMAIN;
+  return domain ? `${domain}\\${user}` : user;
+}
+
+function escapePowerShellSingleQuoted(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+function runCommand(
+  command: string,
+  args: string[],
+  options: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+  } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...WINDOWS_HIDE,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      resolve({ code: code ?? 0, stdout, stderr });
+    });
+  });
+}
+
+async function runPowerShell(script: string): Promise<string> {
+  const result = await runCommand(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+  );
+  if (result.code !== 0) {
+    throw new Error((result.stderr || result.stdout || 'PowerShell command failed.').trim());
+  }
+  return result.stdout.trim();
+}
+
+function ensureBridgeAutostartLauncher(): string {
+  ensureDirs();
+  const content = [
+    "$ErrorActionPreference = 'Stop'",
+    `$env:CTI_HOME = '${escapePowerShellSingleQuoted(CTI_HOME)}'`,
+    "$cmd = Get-Command 'codex-to-im.cmd' -ErrorAction SilentlyContinue",
+    "if (-not $cmd) { $cmd = Get-Command 'codex-to-im' -ErrorAction SilentlyContinue }",
+    "$node = (Get-Command 'node' -ErrorAction Stop).Source",
+    'if ($cmd) {',
+    '  & $cmd.Source start',
+    '  exit $LASTEXITCODE',
+    '}',
+    "$npm = Get-Command 'npm.cmd' -ErrorAction SilentlyContinue",
+    "if (-not $npm) { $npm = Get-Command 'npm' -ErrorAction SilentlyContinue }",
+    'if ($npm) {',
+    '  try {',
+    '    $globalRoot = (& $npm.Source root -g 2>$null).Trim()',
+    '    if ($globalRoot) {',
+    "      $cliPath = Join-Path (Join-Path $globalRoot 'codex-to-im') 'dist\\cli.mjs'",
+    '      if (Test-Path $cliPath) {',
+    '        & $node $cliPath start',
+    '        exit $LASTEXITCODE',
+    '      }',
+    '    }',
+    '  } catch { }',
+    '}',
+    `& $node '${escapePowerShellSingleQuoted(path.join(packageRoot, 'dist', 'cli.mjs'))}' start`,
+    'exit $LASTEXITCODE',
+    '',
+  ].join('\r\n');
+
+  fs.writeFileSync(bridgeAutostartLauncherFile, content, 'utf-8');
+  return bridgeAutostartLauncherFile;
+}
+
+function parsePowerShellJson<T>(raw: string): T {
+  return JSON.parse(raw) as T;
 }
 
 export function getPackageRoot(): string {
@@ -218,6 +323,104 @@ export async function stopBridge(): Promise<BridgeStatus> {
 export async function restartBridge(): Promise<BridgeStatus> {
   await stopBridge();
   return await startBridge();
+}
+
+export async function getBridgeAutostartStatus(): Promise<BridgeAutostartStatus> {
+  const base: BridgeAutostartStatus = {
+    supported: process.platform === 'win32',
+    installed: false,
+    enabled: false,
+    mode: 'startup',
+    taskName: bridgeAutostartTaskName,
+    runAsUser: process.platform === 'win32' ? getCurrentWindowsUser() : undefined,
+    launcherPath: bridgeAutostartLauncherFile,
+  };
+  if (process.platform !== 'win32') {
+    return {
+      ...base,
+      error: '当前只支持 Windows 自动启动。',
+    };
+  }
+
+  const script = [
+    `$task = Get-ScheduledTask -TaskName '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}' -ErrorAction SilentlyContinue`,
+    'if (-not $task) {',
+    '  [pscustomobject]@{',
+    '    supported = $true',
+    '    installed = $false',
+    '    enabled = $false',
+    `    mode = 'startup'`,
+    `    taskName = '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}'`,
+    `    launcherPath = '${escapePowerShellSingleQuoted(bridgeAutostartLauncherFile)}'`,
+    '  } | ConvertTo-Json -Compress',
+    '  exit 0',
+    '}',
+    `$info = Get-ScheduledTaskInfo -TaskName '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}' -ErrorAction SilentlyContinue`,
+    '[pscustomobject]@{',
+    '  supported = $true',
+    '  installed = $true',
+    '  enabled = [bool]$task.Settings.Enabled',
+    `  mode = 'startup'`,
+    `  taskName = '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}'`,
+    `  launcherPath = '${escapePowerShellSingleQuoted(bridgeAutostartLauncherFile)}'`,
+    '  runAsUser = $task.Principal.UserId',
+    '  state = [string]$task.State',
+    '} | ConvertTo-Json -Compress',
+  ].join('; ');
+
+  try {
+    const raw = await runPowerShell(script);
+    return parsePowerShellJson<BridgeAutostartStatus>(raw);
+  } catch (error) {
+    return {
+      ...base,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function installBridgeAutostart(password: string): Promise<BridgeAutostartStatus> {
+  if (process.platform !== 'win32') {
+    throw new Error('当前只支持 Windows 自动启动。');
+  }
+  if (!password) {
+    throw new Error('当前 Windows 登录密码不能为空。');
+  }
+
+  const launcherPath = ensureBridgeAutostartLauncher();
+  const user = getCurrentWindowsUser();
+  const script = [
+    `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "${escapePowerShellSingleQuoted(launcherPath)}"'`,
+    '$trigger = New-ScheduledTaskTrigger -AtStartup',
+    '$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew',
+    `Register-ScheduledTask -TaskName '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}' -Action $action -Trigger $trigger -Settings $settings -User '${escapePowerShellSingleQuoted(user)}' -Password '${escapePowerShellSingleQuoted(password)}' -RunLevel Highest -Force | Out-Null`,
+  ].join('; ');
+
+  await runPowerShell(script);
+  return await getBridgeAutostartStatus();
+}
+
+export async function uninstallBridgeAutostart(): Promise<BridgeAutostartStatus> {
+  if (process.platform !== 'win32') {
+    return await getBridgeAutostartStatus();
+  }
+
+  const script = [
+    `$task = Get-ScheduledTask -TaskName '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}' -ErrorAction SilentlyContinue`,
+    'if ($task) {',
+    `  Unregister-ScheduledTask -TaskName '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}' -Confirm:$false`,
+    '}',
+  ].join('; ');
+
+  await runPowerShell(script);
+  try {
+    if (fs.existsSync(bridgeAutostartLauncherFile)) {
+      fs.unlinkSync(bridgeAutostartLauncherFile);
+    }
+  } catch {
+    // ignore launcher cleanup failure
+  }
+  return await getBridgeAutostartStatus();
 }
 
 export function getBridgeLogs(lines = 200): string {

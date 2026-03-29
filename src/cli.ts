@@ -1,21 +1,76 @@
 #!/usr/bin/env node
 
+import { stdin as input, stdout as output } from 'node:process';
+
 import {
   ensureUiServerRunning,
+  getBridgeAutostartStatus,
   getBridgeStatus,
   getCurrentUiServerUrl,
   getUiServerStatus,
   getUiServerUrl,
+  installBridgeAutostart,
+  uninstallBridgeAutostart,
   openBrowser,
   startBridge,
   stopBridge,
   stopUiServer,
 } from './service-manager.js';
 
+async function promptHidden(question: string): Promise<string> {
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error('当前终端不支持隐藏输入，请在可交互终端中执行。');
+  }
+
+  output.write(question);
+  input.resume();
+  input.setEncoding('utf8');
+  input.setRawMode?.(true);
+
+  return await new Promise<string>((resolve, reject) => {
+    let value = '';
+
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        if (ch === '\u0003') {
+          cleanup();
+          reject(new Error('已取消。'));
+          return;
+        }
+        if (ch === '\r' || ch === '\n') {
+          cleanup();
+          output.write('\n');
+          resolve(value);
+          return;
+        }
+        if (ch === '\u0008' || ch === '\u007f') {
+          value = value.slice(0, -1);
+          continue;
+        }
+        value += ch;
+      }
+    };
+
+    const cleanup = () => {
+      input.off('data', onData);
+      input.setRawMode?.(false);
+      input.pause();
+    };
+
+    input.on('data', onData);
+  });
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2] || 'open';
 
   switch (command) {
+    case 'start': {
+      const status = await startBridge();
+      process.stdout.write(`Bridge started. PID: ${status.pid || '-'}\n`);
+      return;
+    }
+
     case 'open': {
       const status = await ensureUiServerRunning();
       const url = getUiServerUrl(status.port);
@@ -63,17 +118,59 @@ async function main(): Promise<void> {
       const ui = getUiServerStatus();
       const bridge = getBridgeStatus();
       const url = getCurrentUiServerUrl();
+      const autostart = await getBridgeAutostartStatus();
       process.stdout.write(
         [
           `UI: ${ui.running ? 'running' : 'stopped'}${url ? ` (${url})` : ''}`,
           `Bridge: ${bridge.running ? 'running' : 'stopped'}`,
+          `Bridge Autostart: ${autostart.installed ? (autostart.enabled ? 'enabled' : 'disabled') : 'not installed'}`,
         ].join('\n') + '\n'
       );
       return;
     }
 
+    case 'autostart': {
+      const subcommand = process.argv[3] || 'status';
+      switch (subcommand) {
+        case 'status': {
+          const status = await getBridgeAutostartStatus();
+          process.stdout.write(
+            [
+              `Supported: ${status.supported ? 'yes' : 'no'}`,
+              `Installed: ${status.installed ? 'yes' : 'no'}`,
+              `Enabled: ${status.enabled ? 'yes' : 'no'}`,
+              `Mode: ${status.mode}`,
+              `Task: ${status.taskName}`,
+              status.runAsUser ? `Run As: ${status.runAsUser}` : undefined,
+              status.state ? `State: ${status.state}` : undefined,
+              status.error ? `Error: ${status.error}` : undefined,
+            ].filter(Boolean).join('\n') + '\n',
+          );
+          return;
+        }
+        case 'install': {
+          const password = await promptHidden('请输入当前 Windows 登录密码（用于创建开机启动任务）: ');
+          const status = await installBridgeAutostart(password);
+          process.stdout.write(`Bridge autostart installed. Task: ${status.taskName}\n`);
+          return;
+        }
+        case 'uninstall': {
+          const status = await uninstallBridgeAutostart();
+          process.stdout.write(
+            status.installed
+              ? `Bridge autostart task still exists: ${status.taskName}\n`
+              : 'Bridge autostart removed.\n',
+          );
+          return;
+        }
+        default:
+          process.stdout.write('Usage: codex-to-im autostart [status|install|uninstall]\n');
+          return;
+      }
+    }
+
     default:
-      process.stdout.write('Usage: codex-to-im [open|url|stop|status]\n');
+      process.stdout.write('Usage: codex-to-im [start|open|url|stop|status|autostart]\n');
   }
 }
 
