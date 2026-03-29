@@ -12,6 +12,15 @@ export interface BridgeStatus {
   runId?: string;
   startedAt?: string;
   channels?: string[];
+  adapters?: Array<{
+    channelType: string;
+    channelProvider?: string;
+    channelAlias?: string;
+    running: boolean;
+    connectedAt: string | null;
+    lastMessageAt: string | null;
+    error: string | null;
+  }>;
   lastExitReason?: string;
 }
 

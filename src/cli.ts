@@ -106,8 +106,8 @@ async function main(): Promise<void> {
     }
 
     case 'stop': {
-      const bridge = await stopBridge();
       const ui = await stopUiServer();
+      const bridge = await stopBridge();
       process.stdout.write(
         `Stopped services. UI running=${ui.running ? 'yes' : 'no'}, Bridge running=${bridge.running ? 'yes' : 'no'}\n`
       );

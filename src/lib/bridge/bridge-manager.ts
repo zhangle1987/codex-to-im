@@ -2678,6 +2678,8 @@ export function getStatus(): BridgeStatus {
       const meta = state.adapterMeta.get(type);
       return {
         channelType: adapter.channelType,
+        channelProvider: adapter.provider,
+        channelAlias: adapter.alias,
         running: adapter.isRunning(),
         connectedAt: state.startedAt,
         lastMessageAt: meta?.lastMessageAt ?? null,

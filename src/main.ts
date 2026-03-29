@@ -100,6 +100,7 @@ interface StatusInfo {
   runId?: string;
   startedAt?: string;
   channels?: string[];
+  adapters?: ReturnType<typeof bridgeManager.getStatus>['adapters'];
   lastExitReason?: string;
 }
 
@@ -116,6 +117,10 @@ function writeStatus(info: StatusInfo): void {
 
 function getRunningChannels(): string[] {
   return bridgeManager.getStatus().adapters.map((adapter) => adapter.channelType).sort();
+}
+
+function getAdapterStatuses(): ReturnType<typeof bridgeManager.getStatus>['adapters'] {
+  return bridgeManager.getStatus().adapters;
 }
 
 async function main(): Promise<void> {
@@ -152,6 +157,7 @@ async function main(): Promise<void> {
           runId,
           startedAt: new Date().toISOString(),
           channels,
+          adapters: getAdapterStatuses(),
         });
         console.log(`[codex-to-im] Bridge started (PID: ${process.pid}, channels: ${channels.join(', ')})`);
       },
@@ -161,11 +167,12 @@ async function main(): Promise<void> {
           pid: process.pid,
           runId,
           channels,
+          adapters: getAdapterStatuses(),
         });
         console.log(`[codex-to-im] Active channels updated: ${channels.join(', ') || 'none'}`);
       },
       onBridgeStop: () => {
-        writeStatus({ running: false, channels: [] });
+        writeStatus({ running: false, channels: [], adapters: [] });
         console.log('[codex-to-im] Bridge stopped');
       },
     },
