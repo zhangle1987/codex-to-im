@@ -1,4 +1,4 @@
-# Claude-to-IM Architecture
+# Codex-to-IM Bridge Architecture
 
 ## Module Dependency Graph
 

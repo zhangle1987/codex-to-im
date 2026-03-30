@@ -217,6 +217,83 @@ describe('JsonFileStore', () => {
     }
   });
 
+  it('does not remap a real v2 channel instance whose id matches the provider name', () => {
+    const configBackup = fs.existsSync(CONFIG_V2_PATH) ? fs.readFileSync(CONFIG_V2_PATH, 'utf-8') : null;
+    try {
+      fs.mkdirSync(path.dirname(CONFIG_V2_PATH), { recursive: true });
+      fs.writeFileSync(
+        CONFIG_V2_PATH,
+        JSON.stringify({
+          schemaVersion: 2,
+          runtime: {
+            provider: 'codex',
+            defaultMode: 'code',
+            historyMessageLimit: 8,
+          },
+          channels: [
+            {
+              id: 'feishu-default',
+              alias: '默认飞书',
+              provider: 'feishu',
+              enabled: true,
+              createdAt: '2026-03-28T00:00:00.000Z',
+              updatedAt: '2026-03-28T00:00:00.000Z',
+              config: {
+                appId: 'default-app',
+              },
+            },
+            {
+              id: 'feishu',
+              alias: '开开1号',
+              provider: 'feishu',
+              enabled: true,
+              createdAt: '2026-03-30T00:00:00.000Z',
+              updatedAt: '2026-03-30T00:00:00.000Z',
+              config: {
+                appId: 'custom-app',
+              },
+            },
+          ],
+        }, null, 2),
+      );
+
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(
+        path.join(DATA_DIR, 'bindings.json'),
+        JSON.stringify({
+          binding: {
+            id: 'binding',
+            channelType: 'feishu',
+            channelProvider: 'feishu',
+            channelAlias: '开开1号',
+            chatId: 'oc_real_instance',
+            codepilotSessionId: 'sess-real',
+            workingDirectory: '/tmp',
+            model: 'gpt-5.4',
+            mode: 'code',
+            active: true,
+            createdAt: '2026-03-30T00:00:00.000Z',
+            updatedAt: '2026-03-30T00:00:00.000Z',
+          },
+        }, null, 2),
+      );
+
+      const store = new JsonFileStore(makeSettings());
+      const binding = store.getChannelBinding('feishu', 'oc_real_instance');
+      assert.ok(binding);
+      assert.equal(binding.channelType, 'feishu');
+      assert.equal(binding.channelAlias, '开开1号');
+
+      const defaultBinding = store.getChannelBinding('feishu-default', 'oc_real_instance');
+      assert.equal(defaultBinding, null);
+    } finally {
+      fs.rmSync(CONFIG_V2_PATH, { force: true });
+      if (configBackup !== null) {
+        fs.writeFileSync(CONFIG_V2_PATH, configBackup);
+      }
+    }
+  });
+
   it('addMessage and getMessages', () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createSession('test', 'model', undefined, '/tmp');

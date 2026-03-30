@@ -1,7 +1,7 @@
 /**
  * Minimal Mock Host Example
  *
- * Demonstrates how to wire up Claude-to-IM with mock implementations
+ * Demonstrates how to wire up the Codex-to-IM bridge with mock implementations
  * of all host interfaces. This runs the full bridge pipeline without
  * any real database, LLM, or permission system.
  *
@@ -192,7 +192,7 @@ class EchoLLM implements LLMProvider {
 // ── Main ────────────────────────────────────────────────────
 
 async function main() {
-  console.log('=== Claude-to-IM Mock Host Example ===\n');
+  console.log('=== Codex-to-IM Bridge Mock Host Example ===\n');
 
   // 1. Initialize context
   initBridgeContext({

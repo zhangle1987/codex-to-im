@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Windows daemon manager for claude-to-im bridge.
+  Windows daemon manager for codex-to-im bridge.
 
 .DESCRIPTION
   Manages the bridge process on Windows.
@@ -28,7 +28,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ── Paths ──
-$CtiHome    = if ($env:CTI_HOME) { $env:CTI_HOME } else { Join-Path $env:USERPROFILE '.claude-to-im' }
+$CtiHome    = if ($env:CTI_HOME) { $env:CTI_HOME } else { Join-Path $env:USERPROFILE '.codex-to-im' }
 $SkillDir   = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $RuntimeDir = Join-Path $CtiHome 'runtime'
 $PidFile    = Join-Path $RuntimeDir 'bridge.pid'
@@ -38,7 +38,7 @@ $ErrLogFile = Join-Path (Join-Path $CtiHome 'logs') 'bridge.stderr.log'
 $DaemonMjs  = Join-Path (Join-Path $SkillDir 'dist') 'daemon.mjs'
 $ConfigFile = Join-Path $CtiHome 'config.env'
 
-$ServiceName = 'ClaudeToIMBridge'
+$ServiceName = 'CodexToIMBridge'
 
 # ── Helpers ──
 
@@ -169,7 +169,7 @@ function Install-WinSWService {
     $xmlPath = Join-Path $SkillDir "$ServiceName.xml"
     $configEnv = Get-ConfigEnvironment
 
-    # Run as current user so the service can access ~/.claude-to-im and Codex login state
+    # Run as current user so the service can access ~/.codex-to-im and Codex login state
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     Write-Host "Service will run as: $currentUser"
     $cred = Get-Credential -UserName $currentUser -Message "Enter password for '$currentUser' (required for Windows Service logon)"
@@ -179,8 +179,8 @@ function Install-WinSWService {
     $xml = @"
 <service>
   <id>$ServiceName</id>
-  <name>Claude-to-IM Bridge</name>
-  <description>Claude-to-IM bridge daemon</description>
+  <name>Codex-to-IM Bridge</name>
+  <description>codex-to-im bridge daemon</description>
   <executable>$nodePath</executable>
   <arguments>$DaemonMjs</arguments>
   <workingdirectory>$SkillDir</workingdirectory>
@@ -229,7 +229,7 @@ function Install-NSSMService {
     $nodePath = Get-NodePath
     $configEnv = Get-ConfigEnvironment
 
-    # Run as current user so the service can access ~/.claude-to-im and Codex login state
+    # Run as current user so the service can access ~/.codex-to-im and Codex login state
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     Write-Host "Service will run as: $currentUser"
     $cred = Get-Credential -UserName $currentUser -Message "Enter password for '$currentUser' (required for Windows Service logon)"
@@ -242,7 +242,7 @@ function Install-NSSMService {
     & $NSSMPath set $ServiceName AppStderr $LogFile
     & $NSSMPath set $ServiceName AppStdoutCreationDisposition 4
     & $NSSMPath set $ServiceName AppStderrCreationDisposition 4
-    & $NSSMPath set $ServiceName Description "Claude-to-IM bridge daemon"
+    & $NSSMPath set $ServiceName Description "codex-to-im bridge daemon"
     & $NSSMPath set $ServiceName AppRestartDelay 10000
     $envArgs = @(
         "USERPROFILE=$env:USERPROFILE",

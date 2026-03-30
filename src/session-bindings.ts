@@ -42,6 +42,11 @@ export interface BindingSummary {
   mirrorLastEventAt?: string;
 }
 
+interface BindingChatMeta {
+  chatUserId?: string;
+  chatDisplayName?: string;
+}
+
 function asChannelProvider(value: string | undefined): ChannelProvider | undefined {
   return value === 'feishu' || value === 'weixin' ? value : undefined;
 }
@@ -126,6 +131,7 @@ export function bindStoreToSession(
   channelType: string,
   chatId: string,
   sessionId: string,
+  chatMeta?: BindingChatMeta,
 ): ChannelBinding | null {
   const session = store.getSession(sessionId);
   if (!session) return null;
@@ -142,6 +148,8 @@ export function bindStoreToSession(
     channelProvider: meta.provider,
     channelAlias: meta.alias,
     chatId,
+    chatUserId: chatMeta?.chatUserId,
+    chatDisplayName: chatMeta?.chatDisplayName,
     codepilotSessionId: session.id,
     sdkSessionId: session.sdk_session_id || '',
     workingDirectory: session.working_directory,
@@ -155,7 +163,7 @@ export function bindStoreToSdkSession(
   channelType: string,
   chatId: string,
   sdkSessionId: string,
-  opts?: { workingDirectory?: string; model?: string; displayName?: string },
+  opts?: { workingDirectory?: string; model?: string; displayName?: string; chatUserId?: string; chatDisplayName?: string },
 ): ChannelBinding {
   assertBindingTargetAvailable(
     store,
@@ -171,6 +179,8 @@ export function bindStoreToSdkSession(
         channelProvider: meta.provider,
         channelAlias: meta.alias,
         chatId,
+        chatUserId: opts?.chatUserId,
+        chatDisplayName: opts?.chatDisplayName,
         codepilotSessionId: existing.id,
         sdkSessionId,
         workingDirectory: opts?.workingDirectory || existing.working_directory,
@@ -199,6 +209,8 @@ export function bindStoreToSdkSession(
     channelProvider: meta.provider,
     channelAlias: meta.alias,
     chatId,
+    chatUserId: opts?.chatUserId,
+    chatDisplayName: opts?.chatDisplayName,
     codepilotSessionId: session.id,
     sdkSessionId,
     workingDirectory: workingDirectory || session.working_directory,
@@ -282,12 +294,19 @@ export function updateBindingTarget(
     bindStoreToSdkSession(store, binding.channelType, binding.chatId, threadId, desktop ? {
       workingDirectory: desktop.cwd,
       displayName: desktop.title,
+      chatUserId: binding.chatUserId,
+      chatDisplayName: binding.chatDisplayName,
     } : {
       workingDirectory: binding.workingDirectory,
+      chatUserId: binding.chatUserId,
+      chatDisplayName: binding.chatDisplayName,
     });
   } else if (targetKey.startsWith('session:')) {
     const sessionId = targetKey.slice('session:'.length);
-    const updated = bindStoreToSession(store, binding.channelType, binding.chatId, sessionId);
+    const updated = bindStoreToSession(store, binding.channelType, binding.chatId, sessionId, {
+      chatUserId: binding.chatUserId,
+      chatDisplayName: binding.chatDisplayName,
+    });
     if (!updated) {
       throw new Error('Session not found.');
     }

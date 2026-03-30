@@ -6,7 +6,6 @@ import fs from 'node:fs';
 
 import {
   CTI_HOME,
-  DEFAULT_WORKSPACE_ROOT,
   configToSettings,
   feishuSiteToApiBaseUrl,
   findChannelInstance,
@@ -20,8 +19,6 @@ import {
   type FeishuSite,
   type WeixinChannelConfig,
 } from './config.js';
-import { PendingPermissions } from './permission-gateway.js';
-import { CodexProvider } from './codex-provider.js';
 import { getCodexSessionsRoot, listDesktopSessions } from './desktop-sessions.js';
 import {
   type BindingSummary,
@@ -675,58 +672,6 @@ function deleteChannelInstance(current: Config, channelId: string): Config {
   };
 }
 
-async function testCodexConnection(config: Config): Promise<{ ok: boolean; message: string; raw?: string }> {
-  const provider = new CodexProvider(new PendingPermissions());
-  const abortController = new AbortController();
-  const timeout = setTimeout(() => abortController.abort(), 30_000);
-  const workingDirectory = config.defaultWorkspaceRoot || DEFAULT_WORKSPACE_ROOT;
-  fs.mkdirSync(workingDirectory, { recursive: true });
-
-  try {
-    const stream = provider.streamChat({
-      prompt: 'Reply with the single word OK.',
-      sessionId: `ui-test-${Date.now()}`,
-      workingDirectory,
-      permissionMode: 'plan',
-      abortController,
-    });
-
-    const reader = stream.getReader();
-    let responseText = '';
-    let raw = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      raw += value;
-      const lines = value.split('\n').map((line) => line.trim()).filter(Boolean);
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const parsed = JSON.parse(line.slice(6)) as { type: string; data: string };
-        if (parsed.type === 'text') {
-          responseText += parsed.data;
-        }
-        if (parsed.type === 'error') {
-          return { ok: false, message: parsed.data, raw };
-        }
-      }
-    }
-
-    return {
-      ok: true,
-      message: responseText.trim() || 'Codex SDK 已连通，但测试没有返回文本。',
-      raw,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      message: error instanceof Error ? error.message : String(error),
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 function renderLoginHtml(): string {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -1036,7 +981,7 @@ function renderHtml(): string {
 
       .status-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 16px;
         margin-bottom: 20px;
       }
@@ -1065,6 +1010,13 @@ function renderHtml(): string {
         line-height: 1.2;
         font-weight: 700;
         word-break: break-word;
+      }
+
+      .status-meta {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
       }
 
       .panel {
@@ -2043,32 +1995,29 @@ function renderHtml(): string {
 
           <section class="status-grid">
             <div class="status-card">
-              <strong>Bridge</strong>
+              <strong>桥接服务</strong>
               <div class="status-value" id="bridgeStatus">-</div>
+              <div class="status-meta" id="bridgeStatusMeta">-</div>
             </div>
             <div class="status-card">
-              <strong>Bridge 开机自启动</strong>
+              <strong>桥接服务开机自启动</strong>
               <div class="status-value" id="autostartStatus">-</div>
             </div>
             <div class="status-card">
-              <strong>Codex Skill</strong>
+              <strong>Codex 技能</strong>
               <div class="status-value" id="integrationStatus">-</div>
             </div>
             <div class="status-card">
-              <strong>Runtime</strong>
+              <strong>运行时</strong>
               <div class="status-value" id="runtimeStatus">-</div>
             </div>
             <div class="status-card">
-              <strong>Desktop Sessions</strong>
+              <strong>桌面会话</strong>
               <div class="status-value" id="desktopSessionCount">-</div>
             </div>
             <div class="status-card">
-              <strong>IM Bindings</strong>
+              <strong>聊天绑定</strong>
               <div class="status-value" id="bindingCount">-</div>
-            </div>
-            <div class="status-card">
-              <strong>Config Home</strong>
-              <div class="status-value" id="homeStatus" style="font-size: 14px;">-</div>
             </div>
           </section>
 
@@ -2077,24 +2026,23 @@ function renderHtml(): string {
               <div class="panel-header">
                 <div>
                   <h2>运行控制</h2>
-                  <p>保存配置后，可以直接在这里启停 bridge、测试 Codex 或刷新整体状态。</p>
+                  <p>保存配置后，可以直接在这里启停桥接服务或刷新整体状态。</p>
                 </div>
               </div>
               <div class="actions">
-                <button class="primary" id="startBridgeBtn">启动 Bridge</button>
-                <button id="stopBridgeBtn">停止 Bridge</button>
-                <button id="restartBridgeBtn">重启 Bridge</button>
-                <button id="testCodexBtn">测试 Codex</button>
+                <button class="primary" id="startBridgeBtn">启动桥接服务</button>
+                <button id="stopBridgeBtn">停止桥接服务</button>
+                <button id="restartBridgeBtn">重启桥接服务</button>
                 <button id="refreshBtn">刷新状态</button>
               </div>
 
               <div class="panel-block">
                 <p class="panel-subtitle">当前能力</p>
-                <div class="notice">已接通：保存配置、后台启停、飞书凭据测试、微信扫码、Codex 连接测试、桌面会话发现、IM 绑定查看与网页侧切换。</div>
+                <div class="notice">已接通：保存配置、后台启停、飞书凭据测试、微信扫码、桌面会话发现、IM 绑定查看与网页侧切换。</div>
               </div>
 
               <div class="panel-block">
-                <p class="panel-subtitle">Bridge 开机自启动</p>
+                <p class="panel-subtitle">桥接服务开机自启动</p>
                 <div class="notice" id="autostartNotice">正在检查当前 Windows 任务计划程序状态…</div>
                 <div class="actions" style="margin-top: 12px;">
                   <button id="refreshAutostartBtn">刷新开机自启动状态</button>
@@ -2102,10 +2050,10 @@ function renderHtml(): string {
               </div>
 
               <div class="panel-block">
-                <p class="panel-subtitle">可选 Codex Skill</p>
-                <div class="notice">bridge 不再注入发送附件的提示词。需要让 Codex 知道“可以把本地图片/文件回发到 IM”时，请安装这个可选 skill。</div>
+                <p class="panel-subtitle">可选 Codex 技能</p>
+                <div class="notice">桥接服务不再注入发送附件的提示词。需要让 Codex 知道“可以把本地图片/文件回发到 IM”时，请安装这个可选技能。</div>
                 <div class="actions" style="margin-top: 12px;">
-                  <button id="installIntegrationBtn">安装可选 Codex Skill</button>
+                  <button id="installIntegrationBtn">安装可选 Codex 技能</button>
                 </div>
               </div>
 
@@ -2299,7 +2247,7 @@ function renderHtml(): string {
               </div>
             </div>
 
-            <div class="notice" style="margin-bottom: 16px;">最短使用路径：先发 <code>/t</code> 查看最近会话，再发 <code>/t 1</code> 接管；之后直接发送文本即可继续当前会话。这里保留原始命令，仅用于后台查阅和兼容旧用法。</div>
+            <div class="notice" style="margin-bottom: 16px;">最短使用路径：先发 <code>/t</code> 查看最近会话，再发 <code>/t 1</code> 接管；之后直接发送文本即可继续当前会话。</div>
 
             <div class="command-sections">
               <section class="command-section">
@@ -3359,14 +3307,15 @@ function renderHtml(): string {
         state.autostartStatus = status.autostart || null;
         state.weixinAccounts = status.weixin && Array.isArray(status.weixin.linkedAccounts) ? status.weixin.linkedAccounts : [];
         fillForm(config);
-        const runningChannelText = adapterStatuses().length
-          ? ' · ' + adapterStatuses().filter((item) => item.running).map((item) => item.channelAlias || item.channelType).join(', ')
-          : '';
-        document.getElementById('bridgeStatus').textContent = status.bridge.running ? 'Running' + runningChannelText : 'Stopped';
+        const adapters = adapterStatuses();
+        const runningAdapters = adapters.filter((item) => item.running);
+        document.getElementById('bridgeStatus').textContent = status.bridge.running ? '运行中' : '已停止';
+        document.getElementById('bridgeStatusMeta').textContent = adapters.length
+          ? ('运行实例 ' + runningAdapters.length + ' / ' + adapters.length)
+          : '当前没有通道实例在运行';
         renderAutostartStatus(status.autostart || null);
         document.getElementById('integrationStatus').textContent = status.codexIntegrationInstalled ? '已安装' : '未安装';
         document.getElementById('runtimeStatus').textContent = config.runtime || 'codex';
-        document.getElementById('homeStatus').textContent = status.home;
         document.getElementById('overviewHomeStatus').textContent = status.home;
         document.getElementById('packageRoot').textContent = status.packageRoot;
         renderBindings({
@@ -3384,7 +3333,7 @@ function renderHtml(): string {
           valueEl.textContent = '不支持';
           noticeEl.textContent = status && status.error
             ? status.error
-            : '当前系统暂不支持 Bridge 开机自启动。';
+            : '当前系统暂不支持桥接服务开机自启动。';
           refreshBtn.disabled = true;
           return;
         }
@@ -3683,7 +3632,7 @@ function renderHtml(): string {
         try {
           await saveConfig();
           const result = await api('/api/bridge/start', { method: 'POST' });
-          showMessage('opsMessage', 'success', 'Bridge 已启动。PID: ' + (result.status.pid || '-'));
+          showMessage('opsMessage', 'success', '桥接服务已启动。PID: ' + (result.status.pid || '-'));
           await loadStatus();
           await loadBindings();
           await loadLogs();
@@ -3696,7 +3645,7 @@ function renderHtml(): string {
       document.getElementById('stopBridgeBtn').addEventListener('click', async () => {
         try {
           await api('/api/bridge/stop', { method: 'POST' });
-          showMessage('opsMessage', 'success', 'Bridge 已停止。');
+          showMessage('opsMessage', 'success', '桥接服务已停止。');
           await loadStatus();
           await loadBindings();
         } catch (error) {
@@ -3708,23 +3657,13 @@ function renderHtml(): string {
         try {
           await saveConfig();
           const result = await api('/api/bridge/restart', { method: 'POST' });
-          showMessage('opsMessage', 'success', 'Bridge 已重启。PID: ' + (result.status.pid || '-'));
+          showMessage('opsMessage', 'success', '桥接服务已重启。PID: ' + (result.status.pid || '-'));
           await loadStatus();
           await loadBindings();
           await loadLogs();
         } catch (error) {
           showMessage('opsMessage', 'error', error.message);
           await loadLogs();
-        }
-      });
-
-      document.getElementById('testCodexBtn').addEventListener('click', async () => {
-        try {
-          await saveConfig();
-          const result = await api('/api/test/codex', { method: 'POST' });
-          showMessage('opsMessage', result.ok ? 'success' : 'error', result.message);
-        } catch (error) {
-          showMessage('opsMessage', 'error', error.message);
         }
       });
 
@@ -4093,12 +4032,6 @@ const server = http.createServer(async (request, response) => {
         htmlPath: result.htmlPath,
         config: configToPayload(loadConfig()),
       });
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/test/codex') {
-      const result = await testCodexConnection(loadConfig());
-      json(response, 200, result);
       return;
     }
 

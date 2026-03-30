@@ -86,7 +86,16 @@ export function bindToSession(
   address: ChannelAddress,
   codepilotSessionId: string,
 ): ChannelBinding | null {
-  return bindStoreToSession(getBridgeContext().store, address.channelType, address.chatId, codepilotSessionId);
+  return bindStoreToSession(
+    getBridgeContext().store,
+    address.channelType,
+    address.chatId,
+    codepilotSessionId,
+    {
+      chatUserId: address.userId,
+      chatDisplayName: address.displayName,
+    },
+  );
 }
 
 /**
@@ -97,7 +106,11 @@ export function bindToSdkSession(
   sdkSessionId: string,
   opts?: { workingDirectory?: string; model?: string; displayName?: string },
 ): ChannelBinding {
-  return bindStoreToSdkSession(getBridgeContext().store, address.channelType, address.chatId, sdkSessionId, opts);
+  return bindStoreToSdkSession(getBridgeContext().store, address.channelType, address.chatId, sdkSessionId, {
+    ...opts,
+    chatUserId: address.userId,
+    chatDisplayName: address.displayName,
+  });
 }
 
 /**

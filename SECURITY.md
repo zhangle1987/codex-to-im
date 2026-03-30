@@ -4,8 +4,6 @@
 
 Credentials are stored in `~/.codex-to-im/config.env` and the local runtime data under `~/.codex-to-im/`.
 
-The app still falls back to `~/.claude-to-im/` on machines that already have legacy data, but new installs should treat `~/.codex-to-im/` as the primary home.
-
 This repository never stores secrets in source control.
 
 ## Log Redaction
@@ -30,9 +28,7 @@ If a token is rotated or suspected to be exposed:
 3. Restart the bridge from the workbench
 4. Review recent logs under `~/.codex-to-im/logs/`
 
-## Legacy Data
+## Home Directory
 
-If you upgraded from an older `claude-to-im` install, check both of these locations during diagnosis:
-
-- `~/.codex-to-im/`
-- `~/.claude-to-im/`
+Current builds read and write only `~/.codex-to-im/`.
+If a legacy home directory from older releases still exists on a machine, treat it as historical leftover data rather than an active runtime home.

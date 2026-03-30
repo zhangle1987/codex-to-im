@@ -8,7 +8,7 @@
 
 配套技术设计见：
 
-- [D:/codex/Claude-to-IM-skill/docs/codex-to-im-shared-thread-design.md](D:/codex/Claude-to-IM-skill/docs/codex-to-im-shared-thread-design.md)
+- [codex-to-im-shared-thread-design.md](./codex-to-im-shared-thread-design.md)
 
 ## 2. 产品定位
 

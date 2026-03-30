@@ -4,10 +4,7 @@
 
 `codex-to-im` 当前采用的是 **单 npm 包 + 本地 Web 工作台 + 本地后台 bridge** 的部署方案。
 
-补充说明：当前版本不是从零开始的新工程，而是在以下两个已有项目基础上整理和改造而来：
-
-- `Claude-to-IM`
-- `Claude-to-IM-skill`
+补充说明：当前版本不是从零开始的新工程，而是在旧桥接原型基础上整理和演进而来。
 
 核心形态如下：
 
@@ -19,7 +16,6 @@
   - `dist/daemon.mjs` 负责 bridge
 - 运行方式：本地 Node.js detached 子进程，不依赖当前命令窗口常驻
 - 配置目录：`%USERPROFILE%\\.codex-to-im\\`
-- 兼容目录：如果机器上已有旧数据，会回落到 `%USERPROFILE%\\.claude-to-im\\`
 
 这意味着当前推荐的部署方式不是“clone 仓库后让用户手动跑脚本”，而是：
 
@@ -278,15 +274,15 @@ Web 工作台现在只展示自动启动状态；真正的启用和关闭请使�
 - `runtime\status.json`
 - `runtime\ui-server.json`
 
-### 7.2 旧目录兼容
+### 7.2 排查提示
 
-如果目标机上已经存在旧安装数据，程序会自动回落到：
+当前版本只读取：
 
 ```text
-%USERPROFILE%\.claude-to-im\
+%USERPROFILE%\.codex-to-im\
 ```
 
-所以安装或排查时，需要先确认当前实际使用的是哪一个 home 目录。
+如果机器上仍然存在旧版本遗留的 home 目录，那只是历史残留，不再被当前版本读取。
 
 ## 8. 安装给别的主机时的建议
 

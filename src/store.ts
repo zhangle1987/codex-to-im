@@ -2,7 +2,7 @@
  * JSON file-backed BridgeStore implementation.
  *
  * Uses in-memory Maps as cache with write-through persistence
- * to JSON files in ~/.claude-to-im/data/.
+ * to JSON files in ~/.codex-to-im/data/.
  */
 
 import fs from 'node:fs';
@@ -64,14 +64,22 @@ function defaultAliasForProvider(provider: string | undefined): string | undefin
   return undefined;
 }
 
-function normalizeLegacyBinding(binding: ChannelBinding): ChannelBinding {
+// One-time upgrade path for bindings created before v2 channel instances.
+// Runtime should read and write v2 bindings only; legacy singleton ids are
+// rewritten to instance ids the first time they are encountered on disk.
+function upgradeLegacyBinding(binding: ChannelBinding): ChannelBinding {
   const config = loadConfig();
-  const legacyProvider = binding.channelType === 'feishu' || binding.channelType === 'weixin'
+  const exactInstance = findChannelInstance(binding.channelType, config);
+  const hasInstanceMetadata = Boolean(binding.channelProvider || binding.channelAlias);
+  const legacyProvider = !exactInstance
+    && !hasInstanceMetadata
+    && (binding.channelType === 'feishu' || binding.channelType === 'weixin')
     ? binding.channelType
     : undefined;
-  const resolvedInstance = legacyProvider
-    ? (config.channels || []).find((channel) => channel.provider === legacyProvider)
-    : findChannelInstance(binding.channelType, config);
+  const resolvedInstance = exactInstance
+    || (legacyProvider
+      ? (config.channels || []).find((channel) => channel.provider === legacyProvider)
+      : undefined);
 
   if (!resolvedInstance && !legacyProvider) {
     return {
@@ -187,7 +195,7 @@ export class JsonFileStore implements BridgeStore {
     let changed = false;
 
     for (const binding of Object.values(bindings)) {
-      const normalizedBinding = normalizeLegacyBinding(binding);
+      const normalizedBinding = upgradeLegacyBinding(binding);
       if (didBindingChange(binding, normalizedBinding)) {
         changed = true;
       }

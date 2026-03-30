@@ -137,15 +137,15 @@ flowchart LR
 
 当前代码中已经存在可复用的基础能力：
 
-- [D:/codex/Claude-to-IM-skill/src/codex-provider.ts](D:/codex/Claude-to-IM-skill/src/codex-provider.ts)
+- [src/codex-provider.ts](../src/codex-provider.ts)
   - 已具备 `sdkSessionId` 复用逻辑
   - 已使用 `startThread()` / `resumeThread()`
-- [D:/codex/Claude-to-IM-skill/src/store.ts](D:/codex/Claude-to-IM-skill/src/store.ts)
+- [src/store.ts](../src/store.ts)
   - 已能持久化 session、binding、message、lock
   - binding 已保存 `sdkSessionId`
-- [D:/codex/Claude-to-IM-skill/src/lib/bridge/channel-router.ts](D:/codex/Claude-to-IM-skill/src/lib/bridge/channel-router.ts)
+- [src/lib/bridge/channel-router.ts](../src/lib/bridge/channel-router.ts)
   - 已支持 chat 到 session 的自动解析与绑定
-- [D:/codex/Claude-to-IM-skill/src/lib/bridge/bridge-manager.ts](D:/codex/Claude-to-IM-skill/src/lib/bridge/bridge-manager.ts)
+- [src/lib/bridge/bridge-manager.ts](../src/lib/bridge/bridge-manager.ts)
   - 已支持 `/new`、`/thread`、`/status`、`/sessions`、`/stop`
 
 当前缺失的不是桥接基础设施，而是“桌面真实会话接管”的这一层：
@@ -558,10 +558,10 @@ sequenceDiagram
 
 ### 本地依据
 
-- [D:/codex/Claude-to-IM-skill/node_modules/@openai/codex-sdk/README.md](D:/codex/Claude-to-IM-skill/node_modules/@openai/codex-sdk/README.md)
-- [D:/codex/Claude-to-IM-skill/src/codex-provider.ts](D:/codex/Claude-to-IM-skill/src/codex-provider.ts)
-- [D:/codex/Claude-to-IM-skill/src/store.ts](D:/codex/Claude-to-IM-skill/src/store.ts)
-- [D:/codex/Claude-to-IM-skill/src/lib/bridge/channel-router.ts](D:/codex/Claude-to-IM-skill/src/lib/bridge/channel-router.ts)
+- [node_modules/@openai/codex-sdk/README.md](../node_modules/@openai/codex-sdk/README.md)
+- [src/codex-provider.ts](../src/codex-provider.ts)
+- [src/store.ts](../src/store.ts)
+- [src/lib/bridge/channel-router.ts](../src/lib/bridge/channel-router.ts)
 - `%USERPROFILE%/.codex/sessions/**/*.jsonl` 的本地实测样本
 
 ### 官方资料

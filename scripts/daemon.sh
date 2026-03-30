@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CTI_HOME="${CTI_HOME:-$HOME/.claude-to-im}"
+CTI_HOME="${CTI_HOME:-$HOME/.codex-to-im}"
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 STATUS_FILE="$CTI_HOME/runtime/status.json"
@@ -21,11 +21,11 @@ ensure_built() {
     if [ -n "$newest_src" ]; then
       need_build=1
     fi
-    # Also check if node_modules/claude-to-im was updated (npm update)
+    # Also check if node_modules/codex-to-im was updated (npm update)
     # — its code is bundled into dist, so changes require a rebuild
-    if [ "$need_build" = "0" ] && [ -d "$SKILL_DIR/node_modules/claude-to-im/src" ]; then
+    if [ "$need_build" = "0" ] && [ -d "$SKILL_DIR/node_modules/codex-to-im/src" ]; then
       local newest_dep
-      newest_dep=$(find "$SKILL_DIR/node_modules/claude-to-im/src" -name '*.ts' -newer "$SKILL_DIR/dist/daemon.mjs" 2>/dev/null | head -1)
+      newest_dep=$(find "$SKILL_DIR/node_modules/codex-to-im/src" -name '*.ts' -newer "$SKILL_DIR/dist/daemon.mjs" 2>/dev/null | head -1)
       if [ -n "$newest_dep" ]; then
         need_build=1
       fi

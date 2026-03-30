@@ -84,4 +84,31 @@ describe('session-bindings uniqueness', () => {
       /一个会话只能绑定一个聊天/,
     );
   });
+
+  it('stores chat display metadata when binding to an existing session', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('shared', 'test-model', undefined, '/tmp/shared');
+
+    const binding = bindStoreToSession(store, 'feishu-default', 'oc_meta', session.id, {
+      chatUserId: 'ou_123',
+      chatDisplayName: '张乐',
+    });
+    assert.ok(binding);
+    assert.equal(binding.chatUserId, 'ou_123');
+    assert.equal(binding.chatDisplayName, '张乐');
+  });
+
+  it('stores chat display metadata when binding to a desktop thread', () => {
+    const store = new JsonFileStore(makeSettings());
+
+    const binding = bindStoreToSdkSession(store, 'feishu-default', 'oc_meta', 'thread-meta', {
+      workingDirectory: '/tmp/shared',
+      displayName: 'Desktop Thread',
+      chatUserId: 'ou_456',
+      chatDisplayName: '张乐',
+    });
+
+    assert.equal(binding.chatUserId, 'ou_456');
+    assert.equal(binding.chatDisplayName, '张乐');
+  });
 });

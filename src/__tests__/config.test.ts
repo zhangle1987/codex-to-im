@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  CTI_HOME,
   CONFIG_PATH,
   CONFIG_V2_PATH,
   loadConfig,
@@ -14,6 +15,17 @@ import {
 } from '../config.js';
 
 // ── maskSecret ──
+
+describe('CTI_HOME', () => {
+  it('defaults to the codex-to-im home directory when CTI_HOME is unset', () => {
+    if (process.env.CTI_HOME) {
+      assert.equal(CTI_HOME, process.env.CTI_HOME);
+      return;
+    }
+
+    assert.equal(CTI_HOME, path.join(os.homedir(), '.codex-to-im'));
+  });
+});
 
 describe('maskSecret', () => {
   it('masks short values entirely', () => {
@@ -284,6 +296,7 @@ describe('loadConfig/saveConfig round-trip', () => {
   });
 
   it('migrates legacy env config into config.v2.json default channel instances', () => {
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
     fs.writeFileSync(
       CONFIG_PATH,
       [

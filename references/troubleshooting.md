@@ -36,7 +36,7 @@
 
 **Steps**:
 
-1. Check `~/.codex-to-im/logs/bridge.log` or `~/.claude-to-im/logs/bridge.log`
+1. Check `~/.codex-to-im/logs/bridge.log`
 2. Look for Feishu error `99991672`
 3. If the error mentions `cardkit:card:write`, add and publish the missing Feishu permissions:
    - `cardkit:card:write`

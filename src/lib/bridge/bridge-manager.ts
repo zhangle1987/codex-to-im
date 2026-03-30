@@ -225,21 +225,6 @@ function parseDesktopThreadListArgs(args: string): { showAll: boolean; limit: nu
   return { showAll: false, limit };
 }
 
-function getDisplayedBridgeSessions(currentSessionId?: string): BridgeSession[] {
-  const { store } = getBridgeContext();
-  const sessions = store.listSessions()
-    .filter((session) => session.hidden !== true)
-    .toReversed();
-  return sessions.sort((a, b) => {
-    if (a.id === currentSessionId && b.id !== currentSessionId) return -1;
-    if (b.id === currentSessionId && a.id !== currentSessionId) return 1;
-    const aShared = a.sdk_session_id ? 1 : 0;
-    const bShared = b.sdk_session_id ? 1 : 0;
-    if (aShared !== bShared) return bShared - aShared;
-    return a.name?.localeCompare(b.name || '') || 0;
-  });
-}
-
 function getSessionDisplayName(session: BridgeSession | null | undefined, fallbackDirectory?: string): string {
   if (session?.name?.trim()) return session.name.trim();
   const cwd = session?.working_directory || fallbackDirectory || '';
@@ -3396,44 +3381,6 @@ async function handleCommand(
       break;
     }
 
-    case '/use': {
-      if (!args) {
-        response = '用法：/use <session-id | 序号>';
-        break;
-      }
-      const displayedSessions = getDisplayedBridgeSessions(currentBinding?.codepilotSessionId);
-      const sessionPick = resolveByIndexOrPrefix(args, displayedSessions, (session) => session.id);
-      if (sessionPick.ambiguous) {
-        response = '匹配到多个内部会话，请使用更长的编号。';
-        break;
-      }
-      if (!sessionPick.match) {
-        response = '没有找到对应的内部会话。先发送 /sessions 查看可选项。';
-        break;
-      }
-      let binding: ReturnType<typeof router.bindToSession>;
-      try {
-        binding = router.bindToSession(msg.address, sessionPick.match.id);
-      } catch (error) {
-        response = toUserVisibleBindingError(error, '切换会话失败。');
-        break;
-      }
-      if (!binding) {
-        response = '切换失败，该会话不存在。';
-        break;
-      }
-      response = buildCommandFields(
-        '已切换会话（兼容命令）',
-        [
-          ['标题', getSessionDisplayName(sessionPick.match, binding.workingDirectory)],
-          ['目录', formatCommandPath(binding.workingDirectory)],
-        ],
-        ['普通使用建议直接通过 `/t` 切换桌面会话。'],
-        responseParseMode === 'Markdown',
-      );
-      break;
-    }
-
     case '/reasoning': {
       if (!currentBinding) {
         response = '当前聊天还没有绑定会话。先发送消息创建会话，或先用 `/t 1` 接管桌面会话。';
@@ -3476,7 +3423,7 @@ async function handleCommand(
     }
 
     case '/cwd': {
-      response = '当前版本已不支持 /cwd。请使用 /new 新建会话，或使用 /thread /use 切换到已有工作空间。';
+      response = '当前版本已不支持 /cwd。请使用 /new 新建会话，或使用 /t 切换到已有桌面会话。';
       break;
     }
 
@@ -3694,33 +3641,6 @@ async function handleCommand(
         responseParseMode === 'Markdown',
       );
       response = [header, summary].join('\n\n').trim();
-      break;
-    }
-
-    case '/sessions': {
-      const sessions = getDisplayedBridgeSessions(currentBinding?.codepilotSessionId);
-      if (sessions.length === 0) {
-        response = '当前没有内部会话。普通使用建议直接发送消息创建会话，或先用 `/t 1` 接管桌面会话。';
-      } else {
-        response = buildIndexedCommandList(
-          '可切换的内部会话（兼容命令）',
-          sessions.slice(0, 10).map((session) => {
-            const threadTitle = session.sdk_session_id ? getDesktopThreadTitle(session.sdk_session_id) : null;
-            return {
-              heading: `${getSessionDisplayName(session, session.working_directory)}${session.id === currentBinding?.codepilotSessionId ? ' [当前]' : ''}`,
-              details: [
-                `状态：${formatRuntimeStatus(session)}`,
-                `目录：${formatCommandPath(session.working_directory)}`,
-              ],
-            };
-          }),
-          [
-            '普通使用建议直接通过 `/t` 切换桌面会话。',
-            '兼容命令仍可用，例如 `/use 2`。',
-          ],
-          responseParseMode === 'Markdown',
-        );
-      }
       break;
     }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CTI_HOME="$HOME/.claude-to-im"
+CTI_HOME="$HOME/.codex-to-im"
 CONFIG_FILE="$CTI_HOME/config.env"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 LOG_FILE="$CTI_HOME/logs/bridge.log"
@@ -167,7 +167,7 @@ if [ "$CTI_RUNTIME" = "claude" ] || [ "$CTI_RUNTIME" = "auto" ]; then
   if [ "$HAS_ANTHROPIC_CONFIG" = "true" ]; then
     check "ANTHROPIC_* vars in config.env (third-party API provider)" 0
 
-    PLIST_FILE="$HOME/Library/LaunchAgents/com.claude-to-im.bridge.plist"
+    PLIST_FILE="$HOME/Library/LaunchAgents/com.codex-to-im.bridge.plist"
 
     # On macOS, verify the launchd plist also has the vars
     if [ "$(uname -s)" = "Darwin" ] && [ -f "$PLIST_FILE" ]; then

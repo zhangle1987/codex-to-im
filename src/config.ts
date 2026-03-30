@@ -91,17 +91,10 @@ export interface Config {
   qqMaxImageSize?: number;
 }
 
-const LEGACY_CTI_HOME = path.join(os.homedir(), ".claude-to-im");
 const DEFAULT_CTI_HOME = path.join(os.homedir(), ".codex-to-im");
 export const DEFAULT_WORKSPACE_ROOT = path.join(os.homedir(), "cx2im");
 
-function resolveDefaultCtiHome(): string {
-  if (fs.existsSync(DEFAULT_CTI_HOME)) return DEFAULT_CTI_HOME;
-  if (fs.existsSync(LEGACY_CTI_HOME)) return LEGACY_CTI_HOME;
-  return DEFAULT_CTI_HOME;
-}
-
-export const CTI_HOME = process.env.CTI_HOME || resolveDefaultCtiHome();
+export const CTI_HOME = process.env.CTI_HOME || DEFAULT_CTI_HOME;
 export const CONFIG_PATH = path.join(CTI_HOME, "config.env");
 export const CONFIG_V2_PATH = path.join(CTI_HOME, "config.v2.json");
 
@@ -422,7 +415,7 @@ export function saveConfig(config: Config): void {
   const next = buildV2FileFromExpandedConfig(config, current);
   writeConfigV2File(next);
 
-  // Keep a lightweight legacy env snapshot for operational visibility and fallback tools.
+  // Keep a lightweight env snapshot for operational visibility and shell tooling.
   let out = "";
   out += formatEnvLine("CTI_RUNTIME", next.runtime.provider);
   out += formatEnvLine(
@@ -535,7 +528,7 @@ export function configToSettings(config: Config): Map<string, string> {
     JSON.stringify(config.channels || []),
   );
 
-  // Phase-1 compatibility settings for the still-legacy UI/runtime surfaces.
+  // Export flat settings for the remaining single-instance bridge consumers.
   m.set(
     "bridge_telegram_enabled",
     config.enabledChannels.includes("telegram") ? "true" : "false",

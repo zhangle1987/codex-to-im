@@ -1,4 +1,4 @@
-# Contributing to Claude-to-IM
+# Contributing to Codex-to-IM Bridge
 
 ## Development Setup
 

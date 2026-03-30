@@ -1,4 +1,4 @@
-# Claude-to-IM Security
+# Codex-to-IM Bridge Security
 
 ## Threat Model
 

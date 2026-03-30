@@ -1,6 +1,6 @@
-# Claude-to-IM
+# Codex-to-IM Bridge
 
-A host-agnostic bridge that connects IM platforms (Telegram, Discord, Feishu/Lark) to Claude, enabling AI-powered conversations through messaging apps.
+A host-agnostic bridge that connects IM platforms (Telegram, Discord, Feishu/Lark) to Codex-compatible runtimes, enabling AI-powered conversations through messaging apps.
 
 ## Features
 
