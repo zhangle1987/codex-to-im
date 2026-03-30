@@ -4,6 +4,7 @@ import { stdin as input, stdout as output } from 'node:process';
 
 import {
   ensureUiServerRunning,
+  ensureWindowsAdminSession,
   getBridgeAutostartStatus,
   getBridgeStatus,
   getCurrentUiServerUrl,
@@ -15,6 +16,7 @@ import {
   startBridge,
   stopBridge,
   stopUiServer,
+  uninstallCodexToImPackage,
 } from './service-manager.js';
 
 async function promptHidden(question: string): Promise<string> {
@@ -114,6 +116,20 @@ async function main(): Promise<void> {
       return;
     }
 
+    case 'uninstall': {
+      const result = await uninstallCodexToImPackage();
+      process.stdout.write(
+        [
+          `Stopped services. UI running=${result.ui.running ? 'yes' : 'no'}, Bridge running=${result.bridge.running ? 'yes' : 'no'}`,
+          result.autostart.installed ? `Bridge autostart still installed: ${result.autostart.taskName}` : 'Bridge autostart removed.',
+          `Global npm uninstall scheduled via ${result.npmCommand}.`,
+          `Log: ${result.logPath}`,
+          '当前命令退出后，后台会继续执行全局卸载。',
+        ].join('\n') + '\n',
+      );
+      return;
+    }
+
     case 'status': {
       const ui = getUiServerStatus();
       const bridge = getBridgeStatus();
@@ -149,6 +165,7 @@ async function main(): Promise<void> {
           return;
         }
         case 'install': {
+          await ensureWindowsAdminSession();
           const password = await promptHidden('请输入当前 Windows 登录密码（用于创建开机启动任务）: ');
           const status = await installBridgeAutostart(password);
           process.stdout.write(`Bridge autostart installed. Task: ${status.taskName}\n`);
@@ -170,7 +187,7 @@ async function main(): Promise<void> {
     }
 
     default:
-      process.stdout.write('Usage: codex-to-im [start|open|url|stop|status|autostart]\n');
+      process.stdout.write('Usage: codex-to-im [start|open|url|stop|status|autostart|uninstall]\n');
   }
 }
 

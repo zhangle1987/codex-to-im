@@ -43,6 +43,23 @@ export interface BridgeAutostartStatus {
   error?: string;
 }
 
+export interface DeferredGlobalNpmUninstallLaunch {
+  command: string;
+  args: string[];
+  npmCommand: string;
+  logPath: string;
+  delayMs: number;
+}
+
+export interface PackageUninstallResult {
+  ui: UiServerStatus;
+  bridge: BridgeStatus;
+  autostart: BridgeAutostartStatus;
+  npmCommand: string;
+  logPath: string;
+  scheduled: boolean;
+}
+
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(moduleDir, '..');
 const runtimeDir = path.join(CTI_HOME, 'runtime');
@@ -53,6 +70,7 @@ const uiStatusFile = path.join(runtimeDir, 'ui-server.json');
 const uiPort = 4781;
 const bridgeAutostartTaskName = 'CodexToIMBridge';
 const bridgeAutostartLauncherFile = path.join(runtimeDir, 'bridge-autostart.ps1');
+const npmUninstallLogFile = path.join(runtimeDir, 'npm-uninstall.log');
 const WINDOWS_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
 
 function ensureDirs(): void {
@@ -144,7 +162,7 @@ async function runPowerShell(script: string): Promise<string> {
   return result.stdout.trim();
 }
 
-async function ensureWindowsAdminSession(): Promise<void> {
+export async function ensureWindowsAdminSession(): Promise<void> {
   if (process.platform !== 'win32') {
     return;
   }
@@ -191,6 +209,83 @@ function ensureBridgeAutostartLauncher(): string {
 
 function parsePowerShellJson<T>(raw: string): T {
   return JSON.parse(raw) as T;
+}
+
+export function buildDeferredGlobalNpmUninstallLaunch(options: {
+  packageName?: string;
+  logPath?: string;
+  delayMs?: number;
+  nodePath?: string;
+  npmCommand?: string;
+  cwd?: string;
+  platform?: NodeJS.Platform;
+} = {}): DeferredGlobalNpmUninstallLaunch {
+  const packageName = options.packageName || 'codex-to-im';
+  const logPath = options.logPath || npmUninstallLogFile;
+  const delayMs = options.delayMs ?? 1500;
+  const platform = options.platform || process.platform;
+  const npmCommand = options.npmCommand || (platform === 'win32' ? 'npm.cmd' : 'npm');
+  const command = options.nodePath || process.execPath;
+  const cwd = options.cwd || os.homedir();
+  const script = [
+    "const { spawn } = require('node:child_process');",
+    "const fs = require('node:fs');",
+    `const logPath = ${JSON.stringify(logPath)};`,
+    `const npmCommand = ${JSON.stringify(npmCommand)};`,
+    `const npmArgs = ['uninstall', '-g', ${JSON.stringify(packageName)}];`,
+    `const childCwd = ${JSON.stringify(cwd)};`,
+    `const delayMs = ${JSON.stringify(delayMs)};`,
+    'const writeLog = (message) => {',
+    "  try { fs.appendFileSync(logPath, String(message).endsWith('\\n') ? String(message) : String(message) + '\\n'); } catch {}",
+    '};',
+    'setTimeout(() => {',
+    '  let fd;',
+    "  try { fd = fs.openSync(logPath, 'a'); } catch (error) { writeLog(error); process.exit(1); return; }",
+    "  const child = spawn(npmCommand, npmArgs, { cwd: childCwd, detached: false, stdio: ['ignore', fd, fd], windowsHide: true });",
+    '  child.on(\'error\', (error) => { writeLog(error); process.exit(1); });',
+    "  child.on('close', (code) => { process.exit(typeof code === 'number' ? code : 0); });",
+    '}, delayMs);',
+  ].join('\n');
+
+  return {
+    command,
+    args: ['-e', script],
+    npmCommand,
+    logPath,
+    delayMs,
+  };
+}
+
+async function launchDeferredGlobalNpmUninstall(): Promise<DeferredGlobalNpmUninstallLaunch> {
+  ensureDirs();
+  const launch = buildDeferredGlobalNpmUninstallLaunch();
+  // The current CLI process still lives inside the global package directory, so
+  // npm uninstall has to run from a detached follow-up process after this command exits.
+  fs.writeFileSync(
+    launch.logPath,
+    [
+      `[${new Date().toISOString()}] Scheduling global uninstall.`,
+      `${launch.npmCommand} uninstall -g codex-to-im`,
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(launch.command, launch.args, {
+      cwd: os.homedir(),
+      detached: true,
+      stdio: 'ignore',
+      ...WINDOWS_HIDE,
+    });
+    child.once('error', reject);
+    child.once('spawn', () => {
+      child.unref();
+      resolve();
+    });
+  });
+
+  return launch;
 }
 
 export function getPackageRoot(): string {
@@ -447,6 +542,33 @@ export async function uninstallBridgeAutostart(): Promise<BridgeAutostartStatus>
     // ignore launcher cleanup failure
   }
   return await getBridgeAutostartStatus();
+}
+
+export async function uninstallCodexToImPackage(): Promise<PackageUninstallResult> {
+  const autostartBefore = await getBridgeAutostartStatus();
+  if (process.platform === 'win32' && autostartBefore.installed) {
+    await ensureWindowsAdminSession();
+  }
+
+  const ui = await stopUiServer();
+  const bridge = await stopBridge();
+  const autostart = autostartBefore.installed
+    ? await uninstallBridgeAutostart()
+    : autostartBefore;
+
+  if (autostart.installed) {
+    throw new Error(`未能删除开机自启动任务 ${autostart.taskName}，已取消 npm 全局卸载。`);
+  }
+
+  const launch = await launchDeferredGlobalNpmUninstall();
+  return {
+    ui,
+    bridge,
+    autostart,
+    npmCommand: launch.npmCommand,
+    logPath: launch.logPath,
+    scheduled: true,
+  };
 }
 
 export function getBridgeLogs(lines = 200): string {

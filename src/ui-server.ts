@@ -3853,9 +3853,6 @@ function renderHtml(): string {
         showMessage('opsMessage', 'error', error.message);
       });
 
-      setInterval(() => {
-        loadBindings().catch(() => {});
-      }, 4000);
     </script>
   </body>
 </html>`;
