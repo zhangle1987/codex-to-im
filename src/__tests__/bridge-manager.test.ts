@@ -1,3 +1,4 @@
+import './test-setup.js';
 import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -459,7 +460,7 @@ describe('bridge-manager status formatting', () => {
       true,
     );
 
-    assert.equal(rendered, '**&lt;Current Thread&gt;**\n\n**我:** Desktop prompt\n\n**codex:**\n- item 1\n- item 2');
+    assert.equal(rendered, '**`<Current Thread>`**\n\n**我:** Desktop prompt\n\n**codex:**\n- item 1\n- item 2');
   });
 
   it('buffers desktop user mirror text into the active turn instead of finalizing immediately', () => {
@@ -1076,7 +1077,7 @@ describe('bridge-manager status formatting', () => {
 
     assert.equal(
       withNotice,
-      '**&lt;Current Thread&gt;**\n\n**我:** Desktop prompt\n\n**codex:** stale answer\n\n> 超时提醒：长时间没有收到新的桌面会话输出，本次流式同步已先结束；如果桌面后续继续产出内容，会重新开始新一轮同步。',
+      '**`<Current Thread>`**\n\n**我:** Desktop prompt\n\n**codex:** stale answer\n\n> 超时提醒：长时间没有收到新的桌面会话输出，本次流式同步已先结束；如果桌面后续继续产出内容，会重新开始新一轮同步。',
     );
   });
 });

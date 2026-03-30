@@ -1605,7 +1605,7 @@ function getMirrorAssistantRuntimeLabel(): string {
 
 function buildMirrorTitle(threadTitle: string | null, markdown = false): string {
   const title = threadTitle?.trim() || '桌面线程';
-  const rendered = markdown ? `&lt;${title}&gt;` : `<${title}>`;
+  const rendered = markdown ? `\`<${title}>\`` : `<${title}>`;
   return markdown ? `**${rendered}**` : rendered;
 }
 

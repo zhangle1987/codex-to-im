@@ -1,3 +1,4 @@
+import './test-setup.js';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { downloadMediaFromItem, encryptMedia } from '../adapters/weixin/weixin-media.js';
