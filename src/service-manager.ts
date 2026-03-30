@@ -144,6 +144,16 @@ async function runPowerShell(script: string): Promise<string> {
   return result.stdout.trim();
 }
 
+async function ensureWindowsAdminSession(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const raw = await runPowerShell('([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)');
+  if (raw.trim().toLowerCase() !== 'true') {
+    throw new Error('请先以管理员身份打开 PowerShell 或终端，再执行开机自启动安装/卸载命令。');
+  }
+}
+
 function ensureBridgeAutostartLauncher(): string {
   ensureDirs();
   const content = [
@@ -375,11 +385,14 @@ export async function getBridgeAutostartStatus(): Promise<BridgeAutostartStatus>
     '  runAsUser = $task.Principal.UserId',
     '  state = [string]$task.State',
     '} | ConvertTo-Json -Compress',
-  ].join('; ');
+  ].join('\n');
 
   try {
     const raw = await runPowerShell(script);
-    return parsePowerShellJson<BridgeAutostartStatus>(raw);
+    return {
+      ...base,
+      ...parsePowerShellJson<BridgeAutostartStatus>(raw),
+    };
   } catch (error) {
     return {
       ...base,
@@ -396,13 +409,15 @@ export async function installBridgeAutostart(password: string): Promise<BridgeAu
     throw new Error('当前 Windows 登录密码不能为空。');
   }
 
+  await ensureWindowsAdminSession();
+
   const launcherPath = ensureBridgeAutostartLauncher();
   const user = getCurrentWindowsUser();
   const script = [
     `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "${escapePowerShellSingleQuoted(launcherPath)}"'`,
     '$trigger = New-ScheduledTaskTrigger -AtStartup',
     '$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew',
-    `Register-ScheduledTask -TaskName '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}' -Action $action -Trigger $trigger -Settings $settings -User '${escapePowerShellSingleQuoted(user)}' -Password '${escapePowerShellSingleQuoted(password)}' -RunLevel Highest -Force | Out-Null`,
+    `Register-ScheduledTask -TaskName '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}' -Action $action -Trigger $trigger -Settings $settings -User '${escapePowerShellSingleQuoted(user)}' -Password '${escapePowerShellSingleQuoted(password)}' -RunLevel Limited -Force | Out-Null`,
   ].join('; ');
 
   await runPowerShell(script);
@@ -413,6 +428,8 @@ export async function uninstallBridgeAutostart(): Promise<BridgeAutostartStatus>
   if (process.platform !== 'win32') {
     return await getBridgeAutostartStatus();
   }
+
+  await ensureWindowsAdminSession();
 
   const script = [
     `$task = Get-ScheduledTask -TaskName '${escapePowerShellSingleQuoted(bridgeAutostartTaskName)}' -ErrorAction SilentlyContinue`,

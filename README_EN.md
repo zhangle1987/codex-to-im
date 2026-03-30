@@ -103,10 +103,12 @@ codex-to-im autostart uninstall
 
 Notes:
 
-- `codex-to-im autostart install` prompts for the current Windows account password so the startup task can be created.
+- `codex-to-im autostart install` and `codex-to-im autostart uninstall` must be run from an **elevated Administrator PowerShell / terminal**.
+- Installation prompts for the current Windows account password so the startup task can be created.
 - Autostart only launches the bridge; it does not open the Web UI.
 - Running `codex-to-im` manually later only starts the UI if needed and will not duplicate the bridge.
 - The current implementation uses Windows Task Scheduler and does not require WinSW, NSSM, or PM2.
+- The Web UI is read-only for autostart status; enable/disable it from the administrator terminal commands above.
 
 By default the workbench runs at:
 

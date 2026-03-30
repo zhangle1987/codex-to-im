@@ -183,7 +183,11 @@ codex-to-im autostart install
 codex-to-im autostart uninstall
 ```
 
+请先以**管理员身份**打开 PowerShell / 终端，再执行上面的安装或卸载命令。
+
 启用时会要求输入当前 Windows 登录密码，用于创建“开机自动启动 Bridge”的任务计划程序任务。
+
+Web 工作台现在只展示自动启动状态；真正的启用和关闭请使用上面的管理员命令。
 
 ## 6. 在目标机上的首次配置
 

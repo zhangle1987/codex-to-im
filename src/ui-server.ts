@@ -35,7 +35,6 @@ import {
   getBridgeLogs,
   getBridgeStatus,
   installCodexIntegration,
-  installBridgeAutostart,
   isCodexIntegrationInstalled,
   getPackageRoot,
   getUiServerStatus,
@@ -43,7 +42,6 @@ import {
   restartBridge,
   startBridge,
   stopBridge,
-  uninstallBridgeAutostart,
   writeUiServerStatus,
 } from './service-manager.js';
 import { JsonFileStore } from './store.js';
@@ -2099,26 +2097,7 @@ function renderHtml(): string {
                 <p class="panel-subtitle">Bridge 开机自启动</p>
                 <div class="notice" id="autostartNotice">正在检查当前 Windows 任务计划程序状态…</div>
                 <div class="actions" style="margin-top: 12px;">
-                  <button id="installAutostartBtn">启用开机自启动</button>
                   <button id="refreshAutostartBtn">刷新开机自启动状态</button>
-                  <button id="removeAutostartBtn" class="danger">关闭开机自启动</button>
-                </div>
-                <div class="panel-block" id="autostartInstallForm" style="display: none; margin-top: 12px;">
-                  <p class="panel-subtitle">输入当前 Windows 登录密码</p>
-                  <div class="field-grid two-up" style="margin-top: 8px;">
-                    <div class="field">
-                      <label>当前账号</label>
-                      <input id="autostartRunAsUser" type="text" readonly value="" />
-                    </div>
-                    <div class="field">
-                      <label>登录密码</label>
-                      <input id="autostartPassword" type="password" placeholder="请输入当前 Windows 登录密码" />
-                    </div>
-                  </div>
-                  <div class="actions" style="margin-top: 12px;">
-                    <button id="confirmAutostartBtn" class="primary">确认启用</button>
-                    <button id="cancelAutostartBtn">取消</button>
-                  </div>
                 </div>
               </div>
 
@@ -3399,38 +3378,33 @@ function renderHtml(): string {
       function renderAutostartStatus(status) {
         const valueEl = document.getElementById('autostartStatus');
         const noticeEl = document.getElementById('autostartNotice');
-        const installBtn = document.getElementById('installAutostartBtn');
-        const removeBtn = document.getElementById('removeAutostartBtn');
-        const runAsInput = document.getElementById('autostartRunAsUser');
-        const localOnly = !state.uiAccess || state.uiAccess.requestIsLocal === true;
-
-        runAsInput.value = status && status.runAsUser ? status.runAsUser : '';
+        const refreshBtn = document.getElementById('refreshAutostartBtn');
 
         if (!status || status.supported !== true) {
           valueEl.textContent = '不支持';
           noticeEl.textContent = status && status.error
             ? status.error
             : '当前系统暂不支持 Bridge 开机自启动。';
-          installBtn.disabled = true;
-          removeBtn.disabled = true;
+          refreshBtn.disabled = true;
           return;
         }
 
         if (status.error) {
           valueEl.textContent = '配置异常';
           noticeEl.textContent = status.error;
-          installBtn.disabled = !localOnly;
-          removeBtn.disabled = !localOnly || status.installed !== true;
+          refreshBtn.disabled = false;
           return;
         }
 
         if (!status.installed) {
           valueEl.textContent = '未启用';
-          noticeEl.textContent = localOnly
-            ? '会创建一个 Windows 开机任务，只自动启动 Bridge，不自动打开 UI。启用时需要输入当前 Windows 登录密码。'
-            : '出于安全原因，只能在本机浏览器里启用或关闭开机自启动。';
-          installBtn.disabled = !localOnly;
-          removeBtn.disabled = true;
+          noticeEl.textContent = [
+            '如需启用，请以管理员身份打开 PowerShell 或终端执行：',
+            'codex-to-im autostart install',
+            status.runAsUser ? '运行账号：' + status.runAsUser : '',
+            '安装时会要求输入当前 Windows 登录密码。',
+          ].filter(Boolean).join('\\n');
+          refreshBtn.disabled = false;
           return;
         }
 
@@ -3439,21 +3413,9 @@ function renderHtml(): string {
           '方式：Windows 任务计划程序（开机触发）',
           status.runAsUser ? '运行账号：' + status.runAsUser : '',
           status.state ? '任务状态：' + status.state : '',
-          status.error ? '异常：' + status.error : '',
+          '如需关闭，请以管理员身份执行：codex-to-im autostart uninstall',
         ].filter(Boolean).join(' · ');
-        installBtn.disabled = !localOnly;
-        removeBtn.disabled = !localOnly;
-      }
-
-      function showAutostartInstallForm(visible) {
-        const form = document.getElementById('autostartInstallForm');
-        const passwordInput = document.getElementById('autostartPassword');
-        form.style.display = visible ? 'block' : 'none';
-        if (!visible) {
-          passwordInput.value = '';
-          return;
-        }
-        passwordInput.focus();
+        refreshBtn.disabled = false;
       }
 
       async function loadLogs() {
@@ -3778,58 +3740,6 @@ function renderHtml(): string {
         }
       });
 
-      document.getElementById('installAutostartBtn').addEventListener('click', async () => {
-        try {
-          if (state.uiAccess && state.uiAccess.requestIsLocal !== true) {
-            throw new Error('请在本机浏览器中操作开机自启动。');
-          }
-          showAutostartInstallForm(true);
-        } catch (error) {
-          showMessage('opsMessage', 'error', error.message);
-        }
-      });
-
-      document.getElementById('confirmAutostartBtn').addEventListener('click', async () => {
-        try {
-          const password = document.getElementById('autostartPassword').value;
-          if (!password) {
-            throw new Error('当前 Windows 登录密码不能为空。');
-          }
-          const result = await api('/api/autostart/install', {
-            method: 'POST',
-            body: JSON.stringify({ password }),
-          });
-          showAutostartInstallForm(false);
-          showMessage('opsMessage', 'success', 'Bridge 开机自启动已启用。任务：' + result.status.taskName);
-          await loadStatus();
-        } catch (error) {
-          showMessage('opsMessage', 'error', error.message);
-        }
-      });
-
-      document.getElementById('cancelAutostartBtn').addEventListener('click', () => {
-        showAutostartInstallForm(false);
-        showMessage('opsMessage', 'success', '已取消启用开机自启动。');
-      });
-
-      document.getElementById('removeAutostartBtn').addEventListener('click', async () => {
-        try {
-          if (state.uiAccess && state.uiAccess.requestIsLocal !== true) {
-            throw new Error('请在本机浏览器中操作开机自启动。');
-          }
-          showAutostartInstallForm(false);
-          const confirmed = window.confirm('确定要关闭 Bridge 开机自启动吗？');
-          if (!confirmed) {
-            return;
-          }
-          const result = await api('/api/autostart/uninstall', { method: 'POST' });
-          showMessage('opsMessage', 'success', result.status.installed ? '开机自启动仍存在，请检查任务计划程序。' : 'Bridge 开机自启动已关闭。');
-          await loadStatus();
-        } catch (error) {
-          showMessage('opsMessage', 'error', error.message);
-        }
-      });
-
       document.getElementById('refreshAutostartBtn').addEventListener('click', async () => {
         try {
           await loadStatus();
@@ -4055,32 +3965,6 @@ const server = http.createServer(async (request, response) => {
         },
         startedAt: serverStartTime,
       });
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/autostart/install') {
-      if (!isLocalRequest(request)) {
-        json(response, 403, { error: '出于安全原因，请在本机浏览器中启用开机自启动。' });
-        return;
-      }
-      const payload = await readJsonBody<Record<string, unknown>>(request);
-      const password = asString(payload.password);
-      if (!password) {
-        json(response, 400, { error: '当前 Windows 登录密码不能为空。' });
-        return;
-      }
-      const status = await installBridgeAutostart(password);
-      json(response, 200, { ok: true, status });
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/autostart/uninstall') {
-      if (!isLocalRequest(request)) {
-        json(response, 403, { error: '出于安全原因，请在本机浏览器中关闭开机自启动。' });
-        return;
-      }
-      const status = await uninstallBridgeAutostart();
-      json(response, 200, { ok: true, status });
       return;
     }
 
