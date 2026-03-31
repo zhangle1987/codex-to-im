@@ -183,6 +183,58 @@ describe('bridge-manager resolveCommandAlias', () => {
     assert.deepEqual(_testOnly.parseDesktopThreadListArgs('n 500'), { showAll: false, limit: 200 });
   });
 
+  it('renders desktop thread list titles with the actual displayed count', () => {
+    const response = _testOnly.buildDesktopThreadsCommandResponse(
+      [
+        {
+          threadId: 'thread-1',
+          filePath: 'D:\\codex\\sessions\\1.jsonl',
+          cwd: 'D:\\workspace\\project-a',
+          originator: 'Codex Desktop',
+          firstSeenAt: '2026-03-31T00:00:00.000Z',
+          lastEventAt: '2026-03-31T00:00:00.000Z',
+          title: 'Project A',
+          activeEstimate: false,
+        },
+        {
+          threadId: 'thread-2',
+          filePath: 'D:\\codex\\sessions\\2.jsonl',
+          cwd: 'D:\\workspace\\project-b',
+          originator: 'Codex Desktop',
+          firstSeenAt: '2026-03-31T00:00:00.000Z',
+          lastEventAt: '2026-03-31T00:00:00.000Z',
+          title: 'Project B',
+          activeEstimate: false,
+        },
+      ],
+      false,
+      false,
+      10,
+    );
+    assert.match(response, /^最近 2 条桌面会话/);
+  });
+
+  it('renders all-thread list titles with the actual displayed count', () => {
+    const response = _testOnly.buildDesktopThreadsCommandResponse(
+      [
+        {
+          threadId: 'thread-1',
+          filePath: 'D:\\codex\\sessions\\1.jsonl',
+          cwd: 'D:\\workspace\\project-a',
+          originator: 'Codex Desktop',
+          firstSeenAt: '2026-03-31T00:00:00.000Z',
+          lastEventAt: '2026-03-31T00:00:00.000Z',
+          title: 'Project A',
+          activeEstimate: false,
+        },
+      ],
+      false,
+      true,
+      200,
+    );
+    assert.match(response, /^桌面会话（当前显示 1 条，最多 200 条）/);
+  });
+
   it('maps short session and history aliases', () => {
     assert.equal(_testOnly.resolveCommandAlias('/his', ''), '/history');
     assert.equal(_testOnly.resolveCommandAlias('/his', 'raw'), '/history');

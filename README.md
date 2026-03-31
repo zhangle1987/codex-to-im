@@ -102,6 +102,20 @@ codex-to-im status
 codex-to-im stop
 ```
 
+### 卸载
+
+```bash
+codex-to-im uninstall
+```
+
+说明：
+
+- 该命令会停止本地 UI、停止 bridge，并尝试移除已安装的 bridge 开机自启动任务。
+- 当前命令退出后，后台会尝试执行 `npm uninstall -g codex-to-im`；这一步不是立即完成。
+- 可根据输出中的日志路径确认后台卸载结果；如果几秒后 `codex-to-im` 仍可执行，请手动运行 `npm uninstall -g codex-to-im`。
+- 该命令不会删除 `~/.codex-to-im` 下的配置、日志和会话数据。
+- 该命令也不会删除 `~/.codex/skills/codex-to-im`；如需彻底清理，请手动删除相关目录。
+
 ## 典型使用方式
 
 ### 1. 接管桌面线程

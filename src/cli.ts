@@ -122,9 +122,12 @@ async function main(): Promise<void> {
         [
           `Stopped services. UI running=${result.ui.running ? 'yes' : 'no'}, Bridge running=${result.bridge.running ? 'yes' : 'no'}`,
           result.autostart.installed ? `Bridge autostart still installed: ${result.autostart.taskName}` : 'Bridge autostart removed.',
-          `Global npm uninstall scheduled via ${result.npmCommand}.`,
+          `Background npm uninstall scheduled via ${result.npmCommand}.`,
           `Log: ${result.logPath}`,
-          '当前命令退出后，后台会继续执行全局卸载。',
+          '当前命令退出后，后台会尝试执行 npm uninstall -g codex-to-im。',
+          '这一步不是立即完成；如需确认结果，请查看上面的日志文件。',
+          '如果几秒后 codex-to-im 仍可执行，请手动运行：npm uninstall -g codex-to-im',
+          '本命令不会删除 ~/.codex-to-im 或 ~/.codex/skills/codex-to-im，请按需手动删除。',
         ].join('\n') + '\n',
       );
       return;

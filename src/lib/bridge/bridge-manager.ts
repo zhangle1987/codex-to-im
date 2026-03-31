@@ -356,8 +356,12 @@ function buildDesktopThreadsCommandResponse(
   showAll: boolean,
   limit = 10,
 ): string {
+  const actualCount = desktopSessions.length;
+  const title = showAll
+    ? `桌面会话（当前显示 ${actualCount} 条，最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条）`
+    : `最近 ${actualCount} 条桌面会话`;
   return buildIndexedCommandList(
-    showAll ? `桌面会话（最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条）` : `最近 ${limit} 条桌面会话`,
+    title,
     desktopSessions.map((session) => ({
       heading: session.title || '未命名线程',
       details: [
@@ -3302,7 +3306,9 @@ async function handleCommand(
         );
         break;
       }
-      const displayedThreads = getDisplayedDesktopThreads(DEFAULT_DESKTOP_THREAD_LIST_LIMIT);
+      // Numeric /t picks should match the broader list surfaced by `/t all`,
+      // otherwise users can be shown a 10th item and still fail to select it.
+      const displayedThreads = getDisplayedDesktopThreads(MAX_DESKTOP_THREAD_LIST_LIMIT);
       const threadPick = resolveByIndexOrPrefix(args, displayedThreads, (session) => session.threadId);
       if (threadPick.ambiguous) {
         response = '匹配到多个桌面会话，请先发送 `/t` 查看列表，再用 `/t 1` 这种序号切换。';
@@ -3331,6 +3337,12 @@ async function handleCommand(
             ['接下来直接发送文本即可继续。'],
             responseParseMode === 'Markdown',
           );
+          break;
+        }
+        if (threadPick.index !== undefined) {
+          response = displayedThreads.length > 0
+            ? `当前只找到 ${displayedThreads.length} 条桌面会话，没有第 ${threadPick.index} 条。先发送 \`/t\` 查看最近会话，或发送 \`/t all\` 查看更多后再选择。`
+            : '没有找到桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。';
           break;
         }
         response = '没有找到对应的桌面会话。先发送 `/t` 查看最近会话，再用 `/t 1` 接管。';
@@ -3830,6 +3842,7 @@ export const _testOnly = {
   resolveNewSessionWorkingDirectory,
   resolveCommandAlias,
   parseDesktopThreadListArgs,
+  buildDesktopThreadsCommandResponse,
   toUserVisibleBindingError,
   toUserVisibleCommandError,
   normalizeReasoningEffort,

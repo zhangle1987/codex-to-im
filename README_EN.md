@@ -102,6 +102,20 @@ If you want to stop the local UI and bridge:
 codex-to-im stop
 ```
 
+### Uninstall
+
+```bash
+codex-to-im uninstall
+```
+
+Notes:
+
+- This command stops the local UI, stops the bridge, and attempts to remove the installed bridge boot task if present.
+- After the command exits, a background helper attempts to run `npm uninstall -g codex-to-im`; this step is not immediate.
+- Check the log path printed by the command to confirm the uninstall result. If `codex-to-im` is still available a few seconds later, run `npm uninstall -g codex-to-im` manually.
+- This command does not delete local config, logs, or session data under `~/.codex-to-im`.
+- This command also does not delete `~/.codex/skills/codex-to-im`; remove those directories manually if you want a full local cleanup.
+
 ## Typical Workflows
 
 ### 1. Take over a desktop thread
