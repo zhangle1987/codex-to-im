@@ -1220,6 +1220,23 @@ function decrementQueuedCount(sessionId: string): void {
   syncSessionRuntimeState(sessionId);
 }
 
+function resetPersistedInteractiveRuntimeState(): void {
+  const { store } = getBridgeContext();
+  for (const session of store.listSessions()) {
+    const queuedCount = session.queued_count && session.queued_count > 0
+      ? session.queued_count
+      : 0;
+    if (queuedCount === 0 && session.runtime_status !== 'running' && session.runtime_status !== 'queued') {
+      continue;
+    }
+    store.updateSession(session.id, {
+      queued_count: 0,
+      runtime_status: 'idle',
+      last_runtime_update_at: nowIso(),
+    });
+  }
+}
+
 function formatRuntimeStatus(session: BridgeSession | null | undefined): string {
   const status = session?.runtime_status || 'idle';
   const queuedCount = session?.queued_count && session.queued_count > 0
@@ -2532,6 +2549,7 @@ export async function start(): Promise<void> {
     return;
   }
 
+  resetPersistedInteractiveRuntimeState();
   await syncConfiguredAdapters({ startLoops: false });
   const startedCount = state.adapters.size;
 

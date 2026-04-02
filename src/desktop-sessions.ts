@@ -57,9 +57,9 @@ interface SessionMetaLine {
     id?: string;
     timestamp?: string;
     cwd?: string;
-    originator?: string;
-    cli_version?: string;
-    source?: string;
+    originator?: unknown;
+    cli_version?: unknown;
+    source?: unknown;
   };
 }
 
@@ -309,8 +309,8 @@ function walkSessionFiles(dirPath: string, target: string[]): void {
 }
 
 function isDesktopLike(meta: SessionMetaLine['payload']): boolean {
-  const originator = meta?.originator?.toLowerCase() || '';
-  const source = meta?.source?.toLowerCase() || '';
+  const originator = typeof meta?.originator === 'string' ? meta.originator.toLowerCase() : '';
+  const source = typeof meta?.source === 'string' ? meta.source.toLowerCase() : '';
   if (source === 'exec') return false;
   return originator.includes('desktop') || source === 'vscode' || source === 'desktop';
 }
@@ -475,9 +475,9 @@ function parseDesktopSession(
     threadId,
     filePath,
     cwd,
-    originator: parsed.payload.originator || 'Codex Desktop',
-    source: parsed.payload.source || undefined,
-    cliVersion: parsed.payload.cli_version || undefined,
+    originator: typeof parsed.payload.originator === 'string' ? parsed.payload.originator : 'Codex Desktop',
+    source: typeof parsed.payload.source === 'string' ? parsed.payload.source : undefined,
+    cliVersion: typeof parsed.payload.cli_version === 'string' ? parsed.payload.cli_version : undefined,
     firstSeenAt,
     lastEventAt,
     title,

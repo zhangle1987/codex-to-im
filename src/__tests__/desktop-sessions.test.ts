@@ -114,6 +114,59 @@ describe('listDesktopSessions', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('ignores session_meta source objects from subagent threads instead of throwing', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-sessions-'));
+    process.env.CODEX_HOME = tempRoot;
+
+    const sessionsDir = path.join(tempRoot, 'sessions', '2026', '04', '02');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+
+    const rolloutPath = path.join(
+      sessionsDir,
+      'rollout-2026-04-02T20-01-32-019d4e11-f45a-7970-b568-946693ff750c.jsonl',
+    );
+    fs.writeFileSync(
+      rolloutPath,
+      [
+        JSON.stringify({
+          timestamp: '2026-04-02T12:01:32.019Z',
+          type: 'session_meta',
+          payload: {
+            id: '019d4e11-f45a-7970-b568-946693ff750c',
+            timestamp: '2026-04-02T12:01:32.019Z',
+            cwd: 'D:\\codex\\Claude-to-IM-skill',
+            originator: 'codex_sdk_ts',
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: '019d3de4-856e-7dd1-a16e-7a2d84926775',
+                  depth: 1,
+                  agent_nickname: 'Curie',
+                  agent_role: 'explorer',
+                },
+              },
+            },
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-04-02T12:01:33.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'user_message',
+            message: '请分析这个子任务',
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const sessions = listDesktopSessions(10);
+
+    assert.deepEqual(sessions, []);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('hides desktop threads whose cwd points at the internal skills workspace', () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-sessions-'));
     process.env.CODEX_HOME = tempRoot;

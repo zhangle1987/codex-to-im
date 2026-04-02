@@ -8,7 +8,7 @@ import path from 'node:path';
 import { CTI_HOME } from '../config.js';
 import { JsonFileStore } from '../store.js';
 import { initBridgeContext } from '../lib/bridge/context.js';
-import { _testOnly } from '../lib/bridge/bridge-manager.js';
+import { _testOnly, start } from '../lib/bridge/bridge-manager.js';
 import * as router from '../lib/bridge/channel-router.js';
 import type { LifecycleHooks, LLMProvider, PermissionGateway, StreamChatParams } from '../lib/bridge/host.js';
 
@@ -1183,6 +1183,44 @@ describe('bridge-manager stop handling', () => {
 
     assert.equal(abortController.signal.aborted, true);
     assert.deepEqual(sent, ['正在停止当前任务...']);
+  });
+});
+
+describe('bridge-manager startup runtime cleanup', () => {
+  beforeEach(() => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+  });
+
+  it('resets persisted running and queued sessions back to idle on startup', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    const session = store.createSession('Desktop: stale', '', undefined, 'D:\\workspace\\stale', 'code');
+    store.updateSession(session.id, {
+      runtime_status: 'running',
+      queued_count: 2,
+      last_runtime_update_at: '2026-04-01T00:00:00.000Z',
+    });
+
+    await start();
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.runtime_status, 'idle');
+    assert.equal(refreshed?.queued_count || 0, 0);
   });
 });
 
