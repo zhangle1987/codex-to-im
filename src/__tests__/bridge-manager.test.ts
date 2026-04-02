@@ -9,6 +9,7 @@ import { CTI_HOME } from '../config.js';
 import { JsonFileStore } from '../store.js';
 import { initBridgeContext } from '../lib/bridge/context.js';
 import { _testOnly, start } from '../lib/bridge/bridge-manager.js';
+import { BaseChannelAdapter, registerAdapterFactory } from '../lib/bridge/channel-adapter.js';
 import * as router from '../lib/bridge/channel-router.js';
 import type { LifecycleHooks, LLMProvider, PermissionGateway, StreamChatParams } from '../lib/bridge/host.js';
 
@@ -37,6 +38,31 @@ const noopPermissions: PermissionGateway = {
 };
 
 const noopLifecycle: LifecycleHooks = {};
+
+class InvalidConfigAdapter extends BaseChannelAdapter {
+  readonly channelType: string;
+  readonly provider: string;
+
+  constructor(instance?: { id?: string; provider?: string; alias?: string }) {
+    super();
+    this.channelType = instance?.id || 'invalid';
+    this.provider = instance?.provider || 'invalid';
+    Object.defineProperty(this, 'alias', {
+      value: instance?.alias,
+      configurable: true,
+      enumerable: true,
+      writable: false,
+    });
+  }
+
+  async start(): Promise<void> {}
+  async stop(): Promise<void> {}
+  isRunning(): boolean { return false; }
+  async consumeOne() { return null; }
+  async send() { return { ok: true, messageId: 'dummy' }; }
+  validateConfig(): string | null { return 'invalid config'; }
+  isAuthorized(): boolean { return true; }
+}
 
 describe('bridge-manager resolveNewWorkingDirectory', () => {
   beforeEach(() => {
@@ -1221,6 +1247,144 @@ describe('bridge-manager startup runtime cleanup', () => {
     const refreshed = store.getSession(session.id);
     assert.equal(refreshed?.runtime_status, 'idle');
     assert.equal(refreshed?.queued_count || 0, 0);
+  });
+});
+
+describe('bridge-manager mirror subscription recovery', () => {
+  beforeEach(() => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+  });
+
+  it('clears dangling sdk session ids after repeated missing desktop thread lookups', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    const address = { channelType: 'feishu-default', chatId: 'chat-dangling' } as const;
+    const binding = router.createBinding(address, 'D:\\workspace\\dangling');
+    store.updateSdkSessionId(binding.codepilotSessionId, 'missing-thread-id');
+
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    state.running = true;
+    state.adapters.set(address.channelType, {
+      channelType: address.channelType,
+      provider: 'feishu',
+      isRunning: () => false,
+    });
+
+    await _testOnly.reconcileMirrorSubscriptions();
+    await _testOnly.reconcileMirrorSubscriptions();
+
+    assert.equal(store.getSession(binding.codepilotSessionId)?.sdk_session_id, 'missing-thread-id');
+    assert.equal(store.getChannelBinding(address.channelType, address.chatId)?.sdkSessionId, 'missing-thread-id');
+
+    await _testOnly.reconcileMirrorSubscriptions();
+
+    assert.equal(store.getSession(binding.codepilotSessionId)?.sdk_session_id || '', '');
+    assert.equal(store.getChannelBinding(address.channelType, address.chatId)?.sdkSessionId || '', '');
+    assert.equal(state.mirrorSubscriptions.size, 0);
+  });
+
+  it('does not reject mirror reconcile when mirror session state persistence fails', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    const address = { channelType: 'feishu-default', chatId: 'chat-sync-failure' } as const;
+    const binding = router.createBinding(address, 'D:\\workspace\\sync-failure');
+    store.updateSdkSessionId(binding.codepilotSessionId, 'missing-thread-id');
+
+    const originalUpdateSession = store.updateSession.bind(store);
+    (store as unknown as { updateSession: typeof store.updateSession }).updateSession = (() => {
+      throw {};
+    }) as typeof store.updateSession;
+
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    state.running = true;
+    state.adapters.set(address.channelType, {
+      channelType: address.channelType,
+      provider: 'feishu',
+      isRunning: () => false,
+    });
+
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map((arg) => String(arg)).join(' '));
+    };
+
+    try {
+      await assert.doesNotReject(_testOnly.reconcileMirrorSubscriptions());
+    } finally {
+      console.error = originalError;
+      (store as unknown as { updateSession: typeof store.updateSession }).updateSession = originalUpdateSession;
+    }
+
+    assert.ok(errors.some((line) => line.includes('Failed to sync mirror session state')));
+  });
+});
+
+describe('bridge-manager invalid adapter logging', () => {
+  beforeEach(() => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    registerAdapterFactory('invalid-test', (instance) => new InvalidConfigAdapter(instance as any));
+    _testOnly.resetStateForTests();
+  });
+
+  it('logs unchanged invalid adapter configs only once', async () => {
+    const settings = makeSettings();
+    settings.set('bridge_channel_instances_json', JSON.stringify([
+      {
+        id: 'invalid-test-main',
+        provider: 'invalid-test',
+        alias: 'Invalid Test',
+        enabled: true,
+        config: {},
+      },
+    ]));
+
+    const store = new JsonFileStore(settings);
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((arg) => String(arg)).join(' '));
+    };
+
+    try {
+      await _testOnly.syncConfiguredAdapters({ startLoops: false });
+      await _testOnly.syncConfiguredAdapters({ startLoops: false });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    const matching = warnings.filter((line) => line.includes('invalid-test-main adapter not valid'));
+    assert.equal(matching.length, 1);
   });
 });
 

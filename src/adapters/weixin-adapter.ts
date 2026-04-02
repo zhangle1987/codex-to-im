@@ -164,12 +164,6 @@ export class WeixinAdapter extends BaseChannelAdapter {
   }
 
   validateConfig(): string | null {
-    const linkedAccounts = this.filterConfiguredAccounts(
-      listWeixinAccounts().filter((account) => account.enabled && account.token),
-    );
-    if (linkedAccounts.length === 0) {
-      return 'No linked WeChat account. Run the WeChat QR login helper first.';
-    }
     return null;
   }
 

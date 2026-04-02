@@ -1,7 +1,7 @@
 import './test-setup.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { maskSecrets } from '../logger.js';
+import { formatLogArg, maskSecrets } from '../logger.js';
 
 describe('maskSecrets', () => {
   it('masks token=value patterns', () => {
@@ -58,5 +58,21 @@ describe('maskSecrets', () => {
     const input = 'token="my-secret-token"';
     const result = maskSecrets(input);
     assert.ok(!result.includes('my-secret-token'));
+  });
+});
+
+describe('formatLogArg', () => {
+  it('serializes Error objects with their message', () => {
+    const formatted = formatLogArg(new Error('boom'));
+    assert.match(formatted, /boom/);
+    assert.match(formatted, /Error/);
+  });
+
+  it('falls back to inspect for circular objects', () => {
+    const value: { self?: unknown; ok: boolean } = { ok: true };
+    value.self = value;
+    const formatted = formatLogArg(value);
+    assert.match(formatted, /ok/);
+    assert.match(formatted, /Circular/i);
   });
 });

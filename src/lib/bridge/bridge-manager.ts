@@ -23,6 +23,7 @@ import type { AdapterRuntimeInstance, BaseChannelAdapter } from './channel-adapt
 import type { BridgeMessage, BridgeSession, LLMProvider, PermissionLinkRecord, StreamChatParams } from './host.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import { inspect } from 'node:util';
 // Side-effect import: triggers self-registration of all adapter factories
 import './adapters/index.js';
 import * as router from './channel-router.js';
@@ -43,7 +44,7 @@ import {
   readDesktopSessionMirrorRecordDeltaByFilePath,
   readDesktopSessionMessages,
 } from '../../desktop-sessions.js';
-import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
+import type { DesktopMirrorRecord, DesktopSessionSummary } from '../../desktop-sessions.js';
 import {
   advanceDesktopMirrorCursor,
   filterDuplicateAssistantEvents,
@@ -79,6 +80,9 @@ const MODE_OPTIONS_TEXT = '可选：`code`（直接执行，默认） `plan`（�
 const REASONING_OPTIONS_TEXT = '可选：`1=minimal` `2=low` `3=medium` `4=high` `5=xhigh`';
 const DEFAULT_DESKTOP_THREAD_LIST_LIMIT = 10;
 const MAX_DESKTOP_THREAD_LIST_LIMIT = 200;
+const DANGLING_MIRROR_THREAD_RETRY_LIMIT = 3;
+const MIRROR_FAILURE_SUSPEND_MS = 60_000;
+const MIRROR_FAILURE_SUSPEND_THRESHOLD = 3;
 const MIRROR_POLL_INTERVAL_MS = 2_500;
 const MIRROR_WATCH_DEBOUNCE_MS = 350;
 const MIRROR_EVENT_BATCH_LIMIT = 8;
@@ -90,6 +94,7 @@ const INTERACTIVE_IDLE_REMINDER_MS = 600_000;
 const MIRROR_IDLE_TIMEOUT_MS = 600_000;
 const AVAILABLE_CODEX_MODELS = listSelectableCodexModels();
 const AVAILABLE_CODEX_MODEL_MAP = new Map(AVAILABLE_CODEX_MODELS.map((model) => [model.slug, model]));
+const INVALID_ADAPTER_WARNING_CACHE = new Map<string, string>();
 
 // ── Streaming preview helpers ──────────────────────────────────
 
@@ -205,8 +210,46 @@ function resolveByIndexOrPrefix<T>(
   return { match: null, ambiguous: false };
 }
 
+function describeUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack || `${error.name}: ${error.message}`;
+  }
+  if (error === null) return 'null';
+  if (typeof error === 'undefined') return 'undefined';
+  if (typeof error === 'object') {
+    const ctor = (error as { constructor?: { name?: string } })?.constructor?.name;
+    const rendered = inspect(error, {
+      depth: 4,
+      breakLength: Infinity,
+      compact: true,
+    });
+    return ctor && ctor !== 'Object' ? `${ctor} ${rendered}` : rendered;
+  }
+  return String(error);
+}
+
 function getDisplayedDesktopThreads(limit = DEFAULT_DESKTOP_THREAD_LIST_LIMIT) {
-  return listDesktopSessions(limit);
+  try {
+    return listDesktopSessions(limit);
+  } catch (error) {
+    console.error('[bridge-manager] Failed to list desktop sessions:', error);
+    return null;
+  }
+}
+
+function getDesktopSessionByThreadIdSafe(
+  threadId: string,
+  context: string,
+): DesktopSessionSummary | null {
+  try {
+    return getDesktopSessionByThreadId(threadId);
+  } catch (error) {
+    console.error(
+      `[bridge-manager] Failed to load desktop thread ${threadId} during ${context}:`,
+      error,
+    );
+    return null;
+  }
 }
 
 function parseDesktopThreadListArgs(args: string): { showAll: boolean; limit: number } | null {
@@ -351,7 +394,7 @@ function buildIndexedCommandList(
 }
 
 function buildDesktopThreadsCommandResponse(
-  desktopSessions: ReturnType<typeof getDisplayedDesktopThreads>,
+  desktopSessions: DesktopSessionSummary[],
   markdown: boolean,
   showAll: boolean,
   limit = 10,
@@ -747,7 +790,7 @@ async function summarizeHistory(currentBinding: ReturnType<typeof router.resolve
 
 function getDesktopThreadTitle(threadId: string | undefined | null): string | null {
   if (!threadId) return null;
-  return getDesktopSessionByThreadId(threadId)?.title || null;
+  return getDesktopSessionByThreadIdSafe(threadId, 'status lookup')?.title || null;
 }
 
 function formatCommandMessageId(id: string | undefined | null): string {
@@ -1001,6 +1044,9 @@ interface DesktopMirrorSubscription {
   activeMirrorTurnId: string | null;
   bufferedRecords: DesktopMirrorRecord[];
   pendingTurn: DesktopMirrorTurnState | null;
+  missingThreadPolls: number;
+  consecutiveFailures: number;
+  suspendedUntil: number | null;
 }
 
 interface DesktopMirrorTurnState {
@@ -1045,6 +1091,7 @@ interface InteractiveTaskState {
 interface BridgeManagerState {
   adapters: Map<string, BaseChannelAdapter>;
   adapterMeta: Map<string, AdapterMeta>;
+  invalidAdapters: Map<string, string>;
   running: boolean;
   startedAt: string | null;
   loopAborts: Map<string, AbortController>;
@@ -1078,6 +1125,7 @@ function getState(): BridgeManagerState {
     g[GLOBAL_KEY] = {
       adapters: new Map(),
       adapterMeta: new Map(),
+      invalidAdapters: new Map(),
       running: false,
       startedAt: null,
       loopAborts: new Map(),
@@ -1100,6 +1148,9 @@ function getState(): BridgeManagerState {
   }
   if (!g[GLOBAL_KEY].mirrorSubscriptions) {
     g[GLOBAL_KEY].mirrorSubscriptions = new Map();
+  }
+  if (!g[GLOBAL_KEY].invalidAdapters) {
+    g[GLOBAL_KEY].invalidAdapters = new Map();
   }
   if (!g[GLOBAL_KEY].queuedCounts) {
     g[GLOBAL_KEY].queuedCounts = new Map();
@@ -1558,7 +1609,9 @@ function scheduleMirrorWake(delayMs = MIRROR_WATCH_DEBOUNCE_MS): void {
 
   state.mirrorWakeTimer = setTimeout(() => {
     state.mirrorWakeTimer = null;
-    void reconcileMirrorSubscriptions();
+    void reconcileMirrorSubscriptions().catch((err) => {
+      console.error('[bridge-manager] Mirror wake reconcile failed:', describeUnknownError(err));
+    });
   }, delayMs);
 }
 
@@ -1616,6 +1669,17 @@ function syncMirrorSessionState(sessionId: string): void {
     mirror_status: mirrorStatus,
     mirror_last_event_at: deliveredAt,
   });
+}
+
+function syncMirrorSessionStateSafe(sessionId: string, context: string): void {
+  try {
+    syncMirrorSessionState(sessionId);
+  } catch (error) {
+    console.error(
+      `[bridge-manager] Failed to sync mirror session state for ${sessionId} during ${context}:`,
+      describeUnknownError(error),
+    );
+  }
 }
 
 function getMirrorAssistantRuntimeLabel(): string {
@@ -2094,7 +2158,18 @@ function removeMirrorSubscription(bindingId: string): void {
   stopMirrorStreaming(existing);
   closeMirrorWatcher(existing);
   state.mirrorSubscriptions.delete(bindingId);
-  syncMirrorSessionState(existing.sessionId);
+  syncMirrorSessionStateSafe(existing.sessionId, 'mirror subscription removal');
+}
+
+function clearDanglingMirrorThread(subscription: DesktopMirrorSubscription, reason: string): void {
+  const { store } = getBridgeContext();
+  const session = store.getSession(subscription.sessionId);
+  const currentThreadId = session?.sdk_session_id || subscription.threadId;
+  console.warn(
+    `[bridge-manager] Clearing dangling desktop thread ${currentThreadId} for session ${subscription.sessionId}: ${reason}`,
+  );
+  store.updateSdkSessionId(subscription.sessionId, '');
+  removeMirrorSubscription(subscription.bindingId);
 }
 
 function upsertMirrorSubscription(binding: { id: string; channelType: string; chatId: string; codepilotSessionId: string; sdkSessionId: string }): void {
@@ -2112,7 +2187,7 @@ function upsertMirrorSubscription(binding: { id: string; channelType: string; ch
     return;
   }
 
-  const desktopSession = getDesktopSessionByThreadId(threadId);
+  const desktopSession = getDesktopSessionByThreadIdSafe(threadId, 'mirror subscription sync');
   const filePath = desktopSession?.filePath || null;
   const existing = state.mirrorSubscriptions.get(binding.id);
 
@@ -2139,10 +2214,13 @@ function upsertMirrorSubscription(binding: { id: string; channelType: string; ch
       activeMirrorTurnId: null,
       bufferedRecords: [],
       pendingTurn: null,
+      missingThreadPolls: 0,
+      consecutiveFailures: 0,
+      suspendedUntil: null,
     };
     watchMirrorFile(created, filePath);
     state.mirrorSubscriptions.set(binding.id, created);
-    syncMirrorSessionState(binding.codepilotSessionId);
+    syncMirrorSessionStateSafe(binding.codepilotSessionId, 'mirror subscription create');
     return;
   }
 
@@ -2161,18 +2239,23 @@ function upsertMirrorSubscription(binding: { id: string; channelType: string; ch
     existing.lastDeliveredAt = session.mirror_last_event_at || null;
     existing.dirty = true;
     existing.pendingTurn = null;
+    existing.missingThreadPolls = 0;
+    existing.consecutiveFailures = 0;
+    existing.suspendedUntil = null;
     resetMirrorReadState(existing);
   } else if (filePathChanged) {
     stopMirrorStreaming(existing);
     existing.dirty = true;
     existing.pendingTurn = null;
+    existing.consecutiveFailures = 0;
+    existing.suspendedUntil = null;
     resetMirrorReadState(existing);
   }
   watchMirrorFile(existing, filePath);
   if (previousSessionId !== binding.codepilotSessionId) {
-    syncMirrorSessionState(previousSessionId);
+    syncMirrorSessionStateSafe(previousSessionId, 'mirror subscription rebind previous session');
   }
-  syncMirrorSessionState(binding.codepilotSessionId);
+  syncMirrorSessionStateSafe(binding.codepilotSessionId, 'mirror subscription upsert');
 }
 
 function syncMirrorSubscriptionSet(): void {
@@ -2188,7 +2271,14 @@ function syncMirrorSubscriptionSet(): void {
 
   for (const binding of desiredBindings) {
     desiredIds.add(binding.id);
-    upsertMirrorSubscription(binding);
+    try {
+      upsertMirrorSubscription(binding);
+    } catch (error) {
+      console.error(
+        `[bridge-manager] Failed to sync mirror subscription for binding ${binding.id}:`,
+        error,
+      );
+    }
   }
 
   for (const bindingId of Array.from(state.mirrorSubscriptions.keys())) {
@@ -2206,7 +2296,30 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
     return;
   }
 
-  const desktopSession = getDesktopSessionByThreadId(subscription.threadId);
+  if (subscription.suspendedUntil && Date.now() < subscription.suspendedUntil) {
+    syncMirrorSessionStateSafe(subscription.sessionId, 'mirror suspension');
+    return;
+  }
+  if (subscription.suspendedUntil) {
+    subscription.suspendedUntil = null;
+  }
+
+  const desktopSession = getDesktopSessionByThreadIdSafe(
+    subscription.threadId,
+    'mirror reconcile',
+  );
+  if (!desktopSession) {
+    subscription.missingThreadPolls += 1;
+    if (subscription.missingThreadPolls >= DANGLING_MIRROR_THREAD_RETRY_LIMIT) {
+      clearDanglingMirrorThread(
+        subscription,
+        'desktop thread no longer exists locally',
+      );
+      return;
+    }
+  } else {
+    subscription.missingThreadPolls = 0;
+  }
   const filePathChanged = subscription.filePath !== (desktopSession?.filePath || null);
   subscription.filePath = desktopSession?.filePath || null;
   subscription.status = subscription.filePath ? 'watching' : 'stale';
@@ -2218,7 +2331,7 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
   subscription.lastReconciledAt = nowIso();
 
   if (!subscription.filePath) {
-    syncMirrorSessionState(subscription.sessionId);
+    syncMirrorSessionStateSafe(subscription.sessionId, 'mirror reconcile without file');
     return;
   }
 
@@ -2227,7 +2340,7 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
     subscription.status = 'stale';
     subscription.dirty = true;
     resetMirrorReadState(subscription);
-    syncMirrorSessionState(subscription.sessionId);
+    syncMirrorSessionStateSafe(subscription.sessionId, 'mirror reconcile missing snapshot');
     return;
   }
 
@@ -2236,7 +2349,7 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
     && subscription.fileSize === snapshot.size
     && subscription.fileMtimeMs === snapshot.mtimeMs;
   if (unchanged && !hasPendingMirrorWork(subscription)) {
-    syncMirrorSessionState(subscription.sessionId);
+    syncMirrorSessionStateSafe(subscription.sessionId, 'mirror reconcile unchanged snapshot');
     return;
   }
 
@@ -2307,7 +2420,7 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
         console.warn('[bridge-manager] Mirror delivery failed:', error instanceof Error ? error.message : error);
       }
     }
-    syncMirrorSessionState(subscription.sessionId);
+    syncMirrorSessionStateSafe(subscription.sessionId, 'mirror reconcile active task');
     return;
   }
 
@@ -2315,7 +2428,7 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
   finalizedTurns.push(...consumeBufferedMirrorTurns(subscription));
 
   if (finalizedTurns.length === 0) {
-    syncMirrorSessionState(subscription.sessionId);
+    syncMirrorSessionStateSafe(subscription.sessionId, 'mirror reconcile no finalized turns');
     return;
   }
 
@@ -2326,31 +2439,69 @@ async function reconcileMirrorSubscription(subscription: DesktopMirrorSubscripti
     console.warn('[bridge-manager] Mirror delivery failed:', error instanceof Error ? error.message : error);
   }
 
-  syncMirrorSessionState(subscription.sessionId);
+  syncMirrorSessionStateSafe(subscription.sessionId, 'mirror reconcile delivered turns');
 }
 
 async function reconcileMirrorSubscriptions(): Promise<void> {
   const state = getState();
   if (!state.running || state.mirrorSyncInFlight) return;
   state.mirrorSyncInFlight = true;
+  let stage = 'sync-start';
 
   try {
-    syncMirrorSubscriptionSet();
-    for (const subscription of state.mirrorSubscriptions.values()) {
+    try {
+      stage = 'sync-subscription-set';
+      syncMirrorSubscriptionSet();
+    } catch (error) {
+      console.error('[bridge-manager] Mirror subscription set reconcile failed:', error);
+      return;
+    }
+
+    stage = 'snapshot-subscriptions';
+    const subscriptions = Array.from(state.mirrorSubscriptions.values());
+    for (const subscription of subscriptions) {
+      stage = `subscription:${subscription.bindingId}`;
       try {
         await reconcileMirrorSubscription(subscription);
+        subscription.consecutiveFailures = 0;
+        subscription.suspendedUntil = null;
       } catch (error) {
-        stopMirrorStreaming(subscription, 'interrupted');
-        resetMirrorReadState(subscription);
-        subscription.status = 'stale';
-        subscription.dirty = false;
-        console.error(
-          `[bridge-manager] Mirror reconcile failed for thread ${subscription.threadId}:`,
-          error instanceof Error ? error.stack || error.message : error,
-        );
-        syncMirrorSessionState(subscription.sessionId);
+        try {
+          stopMirrorStreaming(subscription, 'interrupted');
+          subscription.pendingTurn = null;
+          subscription.bufferedRecords = [];
+          subscription.status = 'stale';
+          subscription.dirty = false;
+          subscription.consecutiveFailures += 1;
+          if (subscription.consecutiveFailures >= MIRROR_FAILURE_SUSPEND_THRESHOLD) {
+            subscription.suspendedUntil = Date.now() + MIRROR_FAILURE_SUSPEND_MS;
+            console.warn(
+              `[bridge-manager] Mirror subscription for thread ${subscription.threadId} is suspended for ${Math.round(MIRROR_FAILURE_SUSPEND_MS / 1000)}s after ${subscription.consecutiveFailures} consecutive failures`,
+            );
+          }
+          console.error(
+            `[bridge-manager] Mirror reconcile failed for thread ${subscription.threadId}:`,
+            describeUnknownError(error),
+          );
+          syncMirrorSessionStateSafe(subscription.sessionId, 'mirror reconcile failure');
+        } catch (recoveryError) {
+          console.error(
+            `[bridge-manager] Mirror reconcile recovery failed for thread ${subscription.threadId}:`,
+            describeUnknownError(recoveryError),
+          );
+          console.error(
+            `[bridge-manager] Original mirror reconcile error for thread ${subscription.threadId}:`,
+            describeUnknownError(error),
+          );
+        }
       }
     }
+    stage = 'sync-complete';
+  } catch (error) {
+    console.error(
+      `[bridge-manager] Mirror reconcile failed during ${stage}:`,
+      describeUnknownError(error),
+    );
   } finally {
     state.mirrorSyncInFlight = false;
   }
@@ -2458,6 +2609,8 @@ function listEnabledAdapterInstances(): AdapterRuntimeInstance[] {
 async function stopAdapterInstance(channelType: string): Promise<void> {
   const state = getState();
   const adapter = state.adapters.get(channelType);
+  state.invalidAdapters.delete(channelType);
+  INVALID_ADAPTER_WARNING_CACHE.delete(channelType);
   if (!adapter) return;
 
   state.loopAborts.get(channelType)?.abort();
@@ -2488,6 +2641,14 @@ async function syncConfiguredAdapters(options: { startLoops: boolean }): Promise
     await stopAdapterInstance(existingKey);
     changed = true;
   }
+  for (const invalidKey of Array.from(state.invalidAdapters.keys())) {
+    if (desiredKeys.has(invalidKey)) continue;
+    state.invalidAdapters.delete(invalidKey);
+  }
+  for (const invalidKey of Array.from(INVALID_ADAPTER_WARNING_CACHE.keys())) {
+    if (desiredKeys.has(invalidKey)) continue;
+    INVALID_ADAPTER_WARNING_CACHE.delete(invalidKey);
+  }
 
   for (const instance of desiredInstances) {
     const existing = state.adapters.get(instance.id);
@@ -2504,9 +2665,16 @@ async function syncConfiguredAdapters(options: { startLoops: boolean }): Promise
 
     const configError = adapter.validateConfig();
     if (configError) {
-      console.warn(`[bridge-manager] ${instance.id} adapter not valid:`, configError);
+      const invalidSignature = `${desiredFingerprint}:${configError}`;
+      if (INVALID_ADAPTER_WARNING_CACHE.get(instance.id) !== invalidSignature) {
+        console.warn(`[bridge-manager] ${instance.id} adapter not valid:`, configError);
+        INVALID_ADAPTER_WARNING_CACHE.set(instance.id, invalidSignature);
+        state.invalidAdapters.set(instance.id, invalidSignature);
+      }
       continue;
     }
+    state.invalidAdapters.delete(instance.id);
+    INVALID_ADAPTER_WARNING_CACHE.delete(instance.id);
 
     try {
       state.adapters.set(instance.id, adapter);
@@ -2587,11 +2755,11 @@ export async function start(): Promise<void> {
 
   state.mirrorPollTimer = setInterval(() => {
     void reconcileMirrorSubscriptions().catch((err) => {
-      console.error('[bridge-manager] Mirror reconcile failed:', err);
+      console.error('[bridge-manager] Mirror reconcile failed:', describeUnknownError(err));
     });
   }, MIRROR_POLL_INTERVAL_MS);
   void reconcileMirrorSubscriptions().catch((err) => {
-    console.error('[bridge-manager] Initial mirror reconcile failed:', err);
+    console.error('[bridge-manager] Initial mirror reconcile failed:', describeUnknownError(err));
   });
 
   console.log(`[bridge-manager] Bridge started with ${startedCount} adapter(s)`);
@@ -2635,6 +2803,8 @@ export async function stop(): Promise<void> {
   state.mirrorSuppressUntil.clear();
   state.mirrorIgnoredTurnIds.clear();
   state.queuedCounts.clear();
+  state.invalidAdapters.clear();
+  INVALID_ADAPTER_WARNING_CACHE.clear();
   for (const sessionId of activeSessionIds) {
     syncSessionRuntimeState(sessionId);
   }
@@ -3313,6 +3483,10 @@ async function handleCommand(
       }
       if (args === 'all') {
         const desktopSessions = getDisplayedDesktopThreads(MAX_DESKTOP_THREAD_LIST_LIMIT);
+        if (!desktopSessions) {
+          response = '读取桌面会话列表失败，请稍后重试。';
+          break;
+        }
         if (desktopSessions.length === 0) {
           response = '没有找到桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。';
           break;
@@ -3327,6 +3501,10 @@ async function handleCommand(
       // Numeric /t picks should match the broader list surfaced by `/t all`,
       // otherwise users can be shown a 10th item and still fail to select it.
       const displayedThreads = getDisplayedDesktopThreads(MAX_DESKTOP_THREAD_LIST_LIMIT);
+      if (!displayedThreads) {
+        response = '读取桌面会话列表失败，请稍后重试。';
+        break;
+      }
       const threadPick = resolveByIndexOrPrefix(args, displayedThreads, (session) => session.threadId);
       if (threadPick.ambiguous) {
         response = '匹配到多个桌面会话，请先发送 `/t` 查看列表，再用 `/t 1` 这种序号切换。';
@@ -3334,7 +3512,7 @@ async function handleCommand(
       }
       if (!threadPick.match) {
         if (validateSessionId(args)) {
-          const desktop = getDesktopSessionByThreadId(args);
+          const desktop = getDesktopSessionByThreadIdSafe(args, 'thread switch');
           let binding: ReturnType<typeof router.bindToSdkSession>;
           try {
             binding = router.bindToSdkSession(msg.address, args, desktop ? {
@@ -3396,6 +3574,10 @@ async function handleCommand(
       }
       const { showAll, limit } = listArgs;
       const desktopSessions = getDisplayedDesktopThreads(limit);
+      if (!desktopSessions) {
+        response = '读取桌面会话列表失败，请稍后重试。';
+        break;
+      }
       if (desktopSessions.length === 0) {
         response = showAll
           ? '没有找到桌面会话。先在 Codex Desktop App 中打开一个会话，再回来试一次。'
@@ -3828,6 +4010,8 @@ function resetStateForTests(): void {
   state.startedAt = null;
   state.adapters.clear();
   state.adapterMeta.clear();
+  state.invalidAdapters.clear();
+  INVALID_ADAPTER_WARNING_CACHE.clear();
   state.loopAborts.clear();
   state.activeTasks.clear();
   state.mirrorSubscriptions.clear();
@@ -3856,6 +4040,8 @@ function resetStateForTests(): void {
 /** @internal */
 export const _testOnly = {
   handleMessage,
+  syncConfiguredAdapters,
+  reconcileMirrorSubscriptions,
   resolveNewWorkingDirectory,
   resolveNewSessionWorkingDirectory,
   resolveCommandAlias,

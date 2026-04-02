@@ -78,4 +78,18 @@ describe('weixin-adapter voice handling', () => {
       'WeChat did not provide speech-to-text for this voice message. Please enable WeChat voice transcription and send it again.',
     );
   });
+
+  it('treats missing linked accounts as an idle runtime state instead of invalid config', () => {
+    const adapter = new WeixinAdapter({
+      id: 'weixin--test',
+      provider: 'weixin',
+      alias: 'Test Weixin',
+      enabled: true,
+      config: {
+        accountId: 'missing-account',
+      },
+    } as any);
+
+    assert.equal(adapter.validateConfig(), null);
+  });
 });

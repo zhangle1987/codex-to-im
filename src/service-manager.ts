@@ -106,6 +106,42 @@ function isProcessAlive(pid?: number): boolean {
   }
 }
 
+function collectTrackedBridgePids(
+  bridgePid: number | undefined,
+  statusPid: number | undefined,
+): number[] {
+  const unique = new Set<number>();
+  for (const pid of [bridgePid, statusPid]) {
+    if (Number.isFinite(pid) && (pid as number) > 0) {
+      unique.add(pid as number);
+    }
+  }
+  return [...unique];
+}
+
+function resolveTrackedBridgePid(
+  bridgePid: number | undefined,
+  statusPid: number | undefined,
+  isAlive: (pid?: number) => boolean = isProcessAlive,
+): number | undefined {
+  if (isAlive(bridgePid)) return bridgePid;
+  if (isAlive(statusPid)) return statusPid;
+  return bridgePid ?? statusPid;
+}
+
+function getTrackedBridgePids(status?: BridgeStatus): number[] {
+  const resolvedStatus = status ?? readJsonFile<BridgeStatus>(bridgeStatusFile, { running: false });
+  return collectTrackedBridgePids(readPid(bridgePidFile), resolvedStatus.pid);
+}
+
+function clearBridgePidFile(): void {
+  try {
+    fs.unlinkSync(bridgePidFile);
+  } catch {
+    // ignore missing/stale pid file cleanup errors
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -304,7 +340,7 @@ export function getCurrentUiServerUrl(): string | undefined {
 
 export function getBridgeStatus(): BridgeStatus {
   const status = readJsonFile<BridgeStatus>(bridgeStatusFile, { running: false });
-  const pid = readPid(bridgePidFile) ?? status.pid;
+  const pid = resolveTrackedBridgePid(readPid(bridgePidFile), status.pid);
   if (!isProcessAlive(pid)) {
     return {
       ...status,
@@ -375,7 +411,12 @@ async function waitForUiServer(timeoutMs = 15_000): Promise<UiServerStatus> {
 export async function startBridge(): Promise<BridgeStatus> {
   ensureDirs();
   const current = getBridgeStatus();
-  if (current.running) return current;
+  const extraAlivePids = getTrackedBridgePids(current)
+    .filter((pid) => pid !== current.pid && isProcessAlive(pid));
+  if (current.running && extraAlivePids.length === 0) return current;
+  if (current.running && extraAlivePids.length > 0) {
+    await stopBridge();
+  }
 
   const daemonEntry = path.join(packageRoot, 'dist', 'daemon.mjs');
   if (!fs.existsSync(daemonEntry)) {
@@ -402,37 +443,49 @@ export async function startBridge(): Promise<BridgeStatus> {
 }
 
 export async function stopBridge(): Promise<BridgeStatus> {
-  const status = getBridgeStatus();
-  if (!status.pid || !isProcessAlive(status.pid)) {
-    return { ...status, running: false };
+  const status = readJsonFile<BridgeStatus>(bridgeStatusFile, { running: false });
+  const pids = getTrackedBridgePids(status).filter((pid) => isProcessAlive(pid));
+  if (pids.length === 0) {
+    clearBridgePidFile();
+    return { ...getBridgeStatus(), running: false };
   }
 
-  if (process.platform === 'win32') {
-    await new Promise<void>((resolve) => {
-      const killer = spawn('cmd', ['/c', 'taskkill', '/PID', String(status.pid), '/T', '/F'], {
-        stdio: 'ignore',
-        ...WINDOWS_HIDE,
+  for (const pid of pids) {
+    if (process.platform === 'win32') {
+      await new Promise<void>((resolve) => {
+        const killer = spawn('cmd', ['/c', 'taskkill', '/PID', String(pid), '/T', '/F'], {
+          stdio: 'ignore',
+          ...WINDOWS_HIDE,
+        });
+        killer.on('exit', () => resolve());
+        killer.on('error', () => resolve());
       });
-      killer.on('exit', () => resolve());
-      killer.on('error', () => resolve());
-    });
-  } else {
-    try {
-      process.kill(status.pid, 'SIGTERM');
-    } catch {
-      // ignore
+    } else {
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {
+        // ignore
+      }
     }
   }
 
   const startedAt = Date.now();
   while (Date.now() - startedAt < 10_000) {
-    const next = getBridgeStatus();
-    if (!next.running) return next;
+    if (pids.every((pid) => !isProcessAlive(pid))) {
+      clearBridgePidFile();
+      return getBridgeStatus();
+    }
     await sleep(300);
   }
 
+  clearBridgePidFile();
   return getBridgeStatus();
 }
+
+export const _testOnly = {
+  collectTrackedBridgePids,
+  resolveTrackedBridgePid,
+};
 
 export async function restartBridge(): Promise<BridgeStatus> {
   await stopBridge();

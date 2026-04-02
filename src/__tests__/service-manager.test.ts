@@ -2,7 +2,7 @@ import './test-setup.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildDeferredGlobalNpmUninstallLaunch } from '../service-manager.js';
+import { _testOnly, buildDeferredGlobalNpmUninstallLaunch } from '../service-manager.js';
 
 describe('buildDeferredGlobalNpmUninstallLaunch', () => {
   it('uses npm.cmd on Windows launchers', () => {
@@ -39,5 +39,22 @@ describe('buildDeferredGlobalNpmUninstallLaunch', () => {
     assert.match(launch.args[1], /"\/tmp"/);
     assert.match(launch.args[1], /"\/tmp\/codex-to-im-uninstall\.log"/);
     assert.match(launch.args[1], /const delayMs = 2500;/);
+  });
+});
+
+describe('service-manager bridge pid resolution', () => {
+  it('falls back to a live status pid when bridge.pid is stale', () => {
+    const pid = _testOnly.resolveTrackedBridgePid(24020, 10516, (candidate) => candidate === 10516);
+    assert.equal(pid, 10516);
+  });
+
+  it('prefers a live bridge.pid over a live status pid', () => {
+    const pid = _testOnly.resolveTrackedBridgePid(11420, 10516, () => true);
+    assert.equal(pid, 11420);
+  });
+
+  it('deduplicates tracked bridge pids', () => {
+    assert.deepEqual(_testOnly.collectTrackedBridgePids(11420, 11420), [11420]);
+    assert.deepEqual(_testOnly.collectTrackedBridgePids(11420, 10516), [11420, 10516]);
   });
 });

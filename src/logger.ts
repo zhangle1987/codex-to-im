@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { inspect } from 'node:util';
 import { CTI_HOME } from './config.js';
 
 const MASK_PATTERNS: RegExp[] = [
@@ -26,6 +27,24 @@ const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_ROTATED = 3;
 
 let logStream: fs.WriteStream | null = null;
+
+export function formatLogArg(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value instanceof Error) {
+    return value.stack || `${value.name}: ${value.message}`;
+  }
+  if (value === null) return 'null';
+  if (typeof value === 'undefined') return 'undefined';
+  if (typeof value === 'object') {
+    return inspect(value, {
+      depth: 4,
+      breakLength: Infinity,
+      compact: true,
+    });
+  }
+
+  return String(value);
+}
 
 function openLogStream(): fs.WriteStream {
   return fs.createWriteStream(LOG_PATH, { flags: 'a' });
@@ -65,7 +84,7 @@ export function setupLogger(): void {
 
   const write = (level: string, args: unknown[]) => {
     const timestamp = new Date().toISOString();
-    const message = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+    const message = args.map((a) => formatLogArg(a)).join(' ');
     const formatted = `[${timestamp}] [${level}] ${message}`;
     const masked = maskSecrets(formatted);
 
