@@ -48,7 +48,7 @@ describe('weixin-store', () => {
     assert.equal(updated?.enabled, false);
   });
 
-  it('replaces the previous account when a different account logs in later', () => {
+  it('preserves multiple linked accounts when different accounts log in later', () => {
     upsertWeixinAccount({
       accountId: 'wx-bot-old',
       token: 'token-old',
@@ -61,10 +61,11 @@ describe('weixin-store', () => {
     });
 
     const accounts = listWeixinAccounts();
-    assert.equal(accounts.length, 1);
+    assert.equal(accounts.length, 2);
     assert.equal(accounts[0]?.accountId, 'wx-bot-new');
-    assert.equal(getWeixinAccount('wx-bot-old'), undefined);
-    assert.equal(getWeixinContextToken('wx-bot-old', 'peer-a'), undefined);
+    assert.equal(accounts[1]?.accountId, 'wx-bot-old');
+    assert.equal(getWeixinAccount('wx-bot-old')?.token, 'token-old');
+    assert.equal(getWeixinContextToken('wx-bot-old', 'peer-a'), 'ctx-a');
   });
 
   it('stores per-peer context tokens and clears them on delete', () => {
@@ -95,7 +96,7 @@ describe('weixin-store', () => {
     assert.equal(getWeixinAccount('wx-bot-3')?.enabled, false);
   });
 
-  it('prefers the most recent account without mutating legacy storage on read', () => {
+  it('keeps multiple legacy accounts without mutating storage on read', () => {
     fs.writeFileSync(
       ACCOUNTS_PATH,
       JSON.stringify([
@@ -139,8 +140,9 @@ describe('weixin-store', () => {
     const storedAccounts = JSON.parse(fs.readFileSync(ACCOUNTS_PATH, 'utf-8'));
     const storedTokens = JSON.parse(fs.readFileSync(TOKENS_PATH, 'utf-8'));
 
-    assert.equal(accounts.length, 1);
+    assert.equal(accounts.length, 2);
     assert.equal(accounts[0]?.accountId, 'wx-bot-new');
+    assert.equal(accounts[1]?.accountId, 'wx-bot-old');
     assert.equal(storedAccounts.length, 2);
     assert.equal(storedAccounts[0]?.accountId, 'wx-bot-old');
     assert.equal(storedAccounts[1]?.accountId, 'wx-bot-new');

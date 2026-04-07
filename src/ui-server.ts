@@ -42,7 +42,12 @@ import {
   writeUiServerStatus,
 } from './service-manager.js';
 import { JsonFileStore } from './store.js';
-import { runWeixinLogin } from './weixin-login.js';
+import {
+  buildWeixinLoginPopupHtml,
+  getWeixinLoginWebSession,
+  runWeixinLogin,
+  startWeixinLoginWebSession,
+} from './weixin-login.js';
 import { listWeixinAccounts } from './weixin-store.js';
 import { listSelectableCodexModels, readConfiguredCodexModel } from './codex-models.js';
 
@@ -132,6 +137,12 @@ function asString(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function getPathSuffix(pathname: string, prefix: string): string | undefined {
+  if (!pathname.startsWith(prefix)) return undefined;
+  const suffix = pathname.slice(prefix.length);
+  return suffix ? decodeURIComponent(suffix) : undefined;
+}
+
 function parseCsv(value: unknown): string[] | undefined {
   const text = asString(value);
   if (!text) return undefined;
@@ -185,6 +196,29 @@ function buildChannelId(provider: ChannelProvider, alias: string, takenIds: Set<
 function parseChannelProvider(value: unknown): ChannelProvider | undefined {
   if (value === 'feishu' || value === 'weixin') return value;
   return undefined;
+}
+
+function getWeixinAccountConflict(
+  config: Config,
+  accountId: string,
+  currentChannelId?: string,
+): ChannelInstance | undefined {
+  return (config.channels || []).find((channel) => (
+    channel.provider === 'weixin'
+    && channel.id !== currentChannelId
+    && (channel.config as WeixinChannelConfig).accountId === accountId
+  ));
+}
+
+function assertWeixinAccountAvailable(
+  config: Config,
+  accountId: string | undefined,
+  currentChannelId?: string,
+): void {
+  if (!accountId) return;
+  const conflict = getWeixinAccountConflict(config, accountId, currentChannelId);
+  if (!conflict) return;
+  throw new Error(`微信账号 ${accountId} 已被通道 ${getChannelLabel(conflict)} 使用，请先解绑或改用其他账号。`);
 }
 
 function createUiStore(): JsonFileStore {
@@ -391,8 +425,10 @@ function mergeChannelInstance(
       feedbackMarkdownEnabled: payload.feedbackMarkdownEnabled !== false,
     };
   } else {
+    const accountId = asString(payload.accountId);
+    assertWeixinAccountAvailable(current, accountId, existing?.id);
     nextConfig = {
-      accountId: asString(payload.accountId),
+      accountId,
       baseUrl: asString(payload.baseUrl),
       cdnBaseUrl: asString(payload.cdnBaseUrl),
       mediaEnabled: payload.mediaEnabled === true,
@@ -1532,6 +1568,87 @@ function renderHtml(): string {
         overflow: hidden;
       }
 
+      .channel-workspace .panel-header {
+        margin-bottom: 20px;
+        padding-bottom: 18px;
+        border-bottom: 1px solid var(--border);
+        gap: 18px;
+        align-items: stretch;
+      }
+
+      .channel-header-copy {
+        max-width: 620px;
+      }
+
+      .channel-header-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, max-content));
+        align-items: stretch;
+        justify-content: flex-end;
+        gap: 12px;
+      }
+
+      .channel-action-group {
+        min-width: 220px;
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: linear-gradient(180deg, #ffffff 0%, var(--surface-soft) 100%);
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+        display: grid;
+        gap: 8px;
+      }
+
+      .channel-action-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+
+      .channel-action-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .channel-action-hint {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .channel-action-row select {
+        min-width: 110px;
+        height: 40px;
+        padding: 0 12px;
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        background: #ffffff;
+        color: var(--text);
+      }
+
+      .channel-create-button,
+      .channel-refresh-button {
+        min-height: 40px;
+        font-weight: 600;
+        white-space: nowrap;
+        margin-top: 0;
+      }
+
+      .channel-create-button {
+        min-width: 128px;
+      }
+
+      .channel-refresh-button {
+        width: auto;
+        padding-inline: 16px;
+        background: var(--surface);
+      }
+
+      .channel-refresh-button:hover {
+        background: #f8fafc;
+      }
+
       .channel-layout {
         display: grid;
         grid-template-columns: 280px minmax(0, 1fr);
@@ -1945,6 +2062,11 @@ function renderHtml(): string {
         .main { padding: 20px 20px 28px; }
         .channel-layout { grid-template-columns: 1fr; }
         .channel-sidebar { border-right: 0; padding-right: 0; }
+        .channel-header-actions {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          justify-content: stretch;
+        }
+        .channel-action-group { min-width: 0; }
         .channel-editor-summary { grid-template-columns: 1fr; }
         .field-row,
         .field-row.triple,
@@ -1962,6 +2084,13 @@ function renderHtml(): string {
         .project-group-head,
         .binding-head,
         .session-section-head { flex-direction: column; align-items: stretch; }
+        .channel-header-actions,
+        .channel-action-row { width: 100%; }
+        .channel-action-group,
+        .channel-refresh-button,
+        .channel-create-button { width: 100%; }
+        .channel-action-row { display: grid; grid-template-columns: 1fr; }
+        .channel-action-row select { width: 100%; }
         .session-head { grid-template-columns: 1fr; }
         .session-simple-item { grid-template-columns: 1fr; }
         .session-actions { justify-content: flex-start; }
@@ -2301,24 +2430,33 @@ function renderHtml(): string {
             </div>
           </div>
 
-          <section class="panel channel-workspace">
-            <div class="panel-header">
-              <div>
-                <h2>通道实例</h2>
-                <p>这里管理多个飞书或微信机器人实例。实例只是不同聊天入口，不会改变 Codex 的会话语义。</p>
-              </div>
-              <div class="toolbar">
-                <label class="inline-select">
-                  新通道
+        <section class="panel channel-workspace">
+          <div class="panel-header">
+            <div class="channel-header-copy">
+              <h2>通道实例</h2>
+              <p>这里管理多个飞书或微信机器人实例。实例只是不同聊天入口，不会改变 Codex 的会话语义。</p>
+            </div>
+            <div class="channel-header-actions">
+              <div class="channel-action-group">
+                <div class="channel-action-label">新通道</div>
+                <div class="channel-action-row">
                   <select id="newChannelProvider">
                     <option value="feishu">飞书</option>
                     <option value="weixin">微信</option>
                   </select>
-                </label>
-                <button id="createChannelBtn">新增通道</button>
-                <button id="refreshChannelsBtn">刷新状态</button>
+                  <button class="primary channel-create-button" id="createChannelBtn">新增通道</button>
+                </div>
+                <div class="channel-action-hint">先选择通道类型，再创建一个新的机器人实例。</div>
+              </div>
+              <div class="channel-action-group">
+                <div class="channel-action-label">状态同步</div>
+                <div class="channel-action-row">
+                  <button class="channel-refresh-button" id="refreshChannelsBtn">刷新状态</button>
+                </div>
+                <div class="channel-action-hint">手动拉取最新通道状态和当前绑定信息。</div>
               </div>
             </div>
+          </div>
 
             <div class="channel-layout">
               <aside class="channel-sidebar">
@@ -2368,6 +2506,7 @@ function renderHtml(): string {
         activePage: 'overview',
         activeChannelId: '',
         channelDraft: null,
+        weixinLoginPollers: {},
       };
 
       function escapeHtml(value) {
@@ -3504,7 +3643,63 @@ function renderHtml(): string {
         showMessage('channelMessage', result.ok ? 'success' : 'error', result.message);
       }
 
+      function buildWeixinLoginPopupUrl(sessionId) {
+        return '/weixin-login/' + encodeURIComponent(sessionId);
+      }
+
+      function stopWeixinLoginWatcher(sessionId) {
+        const timer = state.weixinLoginPollers[sessionId];
+        if (!timer) return;
+        window.clearInterval(timer);
+        delete state.weixinLoginPollers[sessionId];
+      }
+
+      async function watchWeixinLoginSession(sessionId) {
+        stopWeixinLoginWatcher(sessionId);
+
+        const tick = async () => {
+          try {
+            const result = await api('/api/channels/weixin-login/' + encodeURIComponent(sessionId));
+            const session = result.session || null;
+            if (!session) {
+              stopWeixinLoginWatcher(sessionId);
+              showMessage('channelMessage', 'error', '微信扫码会话不存在或已过期，请重新发起扫码。');
+              return;
+            }
+
+            if (session.status === 'confirmed') {
+              stopWeixinLoginWatcher(sessionId);
+              if (result.config) {
+                fillForm(result.config);
+              } else {
+                await loadStatus();
+              }
+              showMessage('channelMessage', 'success', session.message || ('微信扫码成功，账号 ' + (session.accountId || '') + ' 已保存。'));
+              return;
+            }
+
+            if (session.status === 'failed') {
+              stopWeixinLoginWatcher(sessionId);
+              showMessage('channelMessage', 'error', session.message || '微信扫码失败，请重新发起扫码。');
+            }
+          } catch (error) {
+            stopWeixinLoginWatcher(sessionId);
+            showMessage('channelMessage', 'error', error.message);
+          }
+        };
+
+        await tick();
+        if (!state.weixinLoginPollers[sessionId]) {
+          state.weixinLoginPollers[sessionId] = window.setInterval(tick, 2000);
+        }
+      }
+
       async function loginWeixinForChannel(channel) {
+        let popup = null;
+        try {
+          popup = window.open('about:blank', '_blank', 'popup=yes,width=520,height=760');
+        } catch {}
+
         if (String(channel.id || '').startsWith('__draft__:')) {
           const saved = await saveChannel(channel);
           channel = getChannelById(saved.channel.id);
@@ -3512,13 +3707,25 @@ function renderHtml(): string {
           await saveChannel(channel);
           channel = getChannelById(channel.id);
         }
-        const result = await api('/api/channels/weixin-login', {
+
+        const result = await api('/api/channels/weixin-login/start', {
           method: 'POST',
           body: JSON.stringify({ channelId: channel.id }),
         });
-        fillForm(result.config || state.config);
-        await loadStatus();
-        showMessage('channelMessage', result.ok ? 'success' : 'error', result.message);
+
+        const popupUrl = result.popupUrl || buildWeixinLoginPopupUrl(result.sessionId);
+        if (popup && !popup.closed) {
+          popup.location.replace(popupUrl);
+        } else {
+          const fallback = window.open(popupUrl, '_blank', 'popup=yes,width=520,height=760');
+          if (!fallback) {
+            showMessage('channelMessage', 'error', '浏览器阻止了扫码弹窗，请允许当前站点打开弹窗后重试。');
+            return;
+          }
+        }
+
+        showMessage('channelMessage', 'success', result.message || '微信扫码窗口已打开，请在弹窗中完成扫码。');
+        void watchWeixinLoginSession(result.sessionId);
       }
 
       async function handleChannelEditorAction(event) {
@@ -3828,6 +4035,24 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    const weixinLoginPageSessionId = request.method === 'GET'
+      ? getPathSuffix(url.pathname, '/weixin-login/')
+      : undefined;
+    if (request.method === 'GET' && weixinLoginPageSessionId) {
+      if (!localRequest) {
+        if (config.uiAllowLan !== true) {
+          html(response, renderAccessDeniedHtml());
+          return;
+        }
+        if (!isRemoteAuthenticated(request, config)) {
+          html(response, renderLoginHtml());
+          return;
+        }
+      }
+      html(response, buildWeixinLoginPopupHtml(weixinLoginPageSessionId));
+      return;
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/auth/login') {
       if (config.uiAllowLan !== true) {
         json(response, 403, { error: '当前未开启局域网访问。' });
@@ -4031,6 +4256,72 @@ const server = http.createServer(async (request, response) => {
         message: `微信扫码成功，账号 ${result.accountId} 已保存。`,
         htmlPath: result.htmlPath,
         config: configToPayload(loadConfig()),
+      });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/channels/weixin-login/start') {
+      const payload = await readJsonBody<Record<string, unknown>>(request);
+      const channelId = asString(payload.channelId);
+      if (!channelId) {
+        json(response, 400, { error: 'channelId 不能为空。' });
+        return;
+      }
+
+      const current = loadConfig();
+      const channel = findChannelInstance(channelId, current);
+      if (!channel || channel.provider !== 'weixin') {
+        json(response, 404, { error: '指定的微信通道不存在。' });
+        return;
+      }
+
+      const loginConfig = channel.config as WeixinChannelConfig;
+      const session = await startWeixinLoginWebSession({
+        channelId: channel.id,
+        config: loginConfig,
+        onConfirmed: async (accountId) => {
+          const latest = loadConfig();
+          const latestChannel = findChannelInstance(channel.id, latest);
+          if (!latestChannel || latestChannel.provider !== 'weixin') return;
+
+          const merged = mergeChannelInstance({
+            id: latestChannel.id,
+            provider: latestChannel.provider,
+            alias: latestChannel.alias,
+            enabled: latestChannel.enabled,
+            accountId,
+            baseUrl: (latestChannel.config as WeixinChannelConfig).baseUrl,
+            cdnBaseUrl: (latestChannel.config as WeixinChannelConfig).cdnBaseUrl,
+            mediaEnabled: (latestChannel.config as WeixinChannelConfig).mediaEnabled === true,
+            feedbackMarkdownEnabled: (latestChannel.config as WeixinChannelConfig).feedbackMarkdownEnabled === true,
+          }, latest);
+          saveConfig(merged.config);
+        },
+      });
+
+      json(response, 200, {
+        ok: true,
+        sessionId: session.id,
+        popupUrl: `/weixin-login/${encodeURIComponent(session.id)}`,
+        message: '微信扫码窗口已打开，请在弹窗中完成扫码。',
+      });
+      return;
+    }
+
+    const weixinLoginStatusSessionId = request.method === 'GET'
+      ? getPathSuffix(url.pathname, '/api/channels/weixin-login/')
+      : undefined;
+    if (request.method === 'GET' && weixinLoginStatusSessionId) {
+      const session = getWeixinLoginWebSession(weixinLoginStatusSessionId);
+      if (!session) {
+        json(response, 404, { error: '微信扫码会话不存在或已过期。' });
+        return;
+      }
+
+      json(response, 200, {
+        ok: true,
+        session,
+        config: session.status === 'confirmed' ? configToPayload(loadConfig()) : undefined,
       });
       return;
     }

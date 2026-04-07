@@ -4,7 +4,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { CTI_HOME, loadRawConfigEnv } from './config.js';
+import { CTI_HOME, loadConfig, loadRawConfigEnv } from './config.js';
+import type { ChannelInstance } from './config.js';
 
 export interface BridgeStatus {
   running: boolean;
@@ -381,6 +382,37 @@ function buildDaemonEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+function describeBridgeStartupPreflightFailure(channels: ChannelInstance[] | undefined): string | null {
+  const configured = Array.isArray(channels) ? channels : [];
+  if (configured.length === 0) {
+    return '未配置任何通道实例。请先在 Web 控制台创建并保存至少一个飞书或微信通道，然后再启动桥接服务。';
+  }
+
+  const enabled = configured.filter((channel) => channel.enabled !== false);
+  if (enabled.length === 0) {
+    return '当前所有通道实例都已禁用。请先启用至少一个通道实例，然后再启动桥接服务。';
+  }
+
+  return null;
+}
+
+function describeBridgeActivationFailure(
+  status: BridgeStatus,
+  channels: ChannelInstance[] | undefined,
+): string | null {
+  const statusReason = status.lastExitReason?.trim();
+  if (statusReason) return statusReason;
+
+  const preflightFailure = describeBridgeStartupPreflightFailure(channels);
+  if (preflightFailure) return preflightFailure;
+
+  const enabled = (channels || []).filter((channel) => channel.enabled !== false);
+  if (enabled.length === 0) return null;
+
+  const labels = enabled.map((channel) => channel.alias?.trim() || channel.id).join('、');
+  return `没有任何通道适配器启动成功。请检查通道配置、凭据和日志。当前已启用通道：${labels}`;
+}
+
 async function waitForBridgeRunning(timeoutMs = 20_000): Promise<BridgeStatus> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -418,6 +450,12 @@ export async function startBridge(): Promise<BridgeStatus> {
     await stopBridge();
   }
 
+  const config = loadConfig();
+  const preflightFailure = describeBridgeStartupPreflightFailure(config.channels);
+  if (preflightFailure) {
+    throw new Error(preflightFailure);
+  }
+
   const daemonEntry = path.join(packageRoot, 'dist', 'daemon.mjs');
   if (!fs.existsSync(daemonEntry)) {
     throw new Error(`Daemon bundle not found at ${daemonEntry}. Run npm run build first.`);
@@ -437,7 +475,10 @@ export async function startBridge(): Promise<BridgeStatus> {
 
   const status = await waitForBridgeRunning();
   if (!status.running) {
-    throw new Error(status.lastExitReason || 'Bridge failed to report running=true.');
+    throw new Error(
+      describeBridgeActivationFailure(status, config.channels)
+      || 'Bridge failed to report running=true.',
+    );
   }
   return status;
 }
@@ -485,6 +526,8 @@ export async function stopBridge(): Promise<BridgeStatus> {
 export const _testOnly = {
   collectTrackedBridgePids,
   resolveTrackedBridgePid,
+  describeBridgeStartupPreflightFailure,
+  describeBridgeActivationFailure,
 };
 
 export async function restartBridge(): Promise<BridgeStatus> {

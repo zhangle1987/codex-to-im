@@ -5,7 +5,7 @@ import { CTI_HOME } from './config.js';
 import type { BridgeSession, BridgeStore } from './lib/bridge/host.js';
 
 const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_HIDDEN_DRAFT_SESSIONS = 20;
+const MAX_HIDDEN_DRAFT_SESSIONS = 64;
 const INTERNAL_SESSION_ROOT = path.join(CTI_HOME, 'runtime', 'internal-sessions');
 const DRAFT_SESSION_PREFIX = 'Draft';
 const HISTORY_SESSION_PREFIX = 'History Summary';

@@ -282,7 +282,7 @@ What happens next:
 5. On success, the helper stores the linked account in:
   `~/.codex-to-im/data/weixin-accounts.json`
 
-The filename stays plural for backward compatibility, but Weixin currently runs in single-account mode.
+The filename stays plural for backward compatibility. Multiple linked Weixin accounts can coexist in the same store.
 
 If the browser does not open automatically, open the HTML file manually.
 

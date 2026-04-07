@@ -58,3 +58,68 @@ describe('service-manager bridge pid resolution', () => {
     assert.deepEqual(_testOnly.collectTrackedBridgePids(11420, 10516), [11420, 10516]);
   });
 });
+
+describe('service-manager bridge startup failure messaging', () => {
+  it('reports a missing channel configuration before spawning the bridge', () => {
+    assert.equal(
+      _testOnly.describeBridgeStartupPreflightFailure([]),
+      '未配置任何通道实例。请先在 Web 控制台创建并保存至少一个飞书或微信通道，然后再启动桥接服务。',
+    );
+  });
+
+  it('reports when all configured channels are disabled', () => {
+    assert.equal(
+      _testOnly.describeBridgeStartupPreflightFailure([
+        {
+          id: 'feishu-default',
+          alias: '开开1号',
+          provider: 'feishu',
+          enabled: false,
+          createdAt: '2026-04-07T01:00:00.000Z',
+          updatedAt: '2026-04-07T01:00:00.000Z',
+          config: {},
+        },
+      ]),
+      '当前所有通道实例都已禁用。请先启用至少一个通道实例，然后再启动桥接服务。',
+    );
+  });
+
+  it('falls back to enabled channel labels when the bridge still fails to activate', () => {
+    assert.equal(
+      _testOnly.describeBridgeActivationFailure(
+        { running: false },
+        [
+          {
+            id: 'feishu-default',
+            alias: '开开1号',
+            provider: 'feishu',
+            enabled: true,
+            createdAt: '2026-04-07T01:00:00.000Z',
+            updatedAt: '2026-04-07T01:00:00.000Z',
+            config: {},
+          },
+          {
+            id: 'weixin-default',
+            alias: '微信一号',
+            provider: 'weixin',
+            enabled: true,
+            createdAt: '2026-04-07T01:00:00.000Z',
+            updatedAt: '2026-04-07T01:00:00.000Z',
+            config: {},
+          },
+        ],
+      ),
+      '没有任何通道适配器启动成功。请检查通道配置、凭据和日志。当前已启用通道：开开1号、微信一号',
+    );
+  });
+
+  it('prefers a daemon-provided lastExitReason when available', () => {
+    assert.equal(
+      _testOnly.describeBridgeActivationFailure(
+        { running: false, lastExitReason: 'fatal: boom' },
+        [],
+      ),
+      'fatal: boom',
+    );
+  });
+});

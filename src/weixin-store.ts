@@ -16,8 +16,7 @@ export interface WeixinAccountRecord {
 }
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
-// Keep the historical plural filename for compatibility, even though the
-// current Weixin bridge intentionally runs in single-account mode.
+// Keep the historical plural filename for compatibility.
 const ACCOUNTS_PATH = path.join(DATA_DIR, 'weixin-accounts.json');
 const CONTEXT_TOKENS_PATH = path.join(DATA_DIR, 'weixin-context-tokens.json');
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com';
@@ -50,17 +49,8 @@ function getAccountRecency(account: WeixinAccountRecord): string {
   return account.lastLoginAt ?? account.updatedAt ?? account.createdAt;
 }
 
-function normalizeAccounts(accounts: WeixinAccountRecord[]): {
-  accounts: WeixinAccountRecord[];
-  removedAccountIds: string[];
-} {
-  // Single-account mode: the newest linked account wins and older records
-  // are treated as replaceable history.
-  if (accounts.length <= 1) {
-    return { accounts, removedAccountIds: [] };
-  }
-
-  const sorted = [...accounts].sort((a, b) => {
+function sortAccountsByRecency(accounts: WeixinAccountRecord[]): WeixinAccountRecord[] {
+  return [...accounts].sort((a, b) => {
     const recencyDiff = getAccountRecency(b).localeCompare(getAccountRecency(a));
     if (recencyDiff !== 0) return recencyDiff;
 
@@ -72,31 +62,22 @@ function normalizeAccounts(accounts: WeixinAccountRecord[]): {
 
     return 0;
   });
+}
 
-  const kept = sorted[0];
-  const removedAccountIds = [
-    ...new Set(
-      sorted
-        .slice(1)
-        .map((account) => account.accountId)
-        .filter((accountId) => accountId !== kept.accountId),
-    ),
-  ];
-
-  return {
-    accounts: [kept],
-    removedAccountIds,
-  };
+function normalizeAccounts(accounts: WeixinAccountRecord[]): WeixinAccountRecord[] {
+  const deduped = new Map<string, WeixinAccountRecord>();
+  for (const account of sortAccountsByRecency(accounts)) {
+    if (!account?.accountId || deduped.has(account.accountId)) continue;
+    deduped.set(account.accountId, account);
+  }
+  return Array.from(deduped.values());
 }
 
 function persistAccounts(accounts: WeixinAccountRecord[]): WeixinAccountRecord[] {
   ensureDir(DATA_DIR);
   const normalized = normalizeAccounts(accounts);
-  atomicWrite(ACCOUNTS_PATH, JSON.stringify(normalized.accounts, null, 2));
-  for (const accountId of normalized.removedAccountIds) {
-    deleteWeixinContextTokensByAccount(accountId);
-  }
-  return normalized.accounts;
+  atomicWrite(ACCOUNTS_PATH, JSON.stringify(normalized, null, 2));
+  return normalized;
 }
 
 function readStoredAccounts(): WeixinAccountRecord[] {
@@ -106,7 +87,7 @@ function readStoredAccounts(): WeixinAccountRecord[] {
 }
 
 function readAccounts(): WeixinAccountRecord[] {
-  return normalizeAccounts(readStoredAccounts()).accounts;
+  return normalizeAccounts(readStoredAccounts());
 }
 
 function writeAccounts(accounts: WeixinAccountRecord[]): void {
@@ -128,7 +109,7 @@ function contextKey(accountId: string, peerUserId: string): string {
 }
 
 export function listWeixinAccounts(): WeixinAccountRecord[] {
-  return readAccounts().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return sortAccountsByRecency(readAccounts());
 }
 
 export function getWeixinAccount(accountId: string): WeixinAccountRecord | undefined {

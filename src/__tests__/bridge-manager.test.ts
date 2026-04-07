@@ -633,6 +633,62 @@ describe('bridge-manager status formatting', () => {
     assert.equal(subscription.pendingTurn, null);
   });
 
+  it('waits for visible mirror content before opening a mirror stream card', () => {
+    _testOnly.resetStateForTests();
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const streamEvents: string[] = [];
+    state.adapters.set('feishu', {
+      channelType: 'feishu',
+      provider: 'feishu',
+      isRunning: () => true,
+      onMirrorStreamStart: (_chatId: string, streamKey: string) => {
+        streamEvents.push(`start:${streamKey}`);
+      },
+      onStreamText: (_chatId: string, text: string, streamKey: string) => {
+        streamEvents.push(`text:${streamKey}:${text}`);
+      },
+      onStreamEnd: async () => true,
+    });
+
+    const subscription = {
+      pendingTurn: null,
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+      channelType: 'feishu',
+      chatId: 'chat-1',
+    } as { pendingTurn: any; threadId: string };
+
+    _testOnly.consumeMirrorRecords(subscription as any, [
+      {
+        signature: 'start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-03-25T08:00:00.000Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.equal(subscription.pendingTurn?.streamStarted, false);
+    assert.deepEqual(streamEvents, []);
+
+    _testOnly.consumeMirrorRecords(subscription as any, [
+      {
+        signature: 'user',
+        type: 'message',
+        role: 'user',
+        content: 'desktop prompt',
+        timestamp: '2026-03-25T08:00:00.500Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.equal(subscription.pendingTurn?.streamStarted, true);
+    assert.deepEqual(streamEvents, [
+      'start:mirror:session-1:turn-1',
+      'text:mirror:session-1:turn-1:<桌面线程>\n\n我: desktop prompt\n\ncodex:',
+    ]);
+  });
+
   it('keeps the original mirror stream key when turnId arrives after streaming has started', () => {
     const subscription = {
       pendingTurn: null,

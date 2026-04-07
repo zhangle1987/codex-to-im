@@ -2039,7 +2039,12 @@ function consumeMirrorRecords(
           subscription.pendingTurn.lastActivityAt = record.timestamp;
         }
       }
-      startMirrorStreaming(subscription, subscription.pendingTurn);
+      // Do not open a visible mirror stream on task_started alone. In real
+      // Desktop logs, task_started can arrive several seconds before the
+      // matching user_message record, which makes IM-originated turns briefly
+      // leak a duplicate mirror card before suppression has enough context to
+      // match the prompt. Start streaming only after visible content or tool
+      // progress arrives for this turn.
       continue;
     }
 

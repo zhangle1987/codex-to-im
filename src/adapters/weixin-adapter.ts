@@ -164,6 +164,25 @@ export class WeixinAdapter extends BaseChannelAdapter {
   }
 
   validateConfig(): string | null {
+    const configuredAccountId = this.configuredAccountId;
+    const accounts = listWeixinAccounts();
+    const enabledAccounts = accounts.filter((account) => account.enabled && account.token);
+
+    if (configuredAccountId) {
+      const configured = getWeixinAccount(configuredAccountId);
+      if (!configured) {
+        return `Linked WeChat account ${configuredAccountId} not found`;
+      }
+      if (!configured.enabled || !configured.token) {
+        return `Linked WeChat account ${configuredAccountId} is disabled or missing token`;
+      }
+      return null;
+    }
+
+    if (enabledAccounts.length > 1) {
+      return 'Multiple linked WeChat accounts detected. Please select a WeChat account for this channel.';
+    }
+
     return null;
   }
 

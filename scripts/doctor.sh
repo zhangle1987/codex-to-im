@@ -396,9 +396,9 @@ if [ -f "$CONFIG_FILE" ]; then
       WX_TOTAL="${WX_COUNTS##*:}"
       if [ "${WX_ENABLED:-0}" -ge 1 ] 2>/dev/null; then
         if [ "${WX_TOTAL:-0}" -gt 1 ] 2>/dev/null; then
-          check "Weixin linked account store (single-account mode; ${WX_TOTAL} records on disk, newest enabled record will be used)" 0
+          check "Weixin linked account store (${WX_TOTAL} linked accounts ready; assign each channel to a specific account)" 0
         else
-          check "Weixin linked account store (single linked account ready)" 0
+          check "Weixin linked account store (1 linked account ready)" 0
         fi
       else
         check "Weixin linked account store (found file, but no enabled linked account with token — run 'cd $SKILL_DIR && npm run weixin:login')" 1
