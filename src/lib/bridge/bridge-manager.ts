@@ -1698,6 +1698,36 @@ function buildMirrorSpeakerLabel(label: string, markdown = false): string {
   return markdown ? `**${label}:**` : `${label}:`;
 }
 
+const MIRROR_USER_WRAPPER_LABELS = new Map<string, string>([
+  ['# Review findings:', 'Review findings'],
+  ['# Context from my IDE setup:', 'IDE setup'],
+  ['# Files mentioned by the user:', 'Files'],
+]);
+
+const MIRROR_USER_REQUEST_MARKER = '## My request for Codex:';
+
+function formatMirrorUserText(text: string | null | undefined): string | null {
+  const normalized = (text || '').replace(/\r\n?/g, '\n').trim();
+  if (!normalized) return null;
+
+  const lines = normalized.split('\n');
+  const firstNonEmptyIndex = lines.findIndex((line) => line.trim().length > 0);
+  if (firstNonEmptyIndex < 0) return null;
+
+  const wrapperLabel = MIRROR_USER_WRAPPER_LABELS.get(lines[firstNonEmptyIndex].trim());
+  if (!wrapperLabel) return normalized;
+
+  const requestMarkerIndex = lines.findIndex(
+    (line, index) => index > firstNonEmptyIndex && line.trim() === MIRROR_USER_REQUEST_MARKER,
+  );
+  if (requestMarkerIndex < 0) return normalized;
+
+  const requestBody = lines.slice(requestMarkerIndex + 1).join('\n').trim();
+  if (!requestBody) return normalized;
+
+  return `（基于 ${wrapperLabel}）\n${requestBody}`;
+}
+
 function formatMirrorSpeakerBlock(
   label: string,
   text: string | null | undefined,
@@ -1938,7 +1968,7 @@ function appendMirrorUserText(
   turnState: DesktopMirrorTurnState,
   chunk: string,
 ): void {
-  const normalized = chunk.trim();
+  const normalized = formatMirrorUserText(chunk);
   if (!normalized) return;
   if (!turnState.userText) {
     turnState.userText = normalized;
@@ -4060,6 +4090,7 @@ export const _testOnly = {
   formatBindingChatLabel,
   formatRuntimeStatus,
   formatMirrorStatus,
+  formatMirrorUserText,
   formatMirrorMessage,
   buildInteractiveStreamKey,
   buildMirrorStreamKey,

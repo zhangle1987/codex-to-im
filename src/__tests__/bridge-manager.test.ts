@@ -541,6 +541,36 @@ describe('bridge-manager status formatting', () => {
     assert.equal(rendered, '**`<Current Thread>`**\n\n**我:** Desktop prompt\n\n**codex:**\n- item 1\n- item 2');
   });
 
+  it('rewrites known wrapped desktop prompts into a compact user mirror label', () => {
+    const wrapped = [
+      '# Review findings:',
+      '',
+      '## Finding 1 (src/cli.ts:151-153) [added]',
+      '[P2] demo',
+      '',
+      '## My request for Codex:',
+      'ok,当前调整已经可以收尾了吗',
+    ].join('\n');
+
+    assert.equal(
+      _testOnly.formatMirrorUserText(wrapped),
+      '（基于 Review findings）\nok,当前调整已经可以收尾了吗',
+    );
+  });
+
+  it('keeps raw mirror user text when no known wrapper marker is present', () => {
+    const plain = '普通用户消息\n第二行';
+    assert.equal(_testOnly.formatMirrorUserText(plain), plain);
+
+    const unknownWrapped = [
+      '# Unknown wrapper:',
+      '',
+      '## My request for Codex:',
+      '保留原文',
+    ].join('\n');
+    assert.equal(_testOnly.formatMirrorUserText(unknownWrapped), unknownWrapped);
+  });
+
   it('buffers desktop user mirror text into the active turn instead of finalizing immediately', () => {
     const subscription = {
       pendingTurn: null,
@@ -686,6 +716,57 @@ describe('bridge-manager status formatting', () => {
     assert.deepEqual(streamEvents, [
       'start:mirror:session-1:turn-1',
       'text:mirror:session-1:turn-1:<桌面线程>\n\n我: desktop prompt\n\ncodex:',
+    ]);
+  });
+
+  it('normalizes wrapped desktop user prompts before opening a mirror stream card', () => {
+    _testOnly.resetStateForTests();
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const streamEvents: string[] = [];
+    state.adapters.set('feishu', {
+      channelType: 'feishu',
+      provider: 'feishu',
+      isRunning: () => true,
+      onMirrorStreamStart: (_chatId: string, streamKey: string) => {
+        streamEvents.push(`start:${streamKey}`);
+      },
+      onStreamText: (_chatId: string, text: string, streamKey: string) => {
+        streamEvents.push(`text:${streamKey}:${text}`);
+      },
+      onStreamEnd: async () => true,
+    });
+
+    const subscription = {
+      pendingTurn: null,
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+      channelType: 'feishu',
+      chatId: 'chat-1',
+    } as { pendingTurn: any; threadId: string };
+
+    _testOnly.consumeMirrorRecords(subscription as any, [
+      {
+        signature: 'user',
+        type: 'message',
+        role: 'user',
+        content: [
+          '# Review findings:',
+          '',
+          '## Finding 1 (src/cli.ts:151-153) [added]',
+          '[P2] demo',
+          '',
+          '## My request for Codex:',
+          'ok,当前调整已经可以收尾了吗',
+        ].join('\n'),
+        timestamp: '2026-03-25T08:00:00.500Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.equal(subscription.pendingTurn?.userText, '（基于 Review findings）\nok,当前调整已经可以收尾了吗');
+    assert.deepEqual(streamEvents, [
+      'start:mirror:session-1:turn-1',
+      'text:mirror:session-1:turn-1:<桌面线程>\n\n我:\n（基于 Review findings）\nok,当前调整已经可以收尾了吗\n\ncodex:',
     ]);
   });
 
