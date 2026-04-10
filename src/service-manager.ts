@@ -67,12 +67,14 @@ const runtimeDir = path.join(CTI_HOME, 'runtime');
 const logsDir = path.join(CTI_HOME, 'logs');
 const bridgePidFile = path.join(runtimeDir, 'bridge.pid');
 const bridgeStatusFile = path.join(runtimeDir, 'status.json');
+const bridgeStartLockFile = path.join(runtimeDir, 'bridge.start.lock');
 const uiStatusFile = path.join(runtimeDir, 'ui-server.json');
 const uiPort = 4781;
 const bridgeAutostartTaskName = 'CodexToIMBridge';
 const bridgeAutostartLauncherFile = path.join(runtimeDir, 'bridge-autostart.ps1');
 const npmUninstallLogFile = path.join(runtimeDir, 'npm-uninstall.log');
 const WINDOWS_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
+const BRIDGE_START_LOCK_STALE_MS = 30_000;
 
 function ensureDirs(): void {
   fs.mkdirSync(runtimeDir, { recursive: true });
@@ -140,6 +142,99 @@ function clearBridgePidFile(): void {
     fs.unlinkSync(bridgePidFile);
   } catch {
     // ignore missing/stale pid file cleanup errors
+  }
+}
+
+interface BridgeStartLock {
+  pid: number;
+  createdAt: string;
+}
+
+function readBridgeStartLock(filePath = bridgeStartLockFile): BridgeStartLock | null {
+  const parsed = readJsonFile<Partial<BridgeStartLock> | null>(filePath, null);
+  const pid = Number(parsed?.pid);
+  const createdAt = typeof parsed?.createdAt === 'string' ? parsed.createdAt : '';
+  if (!Number.isFinite(pid) || pid <= 0 || !createdAt) return null;
+  return { pid, createdAt };
+}
+
+function isBridgeStartLockStale(
+  lock: BridgeStartLock | null,
+  options: {
+    nowMs?: number;
+    staleMs?: number;
+    isAlive?: (pid?: number) => boolean;
+  } = {},
+): boolean {
+  if (!lock) return true;
+  const nowMs = options.nowMs ?? Date.now();
+  const staleMs = options.staleMs ?? BRIDGE_START_LOCK_STALE_MS;
+  const isAlive = options.isAlive ?? isProcessAlive;
+  const createdAtMs = Date.parse(lock.createdAt);
+  if (!Number.isFinite(createdAtMs)) return true;
+  if (!isAlive(lock.pid)) return true;
+  return nowMs - createdAtMs > staleMs;
+}
+
+function tryAcquireBridgeStartLock(
+  options: {
+    filePath?: string;
+    ownerPid?: number;
+    nowMs?: number;
+    staleMs?: number;
+    isAlive?: (pid?: number) => boolean;
+  } = {},
+): { acquired: boolean; holderPid?: number } {
+  const filePath = options.filePath ?? bridgeStartLockFile;
+  const ownerPid = options.ownerPid ?? process.pid;
+  const nowMs = options.nowMs ?? Date.now();
+  const payload: BridgeStartLock = {
+    pid: ownerPid,
+    createdAt: new Date(nowMs).toISOString(),
+  };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), { encoding: 'utf-8', flag: 'wx' });
+      return { acquired: true };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw error;
+      const existing = readBridgeStartLock(filePath);
+      if (!isBridgeStartLockStale(existing, {
+        nowMs,
+        staleMs: options.staleMs,
+        isAlive: options.isAlive,
+      })) {
+        return { acquired: false, holderPid: existing?.pid };
+      }
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // Another process may have already cleared or replaced the stale lock.
+      }
+    }
+  }
+
+  const existing = readBridgeStartLock(filePath);
+  return { acquired: false, holderPid: existing?.pid };
+}
+
+function releaseBridgeStartLock(filePath = bridgeStartLockFile, ownerPid = process.pid): void {
+  const existing = readBridgeStartLock(filePath);
+  if (!existing) {
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      // ignore missing lock file
+    }
+    return;
+  }
+  if (existing.pid !== ownerPid) return;
+  try {
+    fs.unlinkSync(filePath);
+  } catch {
+    // ignore missing/stale lock cleanup errors
   }
 }
 
@@ -423,6 +518,24 @@ async function waitForBridgeRunning(timeoutMs = 20_000): Promise<BridgeStatus> {
   return getBridgeStatus();
 }
 
+async function waitForBridgeStartupTurn(timeoutMs = 20_000): Promise<BridgeStatus> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const status = getBridgeStatus();
+    if (status.running) return status;
+
+    const lock = readBridgeStartLock();
+    if (!lock) return status;
+    if (isBridgeStartLockStale(lock)) {
+      releaseBridgeStartLock();
+      return getBridgeStatus();
+    }
+
+    await sleep(300);
+  }
+  return getBridgeStatus();
+}
+
 async function waitForUiServer(timeoutMs = 15_000): Promise<UiServerStatus> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -456,31 +569,61 @@ export async function startBridge(): Promise<BridgeStatus> {
     throw new Error(preflightFailure);
   }
 
-  const daemonEntry = path.join(packageRoot, 'dist', 'daemon.mjs');
-  if (!fs.existsSync(daemonEntry)) {
-    throw new Error(`Daemon bundle not found at ${daemonEntry}. Run npm run build first.`);
+  let startLockHeld = false;
+  let lockState = tryAcquireBridgeStartLock();
+  if (!lockState.acquired) {
+    const status = await waitForBridgeStartupTurn();
+    if (status.running) return status;
+
+    lockState = tryAcquireBridgeStartLock();
+    if (!lockState.acquired) {
+      throw new Error(
+        describeBridgeActivationFailure(status, config.channels)
+        || `另一个桥接服务启动请求仍在进行中（PID: ${lockState.holderPid || 'unknown'}）。请稍后重试。`,
+      );
+    }
   }
+  startLockHeld = true;
 
-  const stdoutFd = fs.openSync(path.join(logsDir, 'bridge-launcher.out.log'), 'a');
-  const stderrFd = fs.openSync(path.join(logsDir, 'bridge-launcher.err.log'), 'a');
+  try {
+    const currentAfterLock = getBridgeStatus();
+    const extraAlivePidsAfterLock = getTrackedBridgePids(currentAfterLock)
+      .filter((pid) => pid !== currentAfterLock.pid && isProcessAlive(pid));
+    if (currentAfterLock.running && extraAlivePidsAfterLock.length === 0) return currentAfterLock;
+    if (currentAfterLock.running && extraAlivePidsAfterLock.length > 0) {
+      await stopBridge();
+    }
 
-  const child = spawn(process.execPath, [daemonEntry], {
-    cwd: packageRoot,
-    detached: true,
-    env: buildDaemonEnv(),
-    stdio: ['ignore', stdoutFd, stderrFd],
-    ...WINDOWS_HIDE,
-  });
-  child.unref();
+    const daemonEntry = path.join(packageRoot, 'dist', 'daemon.mjs');
+    if (!fs.existsSync(daemonEntry)) {
+      throw new Error(`Daemon bundle not found at ${daemonEntry}. Run npm run build first.`);
+    }
 
-  const status = await waitForBridgeRunning();
-  if (!status.running) {
-    throw new Error(
-      describeBridgeActivationFailure(status, config.channels)
-      || 'Bridge failed to report running=true.',
-    );
+    const stdoutFd = fs.openSync(path.join(logsDir, 'bridge-launcher.out.log'), 'a');
+    const stderrFd = fs.openSync(path.join(logsDir, 'bridge-launcher.err.log'), 'a');
+
+    const child = spawn(process.execPath, [daemonEntry], {
+      cwd: packageRoot,
+      detached: true,
+      env: buildDaemonEnv(),
+      stdio: ['ignore', stdoutFd, stderrFd],
+      ...WINDOWS_HIDE,
+    });
+    child.unref();
+
+    const status = await waitForBridgeRunning();
+    if (!status.running) {
+      throw new Error(
+        describeBridgeActivationFailure(status, config.channels)
+        || 'Bridge failed to report running=true.',
+      );
+    }
+    return status;
+  } finally {
+    if (startLockHeld) {
+      releaseBridgeStartLock();
+    }
   }
-  return status;
 }
 
 export async function stopBridge(): Promise<BridgeStatus> {
@@ -528,6 +671,10 @@ export const _testOnly = {
   resolveTrackedBridgePid,
   describeBridgeStartupPreflightFailure,
   describeBridgeActivationFailure,
+  readBridgeStartLock,
+  isBridgeStartLockStale,
+  tryAcquireBridgeStartLock,
+  releaseBridgeStartLock,
 };
 
 export async function restartBridge(): Promise<BridgeStatus> {

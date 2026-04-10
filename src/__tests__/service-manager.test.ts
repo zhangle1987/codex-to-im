@@ -1,6 +1,9 @@
 import './test-setup.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { _testOnly, buildDeferredGlobalNpmUninstallLaunch } from '../service-manager.js';
 
@@ -121,5 +124,85 @@ describe('service-manager bridge startup failure messaging', () => {
       ),
       'fatal: boom',
     );
+  });
+});
+
+describe('service-manager bridge startup locking', () => {
+  it('acquires a fresh startup lock', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-bridge-lock-'));
+    const lockPath = path.join(tempDir, 'bridge.start.lock');
+
+    const result = _testOnly.tryAcquireBridgeStartLock({
+      filePath: lockPath,
+      ownerPid: 32001,
+      nowMs: Date.parse('2026-04-10T10:00:00.000Z'),
+    });
+
+    assert.equal(result.acquired, true);
+    assert.deepEqual(_testOnly.readBridgeStartLock(lockPath), {
+      pid: 32001,
+      createdAt: '2026-04-10T10:00:00.000Z',
+    });
+  });
+
+  it('blocks on a live startup lock holder', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-bridge-lock-'));
+    const lockPath = path.join(tempDir, 'bridge.start.lock');
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 32001,
+      createdAt: '2026-04-10T10:00:00.000Z',
+    }), 'utf-8');
+
+    const result = _testOnly.tryAcquireBridgeStartLock({
+      filePath: lockPath,
+      ownerPid: 32002,
+      nowMs: Date.parse('2026-04-10T10:00:05.000Z'),
+      isAlive: (pid) => pid === 32001,
+    });
+
+    assert.deepEqual(result, { acquired: false, holderPid: 32001 });
+    assert.deepEqual(_testOnly.readBridgeStartLock(lockPath), {
+      pid: 32001,
+      createdAt: '2026-04-10T10:00:00.000Z',
+    });
+  });
+
+  it('replaces a stale startup lock when the holder is gone', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-bridge-lock-'));
+    const lockPath = path.join(tempDir, 'bridge.start.lock');
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 32001,
+      createdAt: '2026-04-10T10:00:00.000Z',
+    }), 'utf-8');
+
+    const result = _testOnly.tryAcquireBridgeStartLock({
+      filePath: lockPath,
+      ownerPid: 32002,
+      nowMs: Date.parse('2026-04-10T10:00:10.000Z'),
+      isAlive: () => false,
+    });
+
+    assert.equal(result.acquired, true);
+    assert.deepEqual(_testOnly.readBridgeStartLock(lockPath), {
+      pid: 32002,
+      createdAt: '2026-04-10T10:00:10.000Z',
+    });
+  });
+
+  it('does not release another process startup lock', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-bridge-lock-'));
+    const lockPath = path.join(tempDir, 'bridge.start.lock');
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 32001,
+      createdAt: '2026-04-10T10:00:00.000Z',
+    }), 'utf-8');
+
+    _testOnly.releaseBridgeStartLock(lockPath, 32002);
+
+    assert.equal(fs.existsSync(lockPath), true);
+    assert.deepEqual(_testOnly.readBridgeStartLock(lockPath), {
+      pid: 32001,
+      createdAt: '2026-04-10T10:00:00.000Z',
+    });
   });
 });
