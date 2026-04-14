@@ -2,7 +2,6 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import crypto from 'node:crypto';
 import net from 'node:net';
 import os from 'node:os';
-import fs from 'node:fs';
 
 import {
   CTI_HOME,
@@ -19,6 +18,7 @@ import {
   type FeishuSite,
   type WeixinChannelConfig,
 } from './config.js';
+import { normalizeChannelId } from './runtime-options.js';
 import { getCodexSessionsRoot, listDesktopSessions } from './desktop-sessions.js';
 import {
   type BindingSummary,
@@ -172,15 +172,6 @@ function normalizeChannelAlias(value: string | undefined, provider: ChannelProvi
   const trimmed = value?.trim();
   if (trimmed) return trimmed;
   return provider === 'feishu' ? '飞书' : '微信';
-}
-
-function normalizeChannelId(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    || 'channel';
 }
 
 function buildChannelId(provider: ChannelProvider, alias: string, takenIds: Set<string>, currentId?: string): string {
@@ -2391,8 +2382,8 @@ function renderHtml(): string {
               <div class="command-item"><div class="command-col-command"><code>/t &lt;序号&gt;</code></div><div class="command-col-original"><code>/thread &lt;序号&gt;</code></div><div class="command-col-desc">按序号接管桌面会话。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/n [绝对路径 | 项目名]</code></div><div class="command-col-original"><code>/new [绝对路径 | 项目名]</code></div><div class="command-col-desc">不带参数时在当前正式会话目录下新建线程；相对项目名会在“默认工作空间”下创建目录；当前若是临时草稿线程则会报错。通过 IM 创建的新线程当前只保证在 IM 中可继续，不会自动出现在 Codex Desktop 会话列表中。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>直接发送文本</code></div><div class="command-col-original">—</div><div class="command-col-desc">继续当前已绑定会话；未绑定时会自动进入临时草稿线程。</div></div>
-                  <div class="command-item"><div class="command-col-command"><code>/his</code></div><div class="command-col-original"><code>/history</code></div><div class="command-col-desc">查看当前会话整理后的摘要。</div></div>
-                  <div class="command-item"><div class="command-col-command"><code>/his raw</code></div><div class="command-col-original"><code>/history raw</code></div><div class="command-col-desc">查看最近 N 条原始消息。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/his</code></div><div class="command-col-original"><code>/history</code></div><div class="command-col-desc">查看最近 N 条原始消息。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/his raw</code></div><div class="command-col-original"><code>/history raw</code></div><div class="command-col-desc">查看最近 N 条原始消息（兼容别名）。</div></div>
                 </div>
               </section>
 

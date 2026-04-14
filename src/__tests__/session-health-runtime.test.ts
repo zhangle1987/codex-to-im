@@ -1,0 +1,153 @@
+import './test-setup.js';
+import { beforeEach, describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { CTI_HOME } from '../config.js';
+import { JsonFileStore } from '../store.js';
+import { createSessionHealthRuntime } from '../lib/bridge/session-health-runtime.js';
+
+const DATA_DIR = path.join(CTI_HOME, 'data');
+
+function makeSettings(): Map<string, string> {
+  return new Map([
+    ['remote_bridge_enabled', 'true'],
+    ['bridge_default_model', 'test-model'],
+    ['bridge_default_mode', 'code'],
+  ]);
+}
+
+describe('session-health-runtime', () => {
+  beforeEach(() => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  it('marks a long-running missing tool process as suspected_detached', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Detached', 'test-model', undefined, 'D:\\workspace\\health-detached', 'code');
+    store.updateSession(session.id, { runtime_status: 'running' });
+
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => new Date().toISOString(),
+      probeThreadProcess: async (threadId) => ({
+        threadId,
+        status: 'not_found',
+        supported: true,
+        checkedAt: '2026-04-13T12:30:00.000Z',
+      }),
+    });
+
+    runtime.recordInteractiveStart(session.id);
+    runtime.recordToolState(session.id, 'call-1', 'shell_command', 'running');
+    store.updateSession(session.id, {
+      sdk_session_id: '019d861c-0e5b-7792-9303-2aa082a28093',
+      last_progress_at: new Date(Date.now() - (31 * 60 * 1000)).toISOString(),
+      active_tool_started_at: new Date(Date.now() - (31 * 60 * 1000)).toISOString(),
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+    assert.ok(diagnosis);
+    assert.equal(diagnosis?.healthStatus, 'suspected_detached');
+    assert.equal(diagnosis?.processProbe?.status, 'not_found');
+  });
+
+  it('keeps a long-running live thread in slow_observed instead of detached', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Alive', 'test-model', undefined, 'D:\\workspace\\health-alive', 'code');
+    store.updateSession(session.id, { runtime_status: 'running' });
+
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => new Date().toISOString(),
+      probeThreadProcess: async (threadId) => ({
+        threadId,
+        status: 'alive',
+        supported: true,
+        checkedAt: '2026-04-13T12:30:00.000Z',
+        pid: 31340,
+      }),
+    });
+
+    runtime.recordInteractiveStart(session.id);
+    store.updateSession(session.id, {
+      sdk_session_id: '019d861c-0e5b-7792-9303-2aa082a28093',
+      last_progress_at: new Date(Date.now() - (45 * 60 * 1000)).toISOString(),
+      last_progress_type: 'message',
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+    assert.ok(diagnosis);
+    assert.equal(diagnosis?.healthStatus, 'slow_observed');
+    assert.equal(diagnosis?.processProbe?.pid, 31340);
+  });
+
+  it('updates completion state from mirrored desktop records', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Mirror', 'test-model', undefined, 'D:\\workspace\\health-mirror', 'code');
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:30:00.000Z',
+    });
+
+    runtime.observeDesktopMirrorRecords(session.id, 'thread-1', [
+      {
+        signature: 'task-start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-04-13T12:00:00.000Z',
+      },
+      {
+        signature: 'tool-start',
+        type: 'tool_started',
+        content: '',
+        timestamp: '2026-04-13T12:01:00.000Z',
+        toolId: 'call-1',
+        toolName: 'shell_command',
+      },
+      {
+        signature: 'tool-finish',
+        type: 'tool_finished',
+        content: 'Exit code: 0',
+        timestamp: '2026-04-13T12:02:00.000Z',
+        toolId: 'call-1',
+      },
+      {
+        signature: 'task-complete',
+        type: 'task_complete',
+        content: 'done',
+        timestamp: '2026-04-13T12:03:00.000Z',
+      },
+    ]);
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.health_status, 'completed');
+    assert.match(refreshed?.health_reason || '', /桌面线程已完成/);
+  });
+
+  it('keeps waiting_tool while another active tool is still running', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Multi Tool', 'test-model', undefined, 'D:\\workspace\\health-multi', 'code');
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:30:00.000Z',
+    });
+
+    runtime.recordInteractiveStart(session.id);
+    runtime.recordToolState(session.id, 'call-1', 'shell_command', 'running');
+    runtime.recordToolState(session.id, 'call-2', 'apply_patch', 'running');
+    runtime.recordToolState(session.id, 'call-1', 'shell_command', 'complete');
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.health_status, 'waiting_tool');
+    assert.equal(refreshed?.active_tool_name, 'apply_patch');
+    assert.match(refreshed?.health_reason || '', /仍在等待工具 apply_patch/);
+
+    runtime.recordToolState(session.id, 'call-2', 'apply_patch', 'complete');
+    const settled = store.getSession(session.id);
+    assert.equal(settled?.health_status, 'running_active');
+    assert.equal(settled?.active_tool_name, undefined);
+    assert.equal(settled?.active_tools_json, undefined);
+  });
+});

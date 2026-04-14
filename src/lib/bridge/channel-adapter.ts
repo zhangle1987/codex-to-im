@@ -19,6 +19,9 @@ export interface AdapterRuntimeInstance extends Pick<ChannelInstance, 'id' | 'al
 }
 
 export abstract class BaseChannelAdapter {
+  private inboundQueue: InboundMessage[] = [];
+  private inboundWaiters: Array<(msg: InboundMessage | null) => void> = [];
+
   /** Which channel type this adapter handles */
   abstract readonly channelType: ChannelType;
   /** Underlying provider family (feishu / weixin / telegram / discord / qq). */
@@ -137,6 +140,35 @@ export abstract class BaseChannelAdapter {
     _responseText: string,
     _streamKey?: string,
   ): Promise<boolean>;
+
+  protected consumeInboundMessage(isRunning: boolean): Promise<InboundMessage | null> {
+    const queued = this.inboundQueue.shift();
+    if (queued) return Promise.resolve(queued);
+    if (!isRunning) return Promise.resolve(null);
+    return new Promise<InboundMessage | null>((resolve) => {
+      this.inboundWaiters.push(resolve);
+    });
+  }
+
+  protected enqueueInboundMessage(message: InboundMessage): void {
+    const waiter = this.inboundWaiters.shift();
+    if (waiter) {
+      waiter(message);
+    } else {
+      this.inboundQueue.push(message);
+    }
+  }
+
+  protected clearInboundQueue(): void {
+    this.inboundQueue = [];
+  }
+
+  protected rejectPendingInboundConsumers(): void {
+    for (const waiter of this.inboundWaiters) {
+      waiter(null);
+    }
+    this.inboundWaiters = [];
+  }
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

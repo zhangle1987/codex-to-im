@@ -17,6 +17,10 @@ import type { LLMProvider, StreamChatParams } from './lib/bridge/host.js';
 import type { PendingPermissions } from './permission-gateway.js';
 import { sseEvent } from './sse-utils.js';
 import type { CodexReasoningEffort, CodexSandboxMode } from './config.js';
+import {
+  normalizeSandboxMode,
+  parseReasoningEffort,
+} from './runtime-options.js';
 
 /** MIME → file extension for temp image files. */
 const MIME_EXT: Record<string, string> = {
@@ -56,30 +60,6 @@ function shouldSkipGitRepoCheck(): boolean {
   return process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK === 'true';
 }
 
-function normalizeSandboxMode(mode: string | undefined): CodexSandboxMode {
-  if (
-    mode === 'read-only'
-    || mode === 'workspace-write'
-    || mode === 'danger-full-access'
-  ) {
-    return mode;
-  }
-  return 'workspace-write';
-}
-
-function normalizeReasoningEffort(value: string | undefined): CodexReasoningEffort | undefined {
-  if (
-    value === 'minimal'
-    || value === 'low'
-    || value === 'medium'
-    || value === 'high'
-    || value === 'xhigh'
-  ) {
-    return value;
-  }
-  return undefined;
-}
-
 function shouldRetryFreshThread(message: string): boolean {
   const lower = message.toLowerCase();
   return (
@@ -96,7 +76,7 @@ export class CodexProvider implements LLMProvider {
   /** Maps session IDs to Codex thread IDs for resume. */
   private threadIds = new Map<string, string>();
 
-  constructor(private pendingPerms: PendingPermissions) {}
+  constructor(_pendingPerms?: PendingPermissions) {}
 
   /**
    * Lazily load the Codex SDK. Throws a clear error if the installation is incomplete.
@@ -146,8 +126,8 @@ export class CodexProvider implements LLMProvider {
             let savedThreadId = inMemoryThreadId || params.sdkSessionId || undefined;
 
             const approvalPolicy = toApprovalPolicy(params.permissionMode);
-            const sandboxMode = normalizeSandboxMode(params.sandboxMode);
-            const modelReasoningEffort = normalizeReasoningEffort(params.modelReasoningEffort);
+            const sandboxMode = normalizeSandboxMode(params.sandboxMode) as CodexSandboxMode;
+            const modelReasoningEffort = parseReasoningEffort(params.modelReasoningEffort) as CodexReasoningEffort | undefined;
 
             const threadOptions: Record<string, unknown> = {
               ...(params.forceModel && params.model ? { model: params.model } : {}),

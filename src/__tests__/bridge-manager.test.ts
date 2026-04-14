@@ -10,6 +10,7 @@ import { JsonFileStore } from '../store.js';
 import { initBridgeContext } from '../lib/bridge/context.js';
 import { _testOnly, start } from '../lib/bridge/bridge-manager.js';
 import { BaseChannelAdapter, registerAdapterFactory } from '../lib/bridge/channel-adapter.js';
+import { createMirrorSubscription } from '../lib/bridge/mirror-subscription-state.js';
 import * as router from '../lib/bridge/channel-router.js';
 import type { LifecycleHooks, LLMProvider, PermissionGateway, StreamChatParams } from '../lib/bridge/host.js';
 
@@ -61,6 +62,37 @@ class InvalidConfigAdapter extends BaseChannelAdapter {
   async consumeOne() { return null; }
   async send() { return { ok: true, messageId: 'dummy' }; }
   validateConfig(): string | null { return 'invalid config'; }
+  isAuthorized(): boolean { return true; }
+}
+
+class ThrowStartAdapter extends BaseChannelAdapter {
+  static stopCalls: string[] = [];
+
+  readonly channelType: string;
+  readonly provider: string;
+
+  constructor(instance?: { id?: string; provider?: string; alias?: string }) {
+    super();
+    this.channelType = instance?.id || 'throw-start';
+    this.provider = instance?.provider || 'throw-start';
+    Object.defineProperty(this, 'alias', {
+      value: instance?.alias,
+      configurable: true,
+      enumerable: true,
+      writable: false,
+    });
+  }
+
+  async start(): Promise<void> {
+    throw new Error('start boom');
+  }
+  async stop(): Promise<void> {
+    ThrowStartAdapter.stopCalls.push(this.channelType);
+  }
+  isRunning(): boolean { return false; }
+  async consumeOne() { return null; }
+  async send() { return { ok: true, messageId: 'dummy' }; }
+  validateConfig(): string | null { return null; }
   isAuthorized(): boolean { return true; }
 }
 
@@ -193,6 +225,10 @@ describe('bridge-manager resolveNewWorkingDirectory', () => {
 describe('bridge-manager resolveCommandAlias', () => {
   it('maps root slash to status', () => {
     assert.equal(_testOnly.resolveCommandAlias('/', ''), '/status');
+  });
+
+  it('maps double slash to health', () => {
+    assert.equal(_testOnly.resolveCommandAlias('//', ''), '/health');
   });
 
   it('maps short desktop thread alias based on args', () => {
@@ -371,7 +407,7 @@ describe('bridge-manager resolveCommandAlias', () => {
 
   it('maps unexpected /history failures to a user-visible hint', () => {
     const message = _testOnly.toUserVisibleCommandError('/history', new Error('boom'));
-    assert.equal(message, '整理历史失败，请稍后重试；也可以发送 /history raw 查看原始记录。');
+    assert.equal(message, '读取历史记录失败，请稍后重试。');
   });
 
   it('falls back to a generic user-visible error for other commands', () => {
@@ -1477,6 +1513,69 @@ describe('bridge-manager mirror subscription recovery', () => {
 
     assert.ok(errors.some((line) => line.includes('Failed to sync mirror session state')));
   });
+
+  it('keeps a suspended mirror subscription suspended until the timeout elapses', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    const address = { channelType: 'feishu-default', chatId: 'chat-suspended' } as const;
+    const binding = router.createBinding(address, 'D:\\workspace\\suspended');
+    store.updateSdkSessionId(binding.codepilotSessionId, 'thread-suspended');
+
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    state.running = true;
+    state.adapters.set(address.channelType, {
+      channelType: address.channelType,
+      provider: 'feishu',
+      isRunning: () => false,
+    });
+    state.mirrorSubscriptions.set(binding.id, {
+      ...createMirrorSubscription({
+        bindingId: binding.id,
+        sessionId: binding.codepilotSessionId,
+        channelType: address.channelType,
+        chatId: address.chatId,
+        threadId: 'thread-suspended',
+        filePath: null,
+        lastDeliveredAt: null,
+      }),
+      consecutiveFailures: 3,
+      suspendedUntil: Date.now() + 60_000,
+    });
+
+    const suspendedUntil = state.mirrorSubscriptions.get(binding.id)?.suspendedUntil;
+    await _testOnly.reconcileMirrorSubscriptions();
+
+    assert.equal(state.mirrorSubscriptions.get(binding.id)?.suspendedUntil, suspendedUntil);
+    assert.equal(state.mirrorSubscriptions.get(binding.id)?.consecutiveFailures, 3);
+  });
+
+  it('clears mirrorSyncInFlight even when subscription set planning throws', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    (store as unknown as { listChannelBindings: typeof store.listChannelBindings }).listChannelBindings = (() => {
+      throw new Error('bindings boom');
+    }) as typeof store.listChannelBindings;
+
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    state.running = true;
+
+    await assert.doesNotReject(_testOnly.reconcileMirrorSubscriptions());
+    assert.equal(state.mirrorSyncInFlight, false);
+  });
 });
 
 describe('bridge-manager invalid adapter logging', () => {
@@ -1522,6 +1621,73 @@ describe('bridge-manager invalid adapter logging', () => {
 
     const matching = warnings.filter((line) => line.includes('invalid-test-main adapter not valid'));
     assert.equal(matching.length, 1);
+  });
+
+  it('stops removed adapters and clears runtime bookkeeping', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    const stopped: string[] = [];
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    state.adapters.set('feishu-default', {
+      channelType: 'feishu-default',
+      provider: 'feishu',
+      stop: async () => {
+        stopped.push('feishu-default');
+      },
+      isRunning: () => false,
+    });
+    state.adapterMeta.set('feishu-default', {
+      lastMessageAt: null,
+      lastError: null,
+      configFingerprint: 'old',
+    });
+    state.loopAborts.set('feishu-default', new AbortController());
+
+    await _testOnly.syncConfiguredAdapters({ startLoops: false });
+
+    assert.deepEqual(stopped, ['feishu-default']);
+    assert.equal(state.adapters.has('feishu-default'), false);
+    assert.equal(state.adapterMeta.has('feishu-default'), false);
+    assert.equal(state.loopAborts.has('feishu-default'), false);
+  });
+
+  it('does not retain adapters that fail during start', async () => {
+    ThrowStartAdapter.stopCalls = [];
+    registerAdapterFactory('throw-start-test', (instance) => new ThrowStartAdapter(instance as any));
+
+    const settings = makeSettings();
+    settings.set('bridge_channel_instances_json', JSON.stringify([
+      {
+        id: 'throw-start-main',
+        provider: 'throw-start-test',
+        alias: 'Throw Start',
+        enabled: true,
+        config: {},
+      },
+    ]));
+
+    const store = new JsonFileStore(settings);
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    await _testOnly.syncConfiguredAdapters({ startLoops: false });
+
+    assert.equal(state.adapters.has('throw-start-main'), false);
+    assert.equal(state.adapterMeta.has('throw-start-main'), false);
+    assert.deepEqual(ThrowStartAdapter.stopCalls, ['throw-start-main']);
   });
 });
 

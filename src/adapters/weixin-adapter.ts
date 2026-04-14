@@ -45,8 +45,6 @@ export class WeixinAdapter extends BaseChannelAdapter {
   private _running = false;
   private idleLogged = false;
   private reconcileTimer: NodeJS.Timeout | null = null;
-  private queue: InboundMessage[] = [];
-  private waiters: Array<(msg: InboundMessage | null) => void> = [];
   private pollAborts = new Map<string, AbortController>();
   private workerSignatures = new Map<string, string>();
   private seenMessageIds = new Map<string, Set<string>>();
@@ -105,12 +103,8 @@ export class WeixinAdapter extends BaseChannelAdapter {
       this.stopAccountWorker(accountId);
     }
     this.pendingCursors.clear();
-    this.queue = [];
-
-    for (const waiter of this.waiters) {
-      waiter(null);
-    }
-    this.waiters = [];
+    this.clearInboundQueue();
+    this.rejectPendingInboundConsumers();
 
     console.log('[weixin-adapter] Stopped');
   }
@@ -120,15 +114,7 @@ export class WeixinAdapter extends BaseChannelAdapter {
   }
 
   async consumeOne(): Promise<InboundMessage | null> {
-    if (this.queue.length > 0) {
-      return this.queue.shift()!;
-    }
-    if (!this._running) {
-      return null;
-    }
-    return new Promise<InboundMessage | null>((resolve) => {
-      this.waiters.push(resolve);
-    });
+    return this.consumeInboundMessage(this._running);
   }
 
   async send(message: OutboundMessage): Promise<SendResult> {
@@ -203,15 +189,6 @@ export class WeixinAdapter extends BaseChannelAdapter {
 
   onMessageEnd(chatId: string): void {
     this.sendTypingIndicator(chatId, TypingStatus.CANCEL).catch(() => {});
-  }
-
-  private enqueue(message: InboundMessage): void {
-    if (this.waiters.length > 0) {
-      const waiter = this.waiters.shift()!;
-      waiter(message);
-      return;
-    }
-    this.queue.push(message);
   }
 
   private async reconcileAccounts(): Promise<void> {
@@ -471,7 +448,7 @@ export class WeixinAdapter extends BaseChannelAdapter {
       const batch = this.pendingCursors.get(batchId);
       if (batch) batch.remaining++;
     }
-    this.enqueue(inbound);
+    this.enqueueInboundMessage(inbound);
 
     const summary = attachments.length > 0
       ? `[${attachments.length} attachment(s)] ${inbound.text.slice(0, 150)}`

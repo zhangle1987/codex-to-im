@@ -8,7 +8,6 @@ const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_HIDDEN_DRAFT_SESSIONS = 64;
 const INTERNAL_SESSION_ROOT = path.join(CTI_HOME, 'runtime', 'internal-sessions');
 const DRAFT_SESSION_PREFIX = 'Draft';
-const HISTORY_SESSION_PREFIX = 'History Summary';
 
 function ensureDirectory(dirPath: string): void {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -24,7 +23,7 @@ export function isSessionExpired(session: BridgeSession | null | undefined): boo
   return Number.isFinite(expiresAt) && expiresAt <= Date.now();
 }
 
-export function getInternalScratchDir(kind: 'draft' | 'history_summary', key: string): string {
+export function getInternalScratchDir(kind: 'draft', key: string): string {
   const dir = path.join(INTERNAL_SESSION_ROOT, kind, sanitizePathSlug(key));
   ensureDirectory(dir);
   return dir;
@@ -32,10 +31,6 @@ export function getInternalScratchDir(kind: 'draft' | 'history_summary', key: st
 
 export function makeDraftSessionName(address: { channelType: string; chatId: string }): string {
   return `${DRAFT_SESSION_PREFIX}:${address.channelType}:${address.chatId}`;
-}
-
-export function makeHistorySummarySessionName(parentSessionId: string): string {
-  return `${HISTORY_SESSION_PREFIX}:${parentSessionId}`;
 }
 
 export function cleanupHiddenSessions(store: BridgeStore): void {

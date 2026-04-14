@@ -38,8 +38,6 @@ export class QQAdapter extends BaseChannelAdapter {
   readonly provider = 'qq';
 
   private _running = false;
-  private queue: InboundMessage[] = [];
-  private waiters: Array<(msg: InboundMessage | null) => void> = [];
   private ws: WebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private lastSequence: number | null = null;
@@ -93,11 +91,8 @@ export class QQAdapter extends BaseChannelAdapter {
     }
 
     // Wake all waiters with null
-    for (const waiter of this.waiters) {
-      waiter(null);
-    }
-    this.waiters = [];
-    this.queue = [];
+    this.rejectPendingInboundConsumers();
+    this.clearInboundQueue();
     this.seenMessageIds.clear();
 
     console.log('[qq-adapter] Stopped');
@@ -110,23 +105,7 @@ export class QQAdapter extends BaseChannelAdapter {
   // ── Queue ───────────────────────────────────────────────────
 
   consumeOne(): Promise<InboundMessage | null> {
-    const queued = this.queue.shift();
-    if (queued) return Promise.resolve(queued);
-
-    if (!this._running) return Promise.resolve(null);
-
-    return new Promise<InboundMessage | null>((resolve) => {
-      this.waiters.push(resolve);
-    });
-  }
-
-  private enqueue(msg: InboundMessage): void {
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter(msg);
-    } else {
-      this.queue.push(msg);
-    }
+    return this.consumeInboundMessage(this._running);
   }
 
   // ── Send ────────────────────────────────────────────────────
@@ -348,7 +327,7 @@ export class QQAdapter extends BaseChannelAdapter {
             timestamp: ts,
             attachments: files,
           };
-          this.enqueue(inbound);
+          this.enqueueInboundMessage(inbound);
         } else if (text) {
           // All images failed but there is text — enqueue text only with a note
           const inbound: InboundMessage = {
@@ -357,7 +336,7 @@ export class QQAdapter extends BaseChannelAdapter {
             text: text + `\n[${failedCount} image(s) failed to download]`,
             timestamp: ts,
           };
-          this.enqueue(inbound);
+          this.enqueueInboundMessage(inbound);
         } else {
           // Image-only message and all downloads failed — enqueue an error
           // so bridge-manager can reply to the user instead of silently dropping
@@ -369,7 +348,7 @@ export class QQAdapter extends BaseChannelAdapter {
             // Store failure info so handleMessage can surface it
             raw: { imageDownloadFailed: true, failedCount },
           };
-          this.enqueue(inbound);
+          this.enqueueInboundMessage(inbound);
         }
 
         // Audit log
@@ -395,7 +374,7 @@ export class QQAdapter extends BaseChannelAdapter {
         text,
         timestamp: data.timestamp ? new Date(data.timestamp).getTime() : Date.now(),
       };
-      this.enqueue(inbound);
+      this.enqueueInboundMessage(inbound);
 
       // Audit log
       try {

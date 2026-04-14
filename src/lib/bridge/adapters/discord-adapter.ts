@@ -59,8 +59,6 @@ export class DiscordAdapter extends BaseChannelAdapter {
   private running = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private client: any = null;
-  private queue: InboundMessage[] = [];
-  private waiters: Array<(msg: InboundMessage | null) => void> = [];
   private seenMessageIds = new Set<string>();
   private botUserId: string | null = null;
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
@@ -133,7 +131,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
   }
 
   async stop(): Promise<void> {
-    if (!this.running) return;
+    if (!this.running && !this.client) return;
     this.running = false;
 
     // Destroy client
@@ -147,10 +145,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
     }
 
     // Reject all waiting consumers
-    for (const waiter of this.waiters) {
-      waiter(null);
-    }
-    this.waiters = [];
+    this.rejectPendingInboundConsumers();
 
     // Stop all typing indicators
     for (const [, interval] of this.typingIntervals) {
@@ -174,23 +169,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
   // ── Queue ───────────────────────────────────────────────────
 
   consumeOne(): Promise<InboundMessage | null> {
-    const queued = this.queue.shift();
-    if (queued) return Promise.resolve(queued);
-
-    if (!this.running) return Promise.resolve(null);
-
-    return new Promise<InboundMessage | null>((resolve) => {
-      this.waiters.push(resolve);
-    });
-  }
-
-  private enqueue(msg: InboundMessage): void {
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter(msg);
-    } else {
-      this.queue.push(msg);
-    }
+    return this.consumeInboundMessage(this.running);
   }
 
   // ── Typing indicator ───────────────────────────────────────
@@ -565,7 +544,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
       });
     } catch { /* best effort */ }
 
-    this.enqueue(inbound);
+    this.enqueueInboundMessage(inbound);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -611,7 +590,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
       callbackMessageId: interaction.message?.id,
     };
 
-    this.enqueue(inbound);
+    this.enqueueInboundMessage(inbound);
   }
 
   // ── Utilities ───────────────────────────────────────────────

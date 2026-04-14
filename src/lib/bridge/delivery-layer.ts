@@ -4,11 +4,9 @@
  */
 
 import type {
-  ChannelType,
   ChannelAddress,
   OutboundMessage,
   SendResult,
-  PLATFORM_LIMITS,
 } from './types.js';
 import type { TelegramChunk } from './markdown/telegram.js';
 import { PLATFORM_LIMITS as limits } from './types.js';

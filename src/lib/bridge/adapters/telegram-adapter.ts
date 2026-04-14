@@ -76,8 +76,6 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
   private running = false;
   private abortController: AbortController | null = null;
-  private queue: InboundMessage[] = [];
-  private waiters: Array<(msg: InboundMessage | null) => void> = [];
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
   private mediaGroupBuffers = new Map<string, MediaGroupBufferEntry>();
   /** Chat IDs where sendMessageDraft has permanently failed (method not found / 400 / 404). */
@@ -131,10 +129,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     this.persistCommittedOffset();
 
     // Reject all waiting consumers
-    for (const waiter of this.waiters) {
-      waiter(null);
-    }
-    this.waiters = [];
+    this.rejectPendingInboundConsumers();
 
     // Stop all typing indicators
     for (const [, interval] of this.typingIntervals) {
@@ -159,17 +154,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   consumeOne(): Promise<InboundMessage | null> {
-    // If there's a queued message, return it immediately
-    const queued = this.queue.shift();
-    if (queued) return Promise.resolve(queued);
-
-    // If not running, return null
-    if (!this.running) return Promise.resolve(null);
-
-    // Otherwise, wait for the poll loop to enqueue a message
-    return new Promise<InboundMessage | null>((resolve) => {
-      this.waiters.push(resolve);
-    });
+    return this.consumeInboundMessage(this.running);
   }
 
   async send(message: OutboundMessage): Promise<SendResult> {
@@ -357,15 +342,6 @@ export class TelegramAdapter extends BaseChannelAdapter {
     });
   }
 
-  private enqueue(msg: InboundMessage): void {
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter(msg);
-    } else {
-      this.queue.push(msg);
-    }
-  }
-
   /**
    * Return the DB key used to store the offset, scoped to the bot's stable identity.
    * Uses the bot user ID (from getMe) which survives token rotation.
@@ -533,7 +509,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
               updateId: update.update_id,
             };
 
-            this.enqueue(msg);
+            this.enqueueInboundMessage(msg);
 
             // Answer callback to dismiss the loading state
             this.answerCallback(cb.id).catch(() => {});
@@ -593,7 +569,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
                 });
               } catch { /* best effort */ }
 
-              this.enqueue(msg);
+              this.enqueueInboundMessage(msg);
             } else {
               // Unhandled message type (sticker, voice, etc.) — skip
               this.markUpdateProcessed(update.update_id);
@@ -709,7 +685,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
       attachments: attachments.length > 0 ? attachments : undefined,
     };
 
-    this.enqueue(msg);
+    this.enqueueInboundMessage(msg);
   }
 
   /**
@@ -858,7 +834,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
       attachments: attachments.length > 0 ? attachments : undefined,
     };
 
-    this.enqueue(msg);
+    this.enqueueInboundMessage(msg);
   }
 }
 

@@ -116,8 +116,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private readonly channelConfig: FeishuChannelConfig;
 
   private running = false;
-  private queue: InboundMessage[] = [];
-  private waiters: Array<(msg: InboundMessage | null) => void> = [];
   private wsClient: lark.WSClient | null = null;
   private restClient: lark.Client | null = null;
   private seenMessageIds = new Map<string, boolean>();
@@ -254,10 +252,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.restClient = null;
 
     // Reject all waiting consumers
-    for (const waiter of this.waiters) {
-      waiter(null);
-    }
-    this.waiters = [];
+    this.rejectPendingInboundConsumers();
 
     // Clean up active cards
     for (const [, state] of this.activeCards) {
@@ -281,23 +276,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   // ── Queue ───────────────────────────────────────────────────
 
   consumeOne(): Promise<InboundMessage | null> {
-    const queued = this.queue.shift();
-    if (queued) return Promise.resolve(queued);
-
-    if (!this.running) return Promise.resolve(null);
-
-    return new Promise<InboundMessage | null>((resolve) => {
-      this.waiters.push(resolve);
-    });
-  }
-
-  private enqueue(msg: InboundMessage): void {
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter(msg);
-    } else {
-      this.queue.push(msg);
-    }
+    return this.consumeInboundMessage(this.running);
   }
 
   // ── Typing indicator (Openclaw-style reaction) ─────────────
@@ -387,7 +366,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         callbackData,
         callbackMessageId: messageId,
       };
-      this.enqueue(callbackMsg);
+      this.enqueueInboundMessage(callbackMsg);
 
       return { toast: { type: 'info' as const, content: '已收到，正在处理...' } };
     } catch (err) {
@@ -1368,7 +1347,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           timestamp,
           callbackData,
         };
-        this.enqueue(inbound);
+        this.enqueueInboundMessage(inbound);
         return;
       }
     }
@@ -1397,7 +1376,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       });
     } catch { /* best effort */ }
 
-    this.enqueue(inbound);
+    this.enqueueInboundMessage(inbound);
   }
 
   // ── Content parsing ─────────────────────────────────────────

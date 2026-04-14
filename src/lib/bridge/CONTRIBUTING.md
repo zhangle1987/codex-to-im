@@ -15,7 +15,7 @@ npm run test:unit        # Unit tests
 3. Call `registerAdapterFactory('my-channel', () => new MyAdapter())` at module scope
 4. Add `import './my-adapter';` in `adapters/index.ts`
 5. Add platform limit to `PLATFORM_LIMITS` in `types.ts`
-6. Add rendering support in `bridge-manager.ts:deliverResponse()` (or use generic fallback)
+6. Add rendering support in `feedback-delivery.ts:deliverResponse()` (or use generic fallback)
 
 ## Code Style
 

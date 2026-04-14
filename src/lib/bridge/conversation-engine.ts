@@ -22,6 +22,11 @@ import crypto from 'crypto';
 import {
   parseOutboundArtifacts,
 } from './outbound-artifacts.js';
+import {
+  normalizeReasoningEffort,
+  normalizeSandboxMode,
+} from '../../runtime-options.js';
+import { consumeSseEvents } from './sse-stream-decoder.js';
 
 export interface PermissionRequestInfo {
   permissionRequestId: string;
@@ -62,35 +67,13 @@ export interface ConversationResult {
   sdkSessionId: string | null;
 }
 
-function resolveSandboxMode(
-  store: ReturnType<typeof getBridgeContext>['store'],
-): 'read-only' | 'workspace-write' | 'danger-full-access' {
-  const configured = store.getSetting('bridge_codex_sandbox_mode');
-  if (
-    configured === 'read-only'
-    || configured === 'workspace-write'
-    || configured === 'danger-full-access'
-  ) {
-    return configured;
-  }
-  return 'workspace-write';
-}
-
 function resolveReasoningEffort(
   store: ReturnType<typeof getBridgeContext>['store'],
   session: BridgeSession | null,
 ): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' {
-  const configured = session?.reasoning_effort || store.getSetting('bridge_codex_reasoning_effort');
-  if (
-    configured === 'minimal'
-    || configured === 'low'
-    || configured === 'medium'
-    || configured === 'high'
-    || configured === 'xhigh'
-  ) {
-    return configured;
-  }
-  return 'medium';
+  return normalizeReasoningEffort(
+    session?.reasoning_effort || store.getSetting('bridge_codex_reasoning_effort'),
+  );
 }
 
 interface PersistedAttachmentMeta {
@@ -183,7 +166,7 @@ export async function processMessage(
     // Resolve session early — needed for workingDirectory and provider resolution
     const session = store.getSession(sessionId);
     const workDir = binding.workingDirectory || session?.working_directory || '';
-    const sandboxMode = resolveSandboxMode(store);
+    const sandboxMode = normalizeSandboxMode(store.getSetting('bridge_codex_sandbox_mode'));
     const modelReasoningEffort = resolveReasoningEffort(store, session);
 
     // Save user message — persist file attachments to disk using the same
@@ -304,7 +287,6 @@ async function consumeStream(
   onToolEvent?: OnToolEvent,
 ): Promise<ConversationResult> {
   const { store } = getBridgeContext();
-  const reader = stream.getReader();
   const contentBlocks: MessageContentBlock[] = [];
   let currentText = '';
   /** Monotonically accumulated text for streaming preview — never resets on tool_use. */
@@ -318,148 +300,131 @@ async function consumeStream(
   const outboundAttachments: OutboundAttachment[] = [];
 
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    await consumeSseEvents(stream, async (event: SSEEvent) => {
+      switch (event.type) {
+        case 'text':
+          currentText += event.data;
+          if (onPartialText) {
+            previewText += event.data;
+            try { onPartialText(previewText); } catch { /* non-critical */ }
+          }
+          break;
 
-      const lines = value.split('\n');
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-
-        let event: SSEEvent;
-        try {
-          event = JSON.parse(line.slice(6));
-        } catch {
-          continue;
+        case 'tool_use': {
+          if (currentText.trim()) {
+            contentBlocks.push({ type: 'text', text: currentText });
+            currentText = '';
+          }
+          try {
+            const toolData = JSON.parse(event.data);
+            contentBlocks.push({
+              type: 'tool_use',
+              id: toolData.id,
+              name: toolData.name,
+              input: toolData.input,
+            });
+            if (onToolEvent) {
+              try { onToolEvent(toolData.id, toolData.name, 'running'); } catch { /* non-critical */ }
+            }
+          } catch { /* skip */ }
+          break;
         }
 
-        switch (event.type) {
-          case 'text':
-            currentText += event.data;
-            if (onPartialText) {
-              previewText += event.data;
-              try { onPartialText(previewText); } catch { /* non-critical */ }
+        case 'tool_result': {
+          try {
+            const resultData = JSON.parse(event.data);
+            const newBlock = {
+              type: 'tool_result' as const,
+              tool_use_id: resultData.tool_use_id,
+              content: resultData.content,
+              is_error: resultData.is_error || false,
+            };
+            if (seenToolResultIds.has(resultData.tool_use_id)) {
+              const idx = contentBlocks.findIndex(
+                (b) => b.type === 'tool_result' && 'tool_use_id' in b && b.tool_use_id === resultData.tool_use_id
+              );
+              if (idx >= 0) contentBlocks[idx] = newBlock;
+            } else {
+              seenToolResultIds.add(resultData.tool_use_id);
+              contentBlocks.push(newBlock);
             }
-            break;
-
-          case 'tool_use': {
-            if (currentText.trim()) {
-              contentBlocks.push({ type: 'text', text: currentText });
-              currentText = '';
-            }
-            try {
-              const toolData = JSON.parse(event.data);
-              contentBlocks.push({
-                type: 'tool_use',
-                id: toolData.id,
-                name: toolData.name,
-                input: toolData.input,
-              });
-              if (onToolEvent) {
-                try { onToolEvent(toolData.id, toolData.name, 'running'); } catch { /* non-critical */ }
-              }
-            } catch { /* skip */ }
-            break;
-          }
-
-          case 'tool_result': {
-            try {
-              const resultData = JSON.parse(event.data);
-              const newBlock = {
-                type: 'tool_result' as const,
-                tool_use_id: resultData.tool_use_id,
-                content: resultData.content,
-                is_error: resultData.is_error || false,
-              };
-              if (seenToolResultIds.has(resultData.tool_use_id)) {
-                const idx = contentBlocks.findIndex(
-                  (b) => b.type === 'tool_result' && 'tool_use_id' in b && b.tool_use_id === resultData.tool_use_id
+            if (onToolEvent) {
+              try {
+                onToolEvent(
+                  resultData.tool_use_id,
+                  '',
+                  resultData.is_error ? 'error' : 'complete',
                 );
-                if (idx >= 0) contentBlocks[idx] = newBlock;
-              } else {
-                seenToolResultIds.add(resultData.tool_use_id);
-                contentBlocks.push(newBlock);
-              }
-              if (onToolEvent) {
-                try {
-                  onToolEvent(
-                    resultData.tool_use_id,
-                    '', // name not available in tool_result, adapter tracks by id
-                    resultData.is_error ? 'error' : 'complete',
-                  );
-                } catch { /* non-critical */ }
-              }
-            } catch { /* skip */ }
-            break;
-          }
-
-          case 'permission_request': {
-            try {
-              const permData = JSON.parse(event.data);
-              const perm: PermissionRequestInfo = {
-                permissionRequestId: permData.permissionRequestId,
-                toolName: permData.toolName,
-                toolInput: permData.toolInput,
-                suggestions: permData.suggestions,
-              };
-              permissionRequests.push(perm);
-              // Forward immediately — the stream blocks until the permission is
-              // resolved, so we must send the IM prompt *now*, not after the stream ends.
-              if (onPermissionRequest) {
-                onPermissionRequest(perm).catch((err) => {
-                  console.error('[conversation-engine] Failed to forward permission request:', err);
-                });
-              }
-            } catch { /* skip */ }
-            break;
-          }
-
-          case 'status': {
-            try {
-              const statusData = JSON.parse(event.data);
-              if (statusData.session_id) {
-                capturedSdkSessionId = statusData.session_id;
-                store.updateSdkSessionId(sessionId, statusData.session_id);
-              }
-              if (statusData.model) {
-                store.updateSessionModel(sessionId, statusData.model);
-              }
-            } catch { /* skip */ }
-            break;
-          }
-
-          case 'task_update': {
-            try {
-              const taskData = JSON.parse(event.data);
-              if (taskData.session_id && taskData.todos) {
-                store.syncSdkTasks(taskData.session_id, taskData.todos);
-              }
-            } catch { /* skip */ }
-            break;
-          }
-
-          case 'error':
-            hasError = true;
-            errorMessage = event.data || 'Unknown error';
-            break;
-
-          case 'result': {
-            try {
-              const resultData = JSON.parse(event.data);
-              if (resultData.usage) tokenUsage = resultData.usage;
-              if (resultData.is_error) hasError = true;
-              if (resultData.session_id) {
-                capturedSdkSessionId = resultData.session_id;
-                store.updateSdkSessionId(sessionId, resultData.session_id);
-              }
-            } catch { /* skip */ }
-            break;
-          }
-
-          // tool_output, tool_timeout, mode_changed, done — ignored for bridge
+              } catch { /* non-critical */ }
+            }
+          } catch { /* skip */ }
+          break;
         }
+
+        case 'permission_request': {
+          try {
+            const permData = JSON.parse(event.data);
+            const perm: PermissionRequestInfo = {
+              permissionRequestId: permData.permissionRequestId,
+              toolName: permData.toolName,
+              toolInput: permData.toolInput,
+              suggestions: permData.suggestions,
+            };
+            permissionRequests.push(perm);
+            if (onPermissionRequest) {
+              onPermissionRequest(perm).catch((err) => {
+                console.error('[conversation-engine] Failed to forward permission request:', err);
+              });
+            }
+          } catch { /* skip */ }
+          break;
+        }
+
+        case 'status': {
+          try {
+            const statusData = JSON.parse(event.data);
+            if (statusData.session_id) {
+              capturedSdkSessionId = statusData.session_id;
+              store.updateSdkSessionId(sessionId, statusData.session_id);
+            }
+            if (statusData.model) {
+              store.updateSessionModel(sessionId, statusData.model);
+            }
+          } catch { /* skip */ }
+          break;
+        }
+
+        case 'task_update': {
+          try {
+            const taskData = JSON.parse(event.data);
+            if (taskData.session_id && taskData.todos) {
+              store.syncSdkTasks(taskData.session_id, taskData.todos);
+            }
+          } catch { /* skip */ }
+          break;
+        }
+
+        case 'error':
+          hasError = true;
+          errorMessage = event.data || 'Unknown error';
+          break;
+
+        case 'result': {
+          try {
+            const resultData = JSON.parse(event.data);
+            if (resultData.usage) tokenUsage = resultData.usage;
+            if (resultData.is_error) hasError = true;
+            if (resultData.session_id) {
+              capturedSdkSessionId = resultData.session_id;
+              store.updateSdkSessionId(sessionId, resultData.session_id);
+            }
+          } catch { /* skip */ }
+          break;
+        }
+
+        // tool_output, tool_timeout, mode_changed, done — ignored for bridge
       }
-    }
+    });
 
     // Flush remaining text
     if (currentText.trim()) {

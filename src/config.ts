@@ -1,9 +1,16 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  normalizeChannelId,
+  parseReasoningEffort,
+  parseSandboxMode,
+  type RuntimeReasoningEffort,
+  type RuntimeSandboxMode,
+} from "./runtime-options.js";
 
-export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
-export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type CodexSandboxMode = RuntimeSandboxMode;
+export type CodexReasoningEffort = RuntimeReasoningEffort;
 export type ChannelProvider = 'feishu' | 'weixin';
 export type FeishuSite = 'feishu' | 'lark';
 
@@ -150,30 +157,6 @@ function parsePositiveInt(value: string | undefined): number | undefined {
   return Math.floor(parsed);
 }
 
-function parseSandboxMode(value: string | undefined): CodexSandboxMode | undefined {
-  if (
-    value === 'read-only'
-    || value === 'workspace-write'
-    || value === 'danger-full-access'
-  ) {
-    return value;
-  }
-  return undefined;
-}
-
-function parseReasoningEffort(value: string | undefined): CodexReasoningEffort | undefined {
-  if (
-    value === 'minimal'
-    || value === 'low'
-    || value === 'medium'
-    || value === 'high'
-    || value === 'xhigh'
-  ) {
-    return value;
-  }
-  return undefined;
-}
-
 export function normalizeFeishuSite(value: string | undefined): FeishuSite {
   const normalized = (value || '').trim().replace(/\/+$/, '').toLowerCase();
   if (!normalized) return 'feishu';
@@ -214,15 +197,6 @@ function writeConfigV2File(config: ConfigV2File): void {
   const tmpPath = CONFIG_V2_PATH + '.tmp';
   fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), { mode: 0o600 });
   fs.renameSync(tmpPath, CONFIG_V2_PATH);
-}
-
-function normalizeChannelId(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    || 'channel';
 }
 
 function defaultAliasForProvider(provider: ChannelProvider): string {

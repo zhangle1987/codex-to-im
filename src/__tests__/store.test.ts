@@ -530,12 +530,12 @@ describe('JsonFileStore', () => {
     store.updateSession(session.id, {
       reasoning_effort: 'high',
       hidden: true,
-      session_type: 'history_summary',
+      session_type: 'draft',
     });
     const updated = store.getSession(session.id);
     assert.equal(updated?.reasoning_effort, 'high');
     assert.equal(updated?.hidden, true);
-    assert.equal(updated?.session_type, 'history_summary');
+    assert.equal(updated?.session_type, 'draft');
   });
 
   it('deleteSession removes the session, bindings, and stored messages', () => {

@@ -10,7 +10,6 @@ import {
   handleMessage,
 } from '../llm-provider.js';
 import type { StreamState } from '../llm-provider.js';
-import { sseEvent } from '../sse-utils.js';
 
 // ── Helpers ──
 
@@ -204,8 +203,6 @@ describe('handleMessage state tracking', () => {
 
     assert.equal(state.lastAssistantText, 'org has no access');
     // No text SSE should be emitted — only tool_use blocks get forwarded
-    const textEvents = chunks.filter(c => c.includes('"type":"text"') || c.includes('"type":"text"'));
-    // Parse more carefully
     const hasTextEvent = chunks.some(c => {
       try { const d = JSON.parse(c.replace('data: ', '')); return d.type === 'text'; }
       catch { return false; }

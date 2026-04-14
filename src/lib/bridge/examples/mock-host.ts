@@ -21,8 +21,6 @@ import * as engine from '../conversation-engine.js';
 import type {
   BridgeStore,
   LLMProvider,
-  PermissionGateway,
-  LifecycleHooks,
   StreamChatParams,
   BridgeSession,
   BridgeMessage,

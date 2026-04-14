@@ -1,0 +1,353 @@
+import type { InboundMessage, OutboundAttachment, StreamingPreviewState, ToolCallInfo } from './types.js';
+import type { BaseChannelAdapter } from './channel-adapter.js';
+import * as router from './channel-router.js';
+import * as engine from './conversation-engine.js';
+import * as broker from './permission-broker.js';
+import { getBridgeContext } from './context.js';
+import { stripOutboundArtifactBlocksForStreaming } from './outbound-artifacts.js';
+import { buildInteractiveStreamKey } from './mirror-formatters.js';
+import {
+  finalizeStreamFeedback,
+  pushStreamFeedbackText,
+  pushStreamFeedbackTools,
+} from './stream-feedback-controller.js';
+
+/** Generate a non-zero random 31-bit integer for use as draft_id. */
+function generateDraftId(): number {
+  return (Math.floor(Math.random() * 0x7FFFFFFE) + 1);
+}
+
+export interface StreamConfig {
+  intervalMs: number;
+  minDeltaChars: number;
+  maxChars: number;
+}
+
+const STREAM_DEFAULTS: Record<string, StreamConfig> = {
+  telegram: { intervalMs: 700, minDeltaChars: 20, maxChars: 3900 },
+  discord: { intervalMs: 1500, minDeltaChars: 40, maxChars: 1900 },
+};
+
+function getStreamConfig(channelType = 'telegram'): StreamConfig {
+  const { store } = getBridgeContext();
+  const defaults = STREAM_DEFAULTS[channelType] || STREAM_DEFAULTS.telegram;
+  const prefix = `bridge_${channelType}_stream_`;
+  const intervalMs = parseInt(store.getSetting(`${prefix}interval_ms`) || '', 10) || defaults.intervalMs;
+  const minDeltaChars = parseInt(store.getSetting(`${prefix}min_delta_chars`) || '', 10) || defaults.minDeltaChars;
+  const maxChars = parseInt(store.getSetting(`${prefix}max_chars`) || '', 10) || defaults.maxChars;
+  return { intervalMs, minDeltaChars, maxChars };
+}
+
+function flushPreview(
+  adapter: BaseChannelAdapter,
+  state: StreamingPreviewState,
+  config: StreamConfig,
+): void {
+  if (state.degraded || !adapter.sendPreview) return;
+
+  const text = state.pendingText.length > config.maxChars
+    ? state.pendingText.slice(0, config.maxChars) + '...'
+    : state.pendingText;
+
+  state.lastSentText = text;
+  state.lastSentAt = Date.now();
+
+  adapter.sendPreview(state.chatId, text, state.draftId).then((result) => {
+    if (result === 'degrade') state.degraded = true;
+  }).catch(() => {});
+}
+
+export interface InteractiveTaskState {
+  id: string;
+  abortController: AbortController;
+  adapter: BaseChannelAdapter;
+  address: InboundMessage['address'];
+  requestMessageId: string;
+  streamKey: string;
+  sessionId: string;
+  hasStreamingCards: boolean;
+  lastActivityAt: number;
+  idleReminderSent: boolean;
+  streamFinalized: boolean;
+  uiEnded: boolean;
+  mirrorSuppressionId: string | null;
+}
+
+export interface RunInteractiveMessageDeps {
+  registerInteractiveTask(task: InteractiveTaskState): void;
+  resetMirrorSessionForInteractiveRun(sessionId: string): void;
+  isCurrentInteractiveTask(sessionId: string, taskId: string): boolean;
+  touchInteractiveTask(sessionId: string, taskId: string): void;
+  recordInteractiveHealthStart(sessionId: string, detail?: string): void;
+  recordInteractiveHealthProgress(sessionId: string, type: 'text' | 'permission_wait', detail?: string): void;
+  recordInteractiveHealthTool(sessionId: string, toolId: string, toolName: string, status: 'running' | 'complete' | 'error'): void;
+  recordInteractiveHealthEnd(sessionId: string, outcome: 'completed' | 'failed' | 'aborted', detail?: string): void;
+  beginMirrorSuppression(sessionId: string, promptText: string): string;
+  settleMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
+  releaseInteractiveTask(sessionId: string, taskId: string): void;
+  deliverResponse(
+    adapter: BaseChannelAdapter,
+    address: InboundMessage['address'],
+    responseText: string,
+    sessionId: string,
+    replyToMessageId?: string,
+    attachments?: OutboundAttachment[],
+  ): Promise<unknown>;
+  persistSdkSessionUpdate(
+    sessionId: string,
+    sdkSessionId: string | null | undefined,
+    hasError: boolean,
+  ): void;
+}
+
+export async function runInteractiveMessage(
+  adapter: BaseChannelAdapter,
+  msg: InboundMessage,
+  text: string,
+  attachments: InboundMessage['attachments'] | undefined,
+  deps: RunInteractiveMessageDeps,
+): Promise<void> {
+  const binding = router.resolve(msg.address);
+  const streamKey = buildInteractiveStreamKey(binding.codepilotSessionId, msg.messageId);
+
+  adapter.onMessageStart?.(msg.address.chatId, streamKey);
+
+  const taskAbort = new AbortController();
+  const taskId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  deps.resetMirrorSessionForInteractiveRun(binding.codepilotSessionId);
+  const taskState: InteractiveTaskState = {
+    id: taskId,
+    abortController: taskAbort,
+    adapter,
+    address: msg.address,
+    requestMessageId: msg.messageId,
+    streamKey,
+    sessionId: binding.codepilotSessionId,
+    hasStreamingCards: false,
+    lastActivityAt: Date.now(),
+    idleReminderSent: false,
+    streamFinalized: false,
+    uiEnded: false,
+    mirrorSuppressionId: null,
+  };
+  deps.registerInteractiveTask(taskState);
+  deps.recordInteractiveHealthStart(binding.codepilotSessionId);
+
+  let previewState: StreamingPreviewState | null = null;
+  const caps = adapter.getPreviewCapabilities?.(msg.address.chatId) ?? null;
+  if (caps?.supported) {
+    previewState = {
+      draftId: generateDraftId(),
+      chatId: msg.address.chatId,
+      lastSentText: '',
+      lastSentAt: 0,
+      degraded: false,
+      throttleTimer: null,
+      pendingText: '',
+    };
+  }
+
+  const streamCfg = previewState ? getStreamConfig(adapter.provider) : null;
+  const previewOnPartialText = (previewState && streamCfg) ? (fullText: string) => {
+    const ps = previewState!;
+    const cfg = streamCfg!;
+    if (ps.degraded) return;
+    const sanitizedText = stripOutboundArtifactBlocksForStreaming(fullText);
+
+    ps.pendingText = sanitizedText.length > cfg.maxChars
+      ? sanitizedText.slice(0, cfg.maxChars) + '...'
+      : sanitizedText;
+
+    const delta = ps.pendingText.length - ps.lastSentText.length;
+    const elapsed = Date.now() - ps.lastSentAt;
+
+    if (delta < cfg.minDeltaChars && ps.lastSentAt > 0) {
+      if (!ps.throttleTimer) {
+        ps.throttleTimer = setTimeout(() => {
+          ps.throttleTimer = null;
+          if (!ps.degraded) flushPreview(adapter, ps, cfg);
+        }, cfg.intervalMs);
+      }
+      return;
+    }
+
+    if (elapsed < cfg.intervalMs && ps.lastSentAt > 0) {
+      if (!ps.throttleTimer) {
+        ps.throttleTimer = setTimeout(() => {
+          ps.throttleTimer = null;
+          if (!ps.degraded) flushPreview(adapter, ps, cfg);
+        }, cfg.intervalMs - elapsed);
+      }
+      return;
+    }
+
+    if (ps.throttleTimer) {
+      clearTimeout(ps.throttleTimer);
+      ps.throttleTimer = null;
+    }
+    flushPreview(adapter, ps, cfg);
+  } : undefined;
+
+  const hasStreamingCards = typeof adapter.onStreamText === 'function';
+  taskState.hasStreamingCards = hasStreamingCards;
+  const toolCallTracker = new Map<string, ToolCallInfo>();
+  const streamFeedbackTarget = {
+    adapter,
+    channelType: adapter.channelType,
+    chatId: msg.address.chatId,
+    streamKey,
+  };
+
+  const onStreamCardText = hasStreamingCards ? (fullText: string) => {
+    if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
+    pushStreamFeedbackText(
+      streamFeedbackTarget,
+      stripOutboundArtifactBlocksForStreaming(fullText),
+    );
+  } : undefined;
+
+  const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
+    if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
+    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+    deps.recordInteractiveHealthTool(binding.codepilotSessionId, toolId, toolName, status);
+    if (toolName) {
+      toolCallTracker.set(toolId, { id: toolId, name: toolName, status });
+    } else {
+      const existing = toolCallTracker.get(toolId);
+      if (existing) existing.status = status;
+    }
+    if (hasStreamingCards) {
+      pushStreamFeedbackTools(streamFeedbackTarget, Array.from(toolCallTracker.values()));
+    }
+  };
+
+  const onPartialText = (fullText: string) => {
+    if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
+    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+    deps.recordInteractiveHealthProgress(binding.codepilotSessionId, 'text');
+    previewOnPartialText?.(fullText);
+    onStreamCardText?.(fullText);
+  };
+
+  let finalOutcome: 'completed' | 'failed' | 'aborted' = 'failed';
+  let finalOutcomeDetail: string | undefined;
+  let shouldRecordHealthEnd = true;
+
+  try {
+    const promptText = text || (attachments && attachments.length > 0 ? 'Describe this image.' : '');
+
+    const result = await engine.processMessage(
+      binding,
+      promptText,
+      async (perm) => {
+        await broker.forwardPermissionRequest(
+          adapter,
+          msg.address,
+          perm.permissionRequestId,
+          perm.toolName,
+          perm.toolInput,
+          binding.codepilotSessionId,
+          perm.suggestions,
+          msg.messageId,
+        );
+        deps.recordInteractiveHealthProgress(
+          binding.codepilotSessionId,
+          'permission_wait',
+          `当前正在等待工具 ${perm.toolName} 的权限确认。`,
+        );
+      },
+      taskAbort.signal,
+      attachments && attachments.length > 0 ? attachments : undefined,
+      onPartialText,
+      onToolEvent,
+      (preparedPrompt) => {
+        if (!taskState.mirrorSuppressionId) {
+          taskState.mirrorSuppressionId = deps.beginMirrorSuppression(binding.codepilotSessionId, preparedPrompt);
+        }
+      },
+    );
+
+    if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) {
+      shouldRecordHealthEnd = false;
+      return;
+    }
+
+    let cardFinalized = false;
+    if (hasStreamingCards) {
+      cardFinalized = await finalizeStreamFeedback(
+        streamFeedbackTarget,
+        result.hasError ? 'error' : 'completed',
+        result.responseText,
+      );
+      taskState.streamFinalized = cardFinalized;
+    }
+
+    if (result.responseText || result.outboundAttachments.length > 0) {
+      const textToDeliver = cardFinalized ? '' : result.responseText;
+      await deps.deliverResponse(
+        adapter,
+        msg.address,
+        textToDeliver,
+        binding.codepilotSessionId,
+        msg.messageId,
+        result.outboundAttachments,
+      );
+    } else if (result.hasError) {
+      await deps.deliverResponse(
+        adapter,
+        msg.address,
+        `**Error:** ${result.errorMessage}`,
+        binding.codepilotSessionId,
+        msg.messageId,
+        [],
+      );
+    }
+
+    try {
+      deps.persistSdkSessionUpdate(binding.codepilotSessionId, result.sdkSessionId, result.hasError);
+    } catch {
+      // best effort
+    }
+    finalOutcome = result.hasError ? 'failed' : 'completed';
+    finalOutcomeDetail = result.hasError
+      ? (result.errorMessage?.trim() || undefined)
+      : undefined;
+  } finally {
+    if (previewState) {
+      if (previewState.throttleTimer) {
+        clearTimeout(previewState.throttleTimer);
+        previewState.throttleTimer = null;
+      }
+      adapter.endPreview?.(msg.address.chatId, previewState.draftId);
+    }
+
+    if (
+      hasStreamingCards
+      && taskAbort.signal.aborted
+      && !taskState.streamFinalized
+    ) {
+      taskState.streamFinalized = await finalizeStreamFeedback(
+        streamFeedbackTarget,
+        'interrupted',
+        '',
+      );
+    }
+
+    if (taskState.mirrorSuppressionId) {
+      deps.settleMirrorSuppression(binding.codepilotSessionId, taskState.mirrorSuppressionId);
+      taskState.mirrorSuppressionId = null;
+    }
+    if (shouldRecordHealthEnd) {
+      if (taskAbort.signal.aborted) {
+        finalOutcome = 'aborted';
+        finalOutcomeDetail = '任务已收到停止请求。';
+      }
+      deps.recordInteractiveHealthEnd(binding.codepilotSessionId, finalOutcome, finalOutcomeDetail);
+    }
+    deps.releaseInteractiveTask(binding.codepilotSessionId, taskId);
+    if (!taskState.uiEnded) {
+      adapter.onMessageEnd?.(msg.address.chatId, streamKey);
+      taskState.uiEnded = true;
+    }
+  }
+}

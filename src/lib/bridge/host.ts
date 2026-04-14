@@ -67,6 +67,17 @@ export interface BridgeApiProvider {
 // ── Session & Message types ──────────────────────────────────
 
 /** Minimal session object returned by the store. */
+export type BridgeSessionHealthStatus =
+  | 'idle'
+  | 'running_active'
+  | 'waiting_tool'
+  | 'slow_observed'
+  | 'suspected_stall'
+  | 'suspected_detached'
+  | 'completed'
+  | 'failed'
+  | 'aborted';
+
 export interface BridgeSession {
   id: string;
   name?: string;
@@ -77,13 +88,22 @@ export interface BridgeSession {
   provider_id?: string;
   sdk_session_id?: string;
   reasoning_effort?: CodexReasoningEffort;
-  session_type?: 'normal' | 'draft' | 'history_summary';
+  session_type?: 'normal' | 'draft';
   hidden?: boolean;
   parent_session_id?: string;
   expires_at?: string;
   runtime_status?: 'idle' | 'running' | 'queued';
   queued_count?: number;
   last_runtime_update_at?: string;
+  health_status?: BridgeSessionHealthStatus;
+  health_reason?: string;
+  last_progress_at?: string;
+  last_progress_type?: string;
+  active_tools_json?: string;
+  active_tool_name?: string;
+  active_tool_started_at?: string;
+  last_tool_finished_at?: string;
+  last_health_check_at?: string;
   mirror_status?: 'inactive' | 'watching' | 'stale';
   mirror_last_event_at?: string;
   created_at?: string;

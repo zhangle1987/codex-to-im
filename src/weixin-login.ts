@@ -60,7 +60,7 @@ function escapeHtml(text: string): string {
     .replaceAll('"', '&quot;');
 }
 
-export function buildQrHtml(session: LoginSession, qrSvg: string): string {
+export function buildQrHtml(qrSvg: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -370,7 +370,7 @@ export function buildWeixinLoginPopupHtml(sessionId: string): string {
 async function writeQrHtml(session: LoginSession): Promise<void> {
   ensureRuntimeDir();
   const qrSvg = await buildQrSvg(session.qrImageUrl);
-  fs.writeFileSync(HTML_PATH, buildQrHtml(session, qrSvg), 'utf-8');
+  fs.writeFileSync(HTML_PATH, buildQrHtml(qrSvg), 'utf-8');
 }
 
 function openQrHtml(): boolean {

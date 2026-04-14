@@ -114,7 +114,6 @@ function assertBindingTargetAvailable(
 
 function getSessionName(session: BridgeSession): string {
   if (session.session_type === 'draft') return '临时草稿线程';
-  if (session.session_type === 'history_summary') return '历史摘要线程';
   if (session.name?.trim()) return session.name.trim();
   if (session.working_directory) return path.basename(session.working_directory);
   return session.id.slice(0, 8);

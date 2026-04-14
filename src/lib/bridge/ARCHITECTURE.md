@@ -63,7 +63,7 @@ All host dependencies are abstracted through interfaces in `host.ts` and accesse
 
 ### Outbound (LLM → IM)
 
-1. **Bridge Manager** receives response text, dispatches to `deliverResponse()`
+1. **Bridge Manager** receives response text, dispatches to `feedback-delivery.ts:deliverResponse()`
 2. Platform-specific rendering: Telegram (HTML chunks), Discord (native markdown), Feishu (cards)
 3. **Delivery Layer** handles chunking, rate limiting, retry, dedup, audit logging
 4. **Adapter** sends via platform API
