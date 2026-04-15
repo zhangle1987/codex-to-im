@@ -83,6 +83,7 @@ export interface RunInteractiveMessageDeps {
   recordInteractiveHealthTool(sessionId: string, toolId: string, toolName: string, status: 'running' | 'complete' | 'error'): void;
   recordInteractiveHealthEnd(sessionId: string, outcome: 'completed' | 'failed' | 'aborted', detail?: string): void;
   beginMirrorSuppression(sessionId: string, promptText: string): string;
+  abortMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
   settleMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
   releaseInteractiveTask(sessionId: string, taskId: string): void;
   deliverResponse(
@@ -334,7 +335,11 @@ export async function runInteractiveMessage(
     }
 
     if (taskState.mirrorSuppressionId) {
-      deps.settleMirrorSuppression(binding.codepilotSessionId, taskState.mirrorSuppressionId);
+      if (taskAbort.signal.aborted) {
+        deps.abortMirrorSuppression(binding.codepilotSessionId, taskState.mirrorSuppressionId);
+      } else {
+        deps.settleMirrorSuppression(binding.codepilotSessionId, taskState.mirrorSuppressionId);
+      }
       taskState.mirrorSuppressionId = null;
     }
     if (shouldRecordHealthEnd) {

@@ -52,6 +52,7 @@ import {
   type MirrorTurnHooks,
 } from './mirror-turns.js';
 import {
+  abortMirrorSuppression as abortMirrorSuppressionBase,
   beginMirrorSuppression as beginMirrorSuppressionBase,
   filterSuppressedMirrorRecords as filterSuppressedMirrorRecordsBase,
   isMirrorSuppressed as isMirrorSuppressedBase,
@@ -255,6 +256,18 @@ function getMirrorSuppressionStore(): MirrorSuppressionStore {
 
 function beginMirrorSuppression(sessionId: string, promptText: string): string {
   return beginMirrorSuppressionBase(getMirrorSuppressionStore(), sessionId, promptText);
+}
+
+function abortMirrorSuppression(
+  sessionId: string,
+  suppressionId?: string | null,
+): void {
+  abortMirrorSuppressionBase(
+    getMirrorSuppressionStore(),
+    sessionId,
+    MIRROR_SUPPRESSION_CONFIG,
+    suppressionId,
+  );
 }
 
 function settleMirrorSuppression(
@@ -931,6 +944,7 @@ async function handleMessage(
       },
       recordInteractiveHealthEnd: (sessionId, outcome, detail) => SESSION_HEALTH_RUNTIME.recordInteractiveEnd(sessionId, outcome, detail),
       beginMirrorSuppression,
+      abortMirrorSuppression,
       settleMirrorSuppression,
       releaseInteractiveTask: (sessionId, taskId) => INTERACTIVE_RUNTIME.releaseInteractiveTask(sessionId, taskId),
       deliverResponse,
@@ -1053,8 +1067,10 @@ export const _testOnly = {
   consumeBufferedMirrorTurns,
   flushTimedOutMirrorTurn,
   filterSuppressedMirrorRecords,
+  isMirrorSuppressed,
   reconcileIdleInteractiveTasks: () => INTERACTIVE_RUNTIME.reconcileIdleInteractiveTasks(),
   beginMirrorSuppression,
+  abortMirrorSuppression,
   settleMirrorSuppression,
   persistSdkSessionUpdate,
   resetStateForTests,

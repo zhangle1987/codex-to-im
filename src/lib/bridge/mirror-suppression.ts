@@ -157,6 +157,36 @@ export function settleMirrorSuppression(
   target.until = nowMs + durationMs;
 }
 
+export function abortMirrorSuppression(
+  store: MirrorSuppressionStore,
+  sessionId: string,
+  config: MirrorSuppressionConfig,
+  suppressionId?: string | null,
+  nowMs = Date.now(),
+): void {
+  const suppressions = getMirrorSuppressionStates(store, sessionId, nowMs);
+  if (suppressions.length === 0) return;
+  const target = suppressionId
+    ? suppressions.find((suppression) => suppression.id === suppressionId)
+    : suppressions[suppressions.length - 1];
+  if (!target) return;
+
+  const trackedTurnId = target.activeTurnId || target.candidateTurnId;
+  if (trackedTurnId) {
+    markIgnoredMirrorTurn(
+      store,
+      sessionId,
+      trackedTurnId,
+      config.promptMatchGraceMs,
+      nowMs,
+    );
+    clearMirrorSuppression(store, sessionId, target.id);
+    return;
+  }
+
+  target.until = nowMs + config.suppressionWindowMs;
+}
+
 export function isMirrorSuppressed(
   store: MirrorSuppressionStore,
   sessionId: string,
@@ -173,10 +203,10 @@ export function filterSuppressedMirrorRecords(
   nowMs = Date.now(),
 ): DesktopMirrorRecord[] {
   const suppressions = getMirrorSuppressionStates(store, sessionId, nowMs);
-  if (suppressions.length === 0 || records.length === 0) return records;
+  const ignoredTurnIds = cleanupIgnoredMirrorTurns(store, sessionId, nowMs);
+  if ((suppressions.length === 0 && ignoredTurnIds.size === 0) || records.length === 0) return records;
 
   const filtered: DesktopMirrorRecord[] = [];
-  cleanupIgnoredMirrorTurns(store, sessionId, nowMs);
 
   for (const record of records) {
     const normalizedContent = record.type === 'message'
