@@ -20,6 +20,8 @@ export interface RuntimeConfigV2 {
   defaultModel?: string;
   defaultMode: string;
   historyMessageLimit?: number;
+  streamStatusIdleStartSeconds?: number;
+  streamStatusCheckIntervalSeconds?: number;
   codexSkipGitRepoCheck?: boolean;
   codexSandboxMode?: CodexSandboxMode;
   codexReasoningEffort?: CodexReasoningEffort;
@@ -75,6 +77,8 @@ export interface Config {
   defaultModel?: string;
   defaultMode: string;
   historyMessageLimit?: number;
+  streamStatusIdleStartSeconds?: number;
+  streamStatusCheckIntervalSeconds?: number;
   codexSkipGitRepoCheck?: boolean;
   codexSandboxMode?: CodexSandboxMode;
   codexReasoningEffort?: CodexReasoningEffort;
@@ -104,6 +108,8 @@ export const DEFAULT_WORKSPACE_ROOT = path.join(os.homedir(), "cx2im");
 export const CTI_HOME = process.env.CTI_HOME || DEFAULT_CTI_HOME;
 export const CONFIG_PATH = path.join(CTI_HOME, "config.env");
 export const CONFIG_V2_PATH = path.join(CTI_HOME, "config.v2.json");
+const DEFAULT_STREAM_STATUS_IDLE_START_SECONDS = 180;
+const DEFAULT_STREAM_STATUS_CHECK_INTERVAL_SECONDS = 10;
 
 export function expandHomePath(value: string | undefined): string | undefined {
   if (!value) return value;
@@ -278,6 +284,10 @@ function migrateLegacyEnvToV2(env: Map<string, string>): ConfigV2File {
       defaultModel: env.get("CTI_DEFAULT_MODEL") || undefined,
       defaultMode: env.get("CTI_DEFAULT_MODE") || "code",
       historyMessageLimit: parsePositiveInt(env.get("CTI_HISTORY_MESSAGE_LIMIT")) ?? 8,
+      streamStatusIdleStartSeconds: parsePositiveInt(env.get("CTI_STREAM_STATUS_IDLE_START_SECONDS"))
+        ?? DEFAULT_STREAM_STATUS_IDLE_START_SECONDS,
+      streamStatusCheckIntervalSeconds: parsePositiveInt(env.get("CTI_STREAM_STATUS_CHECK_INTERVAL_SECONDS"))
+        ?? DEFAULT_STREAM_STATUS_CHECK_INTERVAL_SECONDS,
       codexSkipGitRepoCheck: env.has("CTI_CODEX_SKIP_GIT_REPO_CHECK")
         ? env.get("CTI_CODEX_SKIP_GIT_REPO_CHECK") === "true"
         : true,
@@ -312,6 +322,8 @@ function expandConfig(v2: ConfigV2File): Config {
     defaultModel: v2.runtime.defaultModel,
     defaultMode: v2.runtime.defaultMode || 'code',
     historyMessageLimit: v2.runtime.historyMessageLimit ?? 8,
+    streamStatusIdleStartSeconds: v2.runtime.streamStatusIdleStartSeconds ?? DEFAULT_STREAM_STATUS_IDLE_START_SECONDS,
+    streamStatusCheckIntervalSeconds: v2.runtime.streamStatusCheckIntervalSeconds ?? DEFAULT_STREAM_STATUS_CHECK_INTERVAL_SECONDS,
     codexSkipGitRepoCheck: v2.runtime.codexSkipGitRepoCheck ?? true,
     codexSandboxMode: v2.runtime.codexSandboxMode ?? 'workspace-write',
     codexReasoningEffort: v2.runtime.codexReasoningEffort ?? 'medium',
@@ -335,6 +347,8 @@ function buildV2FileFromExpandedConfig(config: Config, current?: ConfigV2File | 
       defaultModel: config.defaultModel,
       defaultMode: config.defaultMode,
       historyMessageLimit: config.historyMessageLimit,
+      streamStatusIdleStartSeconds: config.streamStatusIdleStartSeconds,
+      streamStatusCheckIntervalSeconds: config.streamStatusCheckIntervalSeconds,
       codexSkipGitRepoCheck: config.codexSkipGitRepoCheck,
       codexSandboxMode: config.codexSandboxMode,
       codexReasoningEffort: config.codexReasoningEffort,
@@ -368,6 +382,8 @@ export function loadConfig(): Config {
       defaultWorkspaceRoot: DEFAULT_WORKSPACE_ROOT,
       defaultMode: 'code',
       historyMessageLimit: 8,
+      streamStatusIdleStartSeconds: DEFAULT_STREAM_STATUS_IDLE_START_SECONDS,
+      streamStatusCheckIntervalSeconds: DEFAULT_STREAM_STATUS_CHECK_INTERVAL_SECONDS,
       codexSkipGitRepoCheck: true,
       codexSandboxMode: 'workspace-write',
       codexReasoningEffort: 'medium',
@@ -401,6 +417,12 @@ export function saveConfig(config: Config): void {
   out += formatEnvLine("CTI_DEFAULT_MODE", next.runtime.defaultMode);
   if (next.runtime.historyMessageLimit !== undefined) {
     out += formatEnvLine("CTI_HISTORY_MESSAGE_LIMIT", String(next.runtime.historyMessageLimit));
+  }
+  if (next.runtime.streamStatusIdleStartSeconds !== undefined) {
+    out += formatEnvLine("CTI_STREAM_STATUS_IDLE_START_SECONDS", String(next.runtime.streamStatusIdleStartSeconds));
+  }
+  if (next.runtime.streamStatusCheckIntervalSeconds !== undefined) {
+    out += formatEnvLine("CTI_STREAM_STATUS_CHECK_INTERVAL_SECONDS", String(next.runtime.streamStatusCheckIntervalSeconds));
   }
   if (next.runtime.codexSkipGitRepoCheck !== undefined) {
     out += formatEnvLine("CTI_CODEX_SKIP_GIT_REPO_CHECK", String(next.runtime.codexSkipGitRepoCheck));
@@ -484,6 +506,22 @@ export function configToSettings(config: Config): Map<string, string> {
   m.set(
     "bridge_history_message_limit",
     String(config.historyMessageLimit && config.historyMessageLimit > 0 ? config.historyMessageLimit : 8),
+  );
+  m.set(
+    "bridge_stream_status_idle_start_seconds",
+    String(
+      config.streamStatusIdleStartSeconds && config.streamStatusIdleStartSeconds > 0
+        ? config.streamStatusIdleStartSeconds
+        : DEFAULT_STREAM_STATUS_IDLE_START_SECONDS,
+    ),
+  );
+  m.set(
+    "bridge_stream_status_check_interval_seconds",
+    String(
+      config.streamStatusCheckIntervalSeconds && config.streamStatusCheckIntervalSeconds > 0
+        ? config.streamStatusCheckIntervalSeconds
+        : DEFAULT_STREAM_STATUS_CHECK_INTERVAL_SECONDS,
+    ),
   );
   m.set(
     "bridge_codex_skip_git_repo_check",

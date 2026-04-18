@@ -226,6 +226,7 @@ describe('interactive-message-runner', () => {
         nowMs: () => clock.now(),
         setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
         clearIntervalFn: (handle) => clock.clearInterval(handle),
+        streamStatusIdleDetectionStartMs: 10_000,
         streamStatusHeartbeatMs: 10_000,
       },
     );
@@ -238,6 +239,86 @@ describe('interactive-message-runner', () => {
     const statusCountAfterFinish = adapter.streamedStatuses.length;
     clock.advance(10_000);
     assert.equal(adapter.streamedStatuses.length, statusCountAfterFinish);
+  });
+
+  it('does not show silence before the configured startup threshold', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-threshold',
+      userId: 'user-threshold',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\threshold');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const clock = createManualIntervalClock();
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-threshold-1',
+        address,
+        text: 'hello',
+        timestamp: clock.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = clock.now();
+          task.idleReminderSent = false;
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-threshold'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse() {},
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
+          onPartialText?.('第一段输出');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 0s');
+
+          clock.advance(30_000);
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 0s');
+
+          clock.advance(150_000);
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 3m，最近 3m 无新输出');
+
+          return {
+            responseText: '最终回复',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: false,
+            errorMessage: '',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+        nowMs: () => clock.now(),
+        setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
+        clearIntervalFn: (handle) => clock.clearInterval(handle),
+        streamStatusIdleDetectionStartMs: 180_000,
+        streamStatusHeartbeatMs: 10_000,
+      },
+    );
   });
 
   it('stops the runtime heartbeat before stream finalization begins', async () => {
@@ -323,6 +404,7 @@ describe('interactive-message-runner', () => {
         nowMs: () => clock.now(),
         setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
         clearIntervalFn: (handle) => clock.clearInterval(handle),
+        streamStatusIdleDetectionStartMs: 10_000,
         streamStatusHeartbeatMs: 10_000,
       },
     );

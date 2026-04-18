@@ -206,6 +206,18 @@ describe('configToSettings', () => {
     assert.equal(m.has('default_model'), false);
     assert.equal(m.get('bridge_default_mode'), 'code');
     assert.equal(m.get('bridge_history_message_limit'), '8');
+    assert.equal(m.get('bridge_stream_status_idle_start_seconds'), '180');
+    assert.equal(m.get('bridge_stream_status_check_interval_seconds'), '10');
+  });
+
+  it('maps configured stream status timing settings', () => {
+    const m = configToSettings({
+      ...base,
+      streamStatusIdleStartSeconds: 240,
+      streamStatusCheckIntervalSeconds: 15,
+    });
+    assert.equal(m.get('bridge_stream_status_idle_start_seconds'), '240');
+    assert.equal(m.get('bridge_stream_status_check_interval_seconds'), '15');
   });
 
   it('maps model when explicitly set', () => {
@@ -353,6 +365,8 @@ describe('loadConfig/saveConfig round-trip', () => {
           provider: 'codex',
           defaultMode: 'code',
           historyMessageLimit: 8,
+          streamStatusIdleStartSeconds: 180,
+          streamStatusCheckIntervalSeconds: 10,
         },
         channels: [
           {
@@ -390,6 +404,8 @@ describe('loadConfig/saveConfig round-trip', () => {
       ...loaded,
       defaultMode: 'plan',
       historyMessageLimit: 12,
+      streamStatusIdleStartSeconds: 240,
+      streamStatusCheckIntervalSeconds: 15,
     });
 
     const reloaded = loadConfig();
@@ -417,5 +433,7 @@ describe('loadConfig/saveConfig round-trip', () => {
     );
     assert.equal(reloaded.defaultMode, 'plan');
     assert.equal(reloaded.historyMessageLimit, 12);
+    assert.equal(reloaded.streamStatusIdleStartSeconds, 240);
+    assert.equal(reloaded.streamStatusCheckIntervalSeconds, 15);
   });
 });

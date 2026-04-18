@@ -28,6 +28,7 @@ const STREAM_DEFAULTS: Record<string, StreamConfig> = {
   telegram: { intervalMs: 700, minDeltaChars: 20, maxChars: 3900 },
   discord: { intervalMs: 1500, minDeltaChars: 40, maxChars: 1900 },
 };
+const STREAM_STATUS_IDLE_START_MS = 180_000;
 const STREAM_STATUS_HEARTBEAT_MS = 10_000;
 
 function getStreamConfig(channelType = 'telegram'): StreamConfig {
@@ -38,6 +39,25 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
   const minDeltaChars = parseInt(store.getSetting(`${prefix}min_delta_chars`) || '', 10) || defaults.minDeltaChars;
   const maxChars = parseInt(store.getSetting(`${prefix}max_chars`) || '', 10) || defaults.maxChars;
   return { intervalMs, minDeltaChars, maxChars };
+}
+
+function getStructuredStreamStatusConfig(): {
+  idleStartMs: number;
+  heartbeatMs: number;
+} {
+  const { store } = getBridgeContext();
+  const idleStartSeconds = parseInt(store.getSetting('bridge_stream_status_idle_start_seconds') || '', 10);
+  const heartbeatSeconds = parseInt(store.getSetting('bridge_stream_status_check_interval_seconds') || '', 10);
+  return {
+    idleStartMs: Math.max(
+      0,
+      (Number.isFinite(idleStartSeconds) && idleStartSeconds > 0 ? idleStartSeconds : STREAM_STATUS_IDLE_START_MS / 1000) * 1000,
+    ),
+    heartbeatMs: Math.max(
+      1_000,
+      (Number.isFinite(heartbeatSeconds) && heartbeatSeconds > 0 ? heartbeatSeconds : STREAM_STATUS_HEARTBEAT_MS / 1000) * 1000,
+    ),
+  };
 }
 
 function flushPreview(
@@ -132,6 +152,7 @@ export interface RunInteractiveMessageDeps {
   nowMs?(): number;
   setIntervalFn?(callback: () => void, intervalMs: number): unknown;
   clearIntervalFn?(handle: unknown): void;
+  streamStatusIdleDetectionStartMs?: number;
   streamStatusHeartbeatMs?: number;
 }
 
@@ -149,7 +170,15 @@ export async function runInteractiveMessage(
   const clearIntervalFn = deps.clearIntervalFn ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>));
   const processMessageImpl = deps.processMessageImpl ?? engine.processMessage;
   const forwardPermissionRequestImpl = deps.forwardPermissionRequestImpl ?? broker.forwardPermissionRequest;
-  const streamStatusHeartbeatMs = Math.max(1_000, deps.streamStatusHeartbeatMs ?? STREAM_STATUS_HEARTBEAT_MS);
+  const structuredStreamStatusConfig = getStructuredStreamStatusConfig();
+  const streamStatusIdleDetectionStartMs = Math.max(
+    0,
+    deps.streamStatusIdleDetectionStartMs ?? structuredStreamStatusConfig.idleStartMs,
+  );
+  const streamStatusHeartbeatMs = Math.max(
+    1_000,
+    deps.streamStatusHeartbeatMs ?? structuredStreamStatusConfig.heartbeatMs,
+  );
 
   adapter.onMessageStart?.(msg.address.chatId, streamKey);
 
@@ -318,6 +347,8 @@ export async function runInteractiveMessage(
         clearStreamStatusHeartbeat();
         return;
       }
+      const elapsedMs = nowMs() - taskStartedAt;
+      if (elapsedMs < streamStatusIdleDetectionStartMs) return;
       const silentMs = nowMs() - taskState.lastActivityAt;
       if (silentMs < streamStatusHeartbeatMs) return;
       pushRunningStatus(silentMs);

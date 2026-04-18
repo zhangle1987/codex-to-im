@@ -335,6 +335,8 @@ function configToPayload(config: Config) {
     availableModels: availableCodexModels,
     defaultMode: config.defaultMode,
     historyMessageLimit: config.historyMessageLimit ?? 8,
+    streamStatusIdleStartSeconds: config.streamStatusIdleStartSeconds ?? 180,
+    streamStatusCheckIntervalSeconds: config.streamStatusCheckIntervalSeconds ?? 10,
     codexSkipGitRepoCheck: config.codexSkipGitRepoCheck === true,
     codexSandboxMode: config.codexSandboxMode || 'workspace-write',
     codexReasoningEffort: config.codexReasoningEffort || 'medium',
@@ -370,6 +372,12 @@ function mergeConfig(payload: Record<string, unknown>): Config {
           : current.defaultModel,
     defaultMode: payload.defaultMode === 'plan' || payload.defaultMode === 'ask' ? payload.defaultMode : 'code',
     historyMessageLimit: asPositiveInt(payload.historyMessageLimit) || current.historyMessageLimit || 8,
+    streamStatusIdleStartSeconds: asPositiveInt(payload.streamStatusIdleStartSeconds)
+      || current.streamStatusIdleStartSeconds
+      || 180,
+    streamStatusCheckIntervalSeconds: asPositiveInt(payload.streamStatusCheckIntervalSeconds)
+      || current.streamStatusCheckIntervalSeconds
+      || 10,
     codexSkipGitRepoCheck: payload.codexSkipGitRepoCheck === true,
     codexSandboxMode: payload.codexSandboxMode === 'read-only'
       || payload.codexSandboxMode === 'danger-full-access'
@@ -2285,6 +2293,14 @@ function renderHtml(): string {
                   /history 返回条数
                   <input id="historyMessageLimit" type="number" min="1" max="20" value="8" />
                 </label>
+                <label>
+                  静默检测启动时长（秒）
+                  <input id="streamStatusIdleStartSeconds" type="number" min="1" value="180" />
+                </label>
+                <label>
+                  静默检测间隔（秒）
+                  <input id="streamStatusCheckIntervalSeconds" type="number" min="1" value="10" />
+                </label>
               </div>
               <label>
                 默认工作空间
@@ -2314,7 +2330,7 @@ function renderHtml(): string {
                   </select>
                 </label>
               </div>
-              <div class="small">未绑定的 IM 聊天会先进入临时草稿线程（等同 <code>/t 0</code>）；“默认工作空间”只用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。默认模型候选项来自启动时读取的 Codex 模型缓存：隐藏模型不会展示，CLI only 模型会标成“仅 IM / CLI”。留空则继续跟随 Codex 当前默认模型。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。</div>
+              <div class="small">未绑定的 IM 聊天会先进入临时草稿线程（等同 <code>/t 0</code>）；“默认工作空间”只用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。默认模型候选项来自启动时读取的 Codex 模型缓存：隐藏模型不会展示，CLI only 模型会标成“仅 IM / CLI”。留空则继续跟随 Codex 当前默认模型。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。静默检测配置只影响飞书长任务底部“最近 X 无新输出”的出现时机。</div>
               <div class="small">当前需要重启 Bridge 的配置：<code>Runtime</code>、<code>自动批准工具权限</code>、<code>允许在未信任 Git 目录运行 Codex</code>。通道实例的接入配置请在“通道”页维护。</div>
               <div class="checkbox-row">
                 <label class="checkbox"><input id="autoApprove" type="checkbox" /> 自动批准工具权限</label>
@@ -2634,6 +2650,8 @@ function renderHtml(): string {
           runtime: document.getElementById('runtime').value,
           defaultMode: document.getElementById('defaultMode').value,
           historyMessageLimit: document.getElementById('historyMessageLimit').value,
+          streamStatusIdleStartSeconds: document.getElementById('streamStatusIdleStartSeconds').value,
+          streamStatusCheckIntervalSeconds: document.getElementById('streamStatusCheckIntervalSeconds').value,
           defaultWorkspaceRoot: document.getElementById('defaultWorkspaceRoot').value,
           defaultModel: document.getElementById('defaultModel').value,
           codexSkipGitRepoCheck: document.getElementById('codexSkipGitRepoCheck').checked,
@@ -2811,6 +2829,8 @@ function renderHtml(): string {
         defaultModel: '默认模型',
         defaultMode: '默认模式',
         historyMessageLimit: '/history 返回条数',
+        streamStatusIdleStartSeconds: '静默检测启动时长',
+        streamStatusCheckIntervalSeconds: '静默检测间隔',
         codexSkipGitRepoCheck: '允许在未信任 Git 目录运行 Codex',
         codexSandboxMode: 'Codex 文件系统权限',
         codexReasoningEffort: 'Codex 思考级别',
@@ -2832,6 +2852,8 @@ function renderHtml(): string {
         'defaultModel',
         'defaultMode',
         'historyMessageLimit',
+        'streamStatusIdleStartSeconds',
+        'streamStatusCheckIntervalSeconds',
         'codexSandboxMode',
         'codexReasoningEffort',
         'uiAllowLan',
@@ -3403,6 +3425,8 @@ function renderHtml(): string {
         document.getElementById('runtime').value = config.runtime || 'codex';
         document.getElementById('defaultMode').value = config.defaultMode || 'code';
         document.getElementById('historyMessageLimit').value = String(config.historyMessageLimit || 8);
+        document.getElementById('streamStatusIdleStartSeconds').value = String(config.streamStatusIdleStartSeconds || 180);
+        document.getElementById('streamStatusCheckIntervalSeconds').value = String(config.streamStatusCheckIntervalSeconds || 10);
         document.getElementById('defaultWorkspaceRoot').value = config.defaultWorkspaceRoot || '';
         renderDefaultModelOptions(config);
         document.getElementById('codexSkipGitRepoCheck').checked = config.codexSkipGitRepoCheck === true;
