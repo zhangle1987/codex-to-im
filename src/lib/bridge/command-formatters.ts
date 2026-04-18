@@ -203,6 +203,23 @@ export function formatCommandMessageId(id: string | undefined | null): string {
   return id;
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+export function formatCommandDateTime(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return '-';
+
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) return trimmed;
+
+  return [
+    `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`,
+    `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`,
+  ].join(' ');
+}
+
 function stripStoredAttachmentMarker(content: string): string {
   return content.replace(/\n?<!--files:[\s\S]*?-->$/u, '').trim();
 }
@@ -271,7 +288,7 @@ export function formatRuntimeStatus(session: BridgeSession | null | undefined): 
 export function formatMirrorStatus(session: BridgeSession | null | undefined): string {
   if (session?.mirror_status === 'watching') {
     return session.mirror_last_event_at
-      ? `监听中 · 最近同步 ${session.mirror_last_event_at}`
+      ? `监听中 · 最近同步 ${formatCommandDateTime(session.mirror_last_event_at)}`
       : '监听中';
   }
   if (session?.mirror_status === 'stale') {

@@ -3,6 +3,7 @@ import type { SessionHealthDiagnosis } from './session-health-runtime.js';
 import {
   buildCommandFields,
   buildIndexedCommandList,
+  formatCommandDateTime,
   formatRuntimeStatus,
 } from './command-formatters.js';
 
@@ -34,15 +35,16 @@ export function formatCommandTimestamp(value: string | null | undefined): string
   if (!trimmed) return '-';
   const parsed = Date.parse(trimmed);
   if (!Number.isFinite(parsed)) return trimmed;
+  const localized = formatCommandDateTime(trimmed);
 
   const diffMs = Math.max(0, Date.now() - parsed);
   const diffMinutes = Math.floor(diffMs / 60_000);
-  if (diffMinutes < 1) return `${trimmed}（刚刚）`;
-  if (diffMinutes < 60) return `${trimmed}（${diffMinutes} 分钟前）`;
+  if (diffMinutes < 1) return `${localized}（刚刚）`;
+  if (diffMinutes < 60) return `${localized}（${diffMinutes} 分钟前）`;
   const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) return `${trimmed}（${diffHours} 小时前）`;
+  if (diffHours < 24) return `${localized}（${diffHours} 小时前）`;
   const diffDays = Math.floor(diffHours / 24);
-  return `${trimmed}（${diffDays} 天前）`;
+  return `${localized}（${diffDays} 天前）`;
 }
 
 export function formatHealthProcessProbe(diagnosis: SessionHealthDiagnosis): string {

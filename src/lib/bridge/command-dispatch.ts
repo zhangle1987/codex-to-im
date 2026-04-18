@@ -6,6 +6,7 @@ import {
   buildCommandFields,
   buildDesktopThreadsCommandResponse,
   DEFAULT_DESKTOP_THREAD_LIST_LIMIT,
+  formatCommandDateTime,
   formatCommandPath,
   formatHistoryRole,
   formatMirrorStatus,
@@ -159,7 +160,7 @@ export async function handleBridgeCommand(
           [
             ['标题', getSessionDisplayName(draftSession, draftSession.working_directory)],
             ['目录', formatCommandPath(draftSession.working_directory)],
-            ['过期时间', draftSession.expires_at || '-'],
+            ['过期时间', formatCommandDateTime(draftSession.expires_at)],
             ['模式', 'ask'],
           ],
           ['这是隐藏的草稿线程，不会出现在常规会话列表中。'],

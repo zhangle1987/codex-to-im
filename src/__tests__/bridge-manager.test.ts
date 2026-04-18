@@ -602,7 +602,7 @@ describe('bridge-manager status formatting', () => {
         mirror_status: 'watching',
         mirror_last_event_at: '2026-03-25T08:00:00.000Z',
       }),
-      '监听中 · 最近同步 2026-03-25T08:00:00.000Z',
+      `监听中 · 最近同步 ${_testOnly.formatCommandDateTime('2026-03-25T08:00:00.000Z')}`,
     );
   });
 

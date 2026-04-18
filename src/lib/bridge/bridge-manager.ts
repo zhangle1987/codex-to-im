@@ -26,6 +26,7 @@ import {
 } from './security/validators.js';
 import {
   buildDesktopThreadsCommandResponse,
+  formatCommandDateTime,
   formatMirrorStatus,
   formatRuntimeStatus,
   normalizeReasoningEffort,
@@ -1049,6 +1050,7 @@ export const _testOnly = {
   resolveCommandAlias,
   parseDesktopThreadListArgs,
   buildDesktopThreadsCommandResponse,
+  formatCommandDateTime,
   toUserVisibleBindingError,
   toUserVisibleCommandError,
   normalizeReasoningEffort,
