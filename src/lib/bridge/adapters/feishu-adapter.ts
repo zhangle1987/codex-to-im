@@ -79,7 +79,7 @@ interface FeishuCardState {
 
 /** Streaming card throttle interval (ms). */
 const CARD_THROTTLE_MS = 200;
-const INITIAL_STREAMING_STATUS = '已运行 0s';
+const INITIAL_STREAMING_STATUS = '处理中';
 const EMPTY_STREAMING_TOOLS = '';
 
 /** Shape of the SDK's im.message.receive_v1 event data. */

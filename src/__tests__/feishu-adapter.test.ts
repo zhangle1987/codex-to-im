@@ -53,7 +53,7 @@ describe('feishu-adapter structured streaming regions', () => {
     assert.equal(elements[1]?.element_id, 'streaming_tools');
     assert.equal(elements[1]?.content, '');
     assert.equal(elements[2]?.element_id, 'streaming_status');
-    assert.equal(elements[2]?.content, '已运行 0s');
+    assert.equal(elements[2]?.content, '处理中');
   });
 
   it('updates the dedicated status element without mutating the main content area', async () => {

@@ -140,7 +140,7 @@ describe('interactive-message-runner', () => {
   });
 
   it('formats the persistent runtime status text', () => {
-    assert.equal(formatInteractiveRuntimeStatus(0), '已运行 0s');
+    assert.equal(formatInteractiveRuntimeStatus(0), '处理中');
     assert.equal(formatInteractiveRuntimeStatus(65_000), '已运行 1m 5s');
     assert.equal(formatInteractiveRuntimeStatus(3_661_000, 10_000), '已运行 1h 1m 1s，最近 10s 无新输出');
   });
@@ -201,11 +201,11 @@ describe('interactive-message-runner', () => {
         persistSdkSessionUpdate() {},
         processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
           onPartialText?.('第一段输出');
-          assert.equal(adapter.streamedStatuses[0], '已运行 0s');
-          assert.equal(adapter.streamedStatuses.at(-1), '已运行 0s');
+          assert.equal(adapter.streamedStatuses[0], '处理中');
+          assert.equal(adapter.streamedStatuses.at(-1), '处理中');
 
           clock.advance(5_000);
-          assert.equal(adapter.streamedStatuses.at(-1), '已运行 0s');
+          assert.equal(adapter.streamedStatuses.at(-1), '处理中');
 
           clock.advance(5_000);
           assert.equal(adapter.streamedStatuses.at(-1), '已运行 10s，最近 10s 无新输出');
@@ -294,10 +294,10 @@ describe('interactive-message-runner', () => {
         persistSdkSessionUpdate() {},
         processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
           onPartialText?.('第一段输出');
-          assert.equal(adapter.streamedStatuses.at(-1), '已运行 0s');
+          assert.equal(adapter.streamedStatuses.at(-1), '处理中');
 
           clock.advance(30_000);
-          assert.equal(adapter.streamedStatuses.at(-1), '已运行 0s');
+          assert.equal(adapter.streamedStatuses.at(-1), '处理中');
 
           clock.advance(150_000);
           assert.equal(adapter.streamedStatuses.at(-1), '已运行 3m，最近 3m 无新输出');

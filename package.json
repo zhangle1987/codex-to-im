@@ -1,6 +1,6 @@
 {
   "name": "codex-to-im",
-  "version": "1.0.37",
+  "version": "1.0.38",
   "description": "Installable Codex-to-IM bridge with local setup UI and background service",
   "license": "MIT",
   "homepage": "https://github.com/zhangle1987/codex-to-im#readme",

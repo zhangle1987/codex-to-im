@@ -97,7 +97,7 @@ function formatRuntimeDuration(ms: number): string {
 }
 
 export function formatInteractiveRuntimeStatus(elapsedMs: number, silentMs?: number | null): string {
-  const parts = [`已运行 ${formatRuntimeDuration(elapsedMs)}`];
+  const parts = [elapsedMs < 1000 ? '处理中' : `已运行 ${formatRuntimeDuration(elapsedMs)}`];
   if (typeof silentMs === 'number' && silentMs >= 0) {
     parts.push(`最近 ${formatRuntimeDuration(silentMs)} 无新输出`);
   }
