@@ -117,6 +117,26 @@ export abstract class BaseChannelAdapter {
   onStreamText?(_chatId: string, _fullText: string, _streamKey?: string): void;
 
   /**
+   * Called when the bridge wants to update a dedicated streaming status area
+   * without mutating the main streamed content body.
+   */
+  onStreamStatus?(_chatId: string, _statusText: string, _streamKey?: string): void;
+
+  /**
+   * Whether this adapter can use a structured streaming UI for the given chat.
+   * This is a capability/configuration check, not a signal that the UI has
+   * already been created successfully.
+   */
+  supportsStructuredStreamingUi?(_chatId: string): boolean;
+
+  /**
+   * Whether a structured streaming UI is currently active for this chat/stream.
+   * Adapters can use this to report when a streaming card/message has actually
+   * been created successfully.
+   */
+  hasActiveStreamingUi?(_chatId: string, _streamKey?: string): boolean;
+
+  /**
    * Start a detached streaming UI cycle that is not tied to the current
    * inbound IM message. Shared desktop-thread mirroring uses this to create
    * a standalone streaming card/message in channels that support it.

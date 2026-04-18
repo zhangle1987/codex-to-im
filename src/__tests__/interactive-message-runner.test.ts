@@ -1,0 +1,339 @@
+import './test-setup.js';
+import { beforeEach, describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { CTI_HOME } from '../config.js';
+import { JsonFileStore } from '../store.js';
+import { initBridgeContext } from '../lib/bridge/context.js';
+import { BaseChannelAdapter } from '../lib/bridge/channel-adapter.js';
+import type { InboundMessage, OutboundMessage, SendResult } from '../lib/bridge/types.js';
+import * as router from '../lib/bridge/channel-router.js';
+import { formatInteractiveRuntimeStatus, runInteractiveMessage, type InteractiveTaskState } from '../lib/bridge/interactive-message-runner.js';
+
+const DATA_DIR = path.join(CTI_HOME, 'data');
+
+function makeSettings(): Map<string, string> {
+  return new Map([
+    ['remote_bridge_enabled', 'true'],
+    ['bridge_default_model', 'test-model'],
+    ['bridge_default_mode', 'code'],
+  ]);
+}
+
+class FakeFeishuStreamingAdapter extends BaseChannelAdapter {
+  readonly channelType = 'feishu-default';
+  readonly provider = 'feishu';
+  readonly streamedTexts: string[] = [];
+  readonly streamedStatuses: string[] = [];
+  readonly streamEnds: Array<{ status: 'completed' | 'interrupted' | 'error'; text: string }> = [];
+  private streamUiActive = false;
+
+  async start(): Promise<void> {}
+  async stop(): Promise<void> {}
+  isRunning(): boolean { return true; }
+  consumeOne(): Promise<InboundMessage | null> { return Promise.resolve(null); }
+  async send(_message: OutboundMessage): Promise<SendResult> {
+    return { ok: true, messageId: 'sent-1' };
+  }
+  validateConfig(): string | null { return null; }
+  isAuthorized(): boolean { return true; }
+
+  supportsStructuredStreamingUi(): boolean {
+    return true;
+  }
+
+  hasActiveStreamingUi(): boolean {
+    return this.streamUiActive;
+  }
+
+  onStreamText(_chatId: string, fullText: string): void {
+    this.streamUiActive = true;
+    this.streamedTexts.push(fullText);
+  }
+
+  onStreamStatus(_chatId: string, statusText: string): void {
+    this.streamUiActive = true;
+    this.streamedStatuses.push(statusText);
+  }
+
+  async onStreamEnd(
+    _chatId: string,
+    status: 'completed' | 'interrupted' | 'error',
+    responseText: string,
+  ): Promise<boolean> {
+    this.streamEnds.push({ status, text: responseText });
+    return false;
+  }
+}
+
+function createManualIntervalClock(start = 0) {
+  let now = start;
+  let nextId = 1;
+  const intervals = new Map<number, { callback: () => void; intervalMs: number; nextAt: number }>();
+
+  return {
+    now: () => now,
+    setInterval(callback: () => void, intervalMs: number): number {
+      const id = nextId++;
+      intervals.set(id, {
+        callback,
+        intervalMs,
+        nextAt: now + intervalMs,
+      });
+      return id;
+    },
+    clearInterval(handle: unknown): void {
+      intervals.delete(handle as number);
+    },
+    advance(ms: number): void {
+      now += ms;
+      let fired = true;
+      while (fired) {
+        fired = false;
+        for (const [id, interval] of Array.from(intervals.entries())) {
+          if (interval.nextAt > now) continue;
+          interval.nextAt += interval.intervalMs;
+          interval.callback();
+          if (!intervals.has(id)) continue;
+          fired = true;
+        }
+      }
+    },
+    activeCount(): number {
+      return intervals.size;
+    },
+  };
+}
+
+function createDeferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('interactive-message-runner', () => {
+  beforeEach(() => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat() {
+          return new ReadableStream({
+            start(controller) {
+              controller.close();
+            },
+          });
+        },
+      },
+      permissions: {
+        resolvePendingPermission: () => false,
+      },
+      lifecycle: {},
+    });
+  });
+
+  it('formats the persistent runtime status text', () => {
+    assert.equal(formatInteractiveRuntimeStatus(0), '已运行 0s');
+    assert.equal(formatInteractiveRuntimeStatus(65_000), '已运行 1m 5s');
+    assert.equal(formatInteractiveRuntimeStatus(3_661_000, 10_000), '已运行 1h 1m 1s，最近 10s 无新输出');
+  });
+
+  it('keeps runtime visible and adds silence duration after 10 seconds of no output', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-heartbeat',
+      userId: 'user-heartbeat',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\heartbeat');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const clock = createManualIntervalClock();
+    const deliveredTexts: string[] = [];
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-1',
+        address,
+        text: 'hello',
+        timestamp: clock.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = clock.now();
+          task.idleReminderSent = false;
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-1'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse(_adapter, _address, responseText) {
+          deliveredTexts.push(responseText);
+        },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
+          onPartialText?.('第一段输出');
+          assert.equal(adapter.streamedStatuses[0], '已运行 0s');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 0s');
+
+          clock.advance(5_000);
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 0s');
+
+          clock.advance(5_000);
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 10s，最近 10s 无新输出');
+
+          onPartialText?.('第一段输出\n第二段输出');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 10s');
+
+          return {
+            responseText: '最终回复',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: false,
+            errorMessage: '',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+        nowMs: () => clock.now(),
+        setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
+        clearIntervalFn: (handle) => clock.clearInterval(handle),
+        streamStatusHeartbeatMs: 10_000,
+      },
+    );
+
+    assert.deepEqual(deliveredTexts, ['最终回复']);
+    assert.equal(adapter.streamEnds.length, 1);
+    assert.equal(adapter.streamEnds[0]?.status, 'completed');
+    assert.equal(clock.activeCount(), 0);
+
+    const statusCountAfterFinish = adapter.streamedStatuses.length;
+    clock.advance(10_000);
+    assert.equal(adapter.streamedStatuses.length, statusCountAfterFinish);
+  });
+
+  it('stops the runtime heartbeat before stream finalization begins', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-finalize',
+      userId: 'user-finalize',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\finalize');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const clock = createManualIntervalClock();
+    const deliveredTexts: string[] = [];
+    const finalizeStarted = createDeferred<void>();
+    const releaseFinalize = createDeferred<void>();
+
+    adapter.onStreamEnd = async (
+      _chatId: string,
+      status: 'completed' | 'interrupted' | 'error',
+      responseText: string,
+    ): Promise<boolean> => {
+      adapter.streamEnds.push({ status, text: responseText });
+      finalizeStarted.resolve();
+      clock.advance(10_000);
+      await releaseFinalize.promise;
+      return false;
+    };
+
+    const runPromise = runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-finalize-1',
+        address,
+        text: 'hello',
+        timestamp: clock.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = clock.now();
+          task.idleReminderSent = false;
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-finalize'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse(_adapter, _address, responseText) {
+          deliveredTexts.push(responseText);
+        },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
+          onPartialText?.('第一段输出');
+          return {
+            responseText: '最终回复',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: false,
+            errorMessage: '',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+        nowMs: () => clock.now(),
+        setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
+        clearIntervalFn: (handle) => clock.clearInterval(handle),
+        streamStatusHeartbeatMs: 10_000,
+      },
+    );
+
+    await finalizeStarted.promise;
+    const statusCountWhileFinalizing = adapter.streamedStatuses.length;
+    releaseFinalize.resolve();
+    await runPromise;
+
+    assert.equal(adapter.streamedStatuses.length, statusCountWhileFinalizing);
+    assert.deepEqual(deliveredTexts, ['最终回复']);
+    assert.equal(clock.activeCount(), 0);
+  });
+});

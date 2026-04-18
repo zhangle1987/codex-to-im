@@ -8,6 +8,7 @@ import { stripOutboundArtifactBlocksForStreaming } from './outbound-artifacts.js
 import { buildInteractiveStreamKey } from './mirror-formatters.js';
 import {
   finalizeStreamFeedback,
+  pushStreamFeedbackStatus,
   pushStreamFeedbackText,
   pushStreamFeedbackTools,
 } from './stream-feedback-controller.js';
@@ -27,6 +28,7 @@ const STREAM_DEFAULTS: Record<string, StreamConfig> = {
   telegram: { intervalMs: 700, minDeltaChars: 20, maxChars: 3900 },
   discord: { intervalMs: 1500, minDeltaChars: 40, maxChars: 1900 },
 };
+const STREAM_STATUS_HEARTBEAT_MS = 10_000;
 
 function getStreamConfig(channelType = 'telegram'): StreamConfig {
   const { store } = getBridgeContext();
@@ -57,6 +59,31 @@ function flushPreview(
   }).catch(() => {});
 }
 
+function formatRuntimeDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (totalMinutes < 60) {
+    return seconds > 0 ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (minutes === 0 && seconds === 0) return `${hours}h`;
+  if (seconds === 0) return `${hours}h ${minutes}m`;
+  return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+export function formatInteractiveRuntimeStatus(elapsedMs: number, silentMs?: number | null): string {
+  const parts = [`已运行 ${formatRuntimeDuration(elapsedMs)}`];
+  if (typeof silentMs === 'number' && silentMs >= 0) {
+    parts.push(`最近 ${formatRuntimeDuration(silentMs)} 无新输出`);
+  }
+  return parts.join('，');
+}
+
 export interface InteractiveTaskState {
   id: string;
   abortController: AbortController;
@@ -66,6 +93,7 @@ export interface InteractiveTaskState {
   streamKey: string;
   sessionId: string;
   hasStreamingCards: boolean;
+  structuredStreamUiActive: boolean;
   lastActivityAt: number;
   idleReminderSent: boolean;
   streamFinalized: boolean;
@@ -99,6 +127,12 @@ export interface RunInteractiveMessageDeps {
     sdkSessionId: string | null | undefined,
     hasError: boolean,
   ): void;
+  processMessageImpl?: typeof engine.processMessage;
+  forwardPermissionRequestImpl?: typeof broker.forwardPermissionRequest;
+  nowMs?(): number;
+  setIntervalFn?(callback: () => void, intervalMs: number): unknown;
+  clearIntervalFn?(handle: unknown): void;
+  streamStatusHeartbeatMs?: number;
 }
 
 export async function runInteractiveMessage(
@@ -110,11 +144,18 @@ export async function runInteractiveMessage(
 ): Promise<void> {
   const binding = router.resolve(msg.address);
   const streamKey = buildInteractiveStreamKey(binding.codepilotSessionId, msg.messageId);
+  const nowMs = deps.nowMs ?? (() => Date.now());
+  const setIntervalFn = deps.setIntervalFn ?? ((callback: () => void, intervalMs: number) => setInterval(callback, intervalMs));
+  const clearIntervalFn = deps.clearIntervalFn ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>));
+  const processMessageImpl = deps.processMessageImpl ?? engine.processMessage;
+  const forwardPermissionRequestImpl = deps.forwardPermissionRequestImpl ?? broker.forwardPermissionRequest;
+  const streamStatusHeartbeatMs = Math.max(1_000, deps.streamStatusHeartbeatMs ?? STREAM_STATUS_HEARTBEAT_MS);
 
   adapter.onMessageStart?.(msg.address.chatId, streamKey);
 
   const taskAbort = new AbortController();
   const taskId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const taskStartedAt = nowMs();
   deps.resetMirrorSessionForInteractiveRun(binding.codepilotSessionId);
   const taskState: InteractiveTaskState = {
     id: taskId,
@@ -125,7 +166,8 @@ export async function runInteractiveMessage(
     streamKey,
     sessionId: binding.codepilotSessionId,
     hasStreamingCards: false,
-    lastActivityAt: Date.now(),
+    structuredStreamUiActive: false,
+    lastActivityAt: taskStartedAt,
     idleReminderSent: false,
     streamFinalized: false,
     uiEnded: false,
@@ -198,6 +240,37 @@ export async function runInteractiveMessage(
     chatId: msg.address.chatId,
     streamKey,
   };
+  const supportsPersistentStreamStatus = hasStreamingCards
+    && adapter.provider === 'feishu'
+    && typeof adapter.onStreamStatus === 'function';
+  const supportsStructuredStreamUi = supportsPersistentStreamStatus
+    && (adapter.supportsStructuredStreamingUi?.(msg.address.chatId) ?? true);
+  const syncStructuredStreamUiState = () => {
+    if (!supportsStructuredStreamUi || taskState.structuredStreamUiActive) return;
+    if (adapter.hasActiveStreamingUi?.(msg.address.chatId, streamKey)) {
+      taskState.structuredStreamUiActive = true;
+    }
+  };
+  const pushRunningStatus = (silentMs?: number | null) => {
+    if (!supportsStructuredStreamUi || streamStatusUpdatesClosed) return;
+    pushStreamFeedbackStatus(
+      streamFeedbackTarget,
+      formatInteractiveRuntimeStatus(nowMs() - taskStartedAt, silentMs),
+    );
+    syncStructuredStreamUiState();
+  };
+
+  let streamStatusHeartbeat: unknown = null;
+  let streamStatusUpdatesClosed = false;
+  const clearStreamStatusHeartbeat = () => {
+    if (streamStatusHeartbeat == null) return;
+    clearIntervalFn(streamStatusHeartbeat);
+    streamStatusHeartbeat = null;
+  };
+  const stopStructuredStreamStatusUpdates = () => {
+    streamStatusUpdatesClosed = true;
+    clearStreamStatusHeartbeat();
+  };
 
   const onStreamCardText = hasStreamingCards ? (fullText: string) => {
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
@@ -220,6 +293,8 @@ export async function runInteractiveMessage(
     if (hasStreamingCards) {
       pushStreamFeedbackTools(streamFeedbackTarget, Array.from(toolCallTracker.values()));
     }
+    pushRunningStatus(null);
+    syncStructuredStreamUiState();
   };
 
   const onPartialText = (fullText: string) => {
@@ -228,7 +303,27 @@ export async function runInteractiveMessage(
     deps.recordInteractiveHealthProgress(binding.codepilotSessionId, 'text');
     previewOnPartialText?.(fullText);
     onStreamCardText?.(fullText);
+    pushRunningStatus(null);
+    syncStructuredStreamUiState();
   };
+
+  if (supportsStructuredStreamUi) {
+    pushRunningStatus(null);
+    streamStatusHeartbeat = setIntervalFn(() => {
+      if (streamStatusUpdatesClosed) {
+        clearStreamStatusHeartbeat();
+        return;
+      }
+      if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId) || taskAbort.signal.aborted) {
+        clearStreamStatusHeartbeat();
+        return;
+      }
+      const silentMs = nowMs() - taskState.lastActivityAt;
+      if (silentMs < streamStatusHeartbeatMs) return;
+      pushRunningStatus(silentMs);
+      syncStructuredStreamUiState();
+    }, streamStatusHeartbeatMs);
+  }
 
   let finalOutcome: 'completed' | 'failed' | 'aborted' = 'failed';
   let finalOutcomeDetail: string | undefined;
@@ -237,11 +332,11 @@ export async function runInteractiveMessage(
   try {
     const promptText = text || (attachments && attachments.length > 0 ? 'Describe this image.' : '');
 
-    const result = await engine.processMessage(
+    const result = await processMessageImpl(
       binding,
       promptText,
       async (perm) => {
-        await broker.forwardPermissionRequest(
+        await forwardPermissionRequestImpl(
           adapter,
           msg.address,
           perm.permissionRequestId,
@@ -275,6 +370,7 @@ export async function runInteractiveMessage(
 
     let cardFinalized = false;
     if (hasStreamingCards) {
+      stopStructuredStreamStatusUpdates();
       cardFinalized = await finalizeStreamFeedback(
         streamFeedbackTarget,
         result.hasError ? 'error' : 'completed',
@@ -314,6 +410,7 @@ export async function runInteractiveMessage(
       ? (result.errorMessage?.trim() || undefined)
       : undefined;
   } finally {
+    stopStructuredStreamStatusUpdates();
     if (previewState) {
       if (previewState.throttleTimer) {
         clearTimeout(previewState.throttleTimer);

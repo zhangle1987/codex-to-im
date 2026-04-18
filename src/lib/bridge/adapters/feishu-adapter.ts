@@ -41,7 +41,8 @@ import {
   hasComplexMarkdown,
   buildCardContent,
   buildPostContent,
-  buildStreamingContent,
+  buildStreamingTextContent,
+  buildStreamingToolsContent,
   buildFinalCardJson,
   buildPermissionButtonCard,
   formatElapsed,
@@ -66,12 +67,20 @@ interface FeishuCardState {
   toolCalls: ToolCallInfo[];
   thinking: boolean;
   pendingText: string | null;
+  pendingStatusText: string | null;
+  renderedText: string | null;
+  renderedToolsText: string | null;
+  renderedStatusText: string | null;
   lastUpdateAt: number;
   throttleTimer: ReturnType<typeof setTimeout> | null;
+  flushInFlight: Promise<void> | null;
+  flushQueued: boolean;
 }
 
 /** Streaming card throttle interval (ms). */
 const CARD_THROTTLE_MS = 200;
+const INITIAL_STREAMING_STATUS = '已运行 0s';
+const EMPTY_STREAMING_TOOLS = '';
 
 /** Shape of the SDK's im.message.receive_v1 event data. */
 type FeishuMessageEventData = {
@@ -156,6 +165,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private isStreamingEnabled(): boolean {
     return this.channelConfig.streamingEnabled !== false;
+  }
+
+  supportsStructuredStreamingUi(_chatId: string): boolean {
+    return this.isStreamingEnabled();
   }
 
   private resolveStreamKey(chatId: string, streamKey?: string): string {
@@ -414,13 +427,29 @@ export class FeishuAdapter extends BaseChannelAdapter {
           summary: { content: '思考中...' },
         },
         body: {
-          elements: [{
-            tag: 'markdown',
-            content: '💭 Thinking...',
-            text_align: 'left',
-            text_size: 'normal',
-            element_id: 'streaming_content',
-          }],
+          elements: [
+            {
+              tag: 'markdown',
+              content: '💭 Thinking...',
+              text_align: 'left',
+              text_size: 'normal',
+              element_id: 'streaming_content',
+            },
+            {
+              tag: 'markdown',
+              content: EMPTY_STREAMING_TOOLS,
+              text_align: 'left',
+              text_size: 'normal',
+              element_id: 'streaming_tools',
+            },
+            {
+              tag: 'markdown',
+              content: INITIAL_STREAMING_STATUS,
+              text_align: 'left',
+              text_size: 'notation',
+              element_id: 'streaming_status',
+            },
+          ],
         },
       };
 
@@ -468,8 +497,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
         toolCalls: [],
         thinking: true,
         pendingText: null,
+        pendingStatusText: INITIAL_STREAMING_STATUS,
+        renderedText: '💭 Thinking...',
+        renderedToolsText: EMPTY_STREAMING_TOOLS,
+        renderedStatusText: INITIAL_STREAMING_STATUS,
         lastUpdateAt: 0,
         throttleTimer: null,
+        flushInFlight: null,
+        flushQueued: false,
       });
 
       console.log(`[feishu-adapter] Streaming card created: streamKey=${cardKey}, cardId=${cardId}, msgId=${messageId}`);
@@ -494,13 +529,50 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
     state.pendingText = text;
 
+    this.scheduleCardFlush(cardKey);
+  }
+
+  private updateCardStatus(chatId: string, statusText: string, streamKey?: string): void {
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    const state = this.activeCards.get(cardKey);
+    if (!state || !this.restClient) return;
+    state.pendingStatusText = statusText || INITIAL_STREAMING_STATUS;
+    this.scheduleCardFlush(cardKey);
+  }
+
+  private enqueueCardFlush(streamKey: string): void {
+    const state = this.activeCards.get(streamKey);
+    if (!state) return;
+    if (state.flushInFlight) {
+      state.flushQueued = true;
+      return;
+    }
+
+    state.flushInFlight = this.flushCardUpdate(streamKey)
+      .catch((err: unknown) => {
+        console.warn('[feishu-adapter] cardElement.content failed:', err instanceof Error ? err.message : err);
+      })
+      .finally(() => {
+        const current = this.activeCards.get(streamKey);
+        if (!current) return;
+        current.flushInFlight = null;
+        if (current.flushQueued) {
+          current.flushQueued = false;
+          this.enqueueCardFlush(streamKey);
+        }
+      });
+  }
+
+  private scheduleCardFlush(streamKey: string): void {
+    const state = this.activeCards.get(streamKey);
+    if (!state) return;
     const elapsed = Date.now() - state.lastUpdateAt;
     if (elapsed < CARD_THROTTLE_MS && state.lastUpdateAt > 0) {
       // Schedule trailing-edge flush
       if (!state.throttleTimer) {
-          state.throttleTimer = setTimeout(() => {
-            state.throttleTimer = null;
-          this.flushCardUpdate(cardKey);
+        state.throttleTimer = setTimeout(() => {
+          state.throttleTimer = null;
+          this.enqueueCardFlush(streamKey);
         }, CARD_THROTTLE_MS - elapsed);
       }
       return;
@@ -511,33 +583,69 @@ export class FeishuAdapter extends BaseChannelAdapter {
       clearTimeout(state.throttleTimer);
       state.throttleTimer = null;
     }
-    this.flushCardUpdate(cardKey);
+    this.enqueueCardFlush(streamKey);
   }
 
   /**
    * Flush pending card update to Feishu API.
    */
-  private flushCardUpdate(streamKey: string): void {
+  private async flushCardUpdate(streamKey: string): Promise<void> {
     const state = this.activeCards.get(streamKey);
     if (!state || !this.restClient) return;
     const cardkit = (this.restClient as any).cardkit?.v1;
     if (!cardkit?.cardElement?.content) return;
 
-    const content = buildStreamingContent(state.pendingText || '', state.toolCalls);
+    const content = buildStreamingTextContent(state.pendingText || '');
+    const toolsText = buildStreamingToolsContent(state.toolCalls) || EMPTY_STREAMING_TOOLS;
+    const statusText = state.pendingStatusText || INITIAL_STREAMING_STATUS;
+    const updates: Array<{ elementId: string; content: string; onSuccess: () => void }> = [];
 
-    state.sequence++;
-    const seq = state.sequence;
+    if (content !== state.renderedText) {
+      updates.push({
+        elementId: 'streaming_content',
+        content,
+        onSuccess: () => {
+          state.renderedText = content;
+        },
+      });
+    }
+    if (toolsText !== state.renderedToolsText) {
+      updates.push({
+        elementId: 'streaming_tools',
+        content: toolsText,
+        onSuccess: () => {
+          state.renderedToolsText = toolsText;
+        },
+      });
+    }
+    if (statusText !== state.renderedStatusText) {
+      updates.push({
+        elementId: 'streaming_status',
+        content: statusText,
+        onSuccess: () => {
+          state.renderedStatusText = statusText;
+        },
+      });
+    }
+    if (updates.length === 0) return;
+
     const cardId = state.cardId;
-
-    // Fire-and-forget — streaming updates are non-critical
-    cardkit.cardElement.content({
-      path: { card_id: cardId, element_id: 'streaming_content' },
-      data: { content, sequence: seq },
-    }).then(() => {
-      state.lastUpdateAt = Date.now();
-    }).catch((err: unknown) => {
-      console.warn('[feishu-adapter] cardElement.content failed:', err instanceof Error ? err.message : err);
-    });
+    for (const update of updates) {
+      state.sequence++;
+      try {
+        await cardkit.cardElement.content({
+          path: { card_id: cardId, element_id: update.elementId },
+          data: { content: update.content, sequence: state.sequence },
+        });
+        update.onSuccess();
+        state.lastUpdateAt = Date.now();
+      } catch (err) {
+        console.warn(
+          `[feishu-adapter] cardElement.content failed for ${update.elementId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
   }
 
   /**
@@ -548,8 +656,29 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const state = this.activeCards.get(cardKey);
     if (!state) return;
     state.toolCalls = tools;
-    // Trigger a content flush with current text + updated tools
-    this.updateCardContent(chatId, state.pendingText || '', cardKey);
+    this.scheduleCardFlush(cardKey);
+  }
+
+  private async awaitCardFlushCompletion(streamKey: string): Promise<void> {
+    while (true) {
+      const state = this.activeCards.get(streamKey);
+      if (!state) return;
+      const inFlight = state.flushInFlight;
+      if (inFlight) {
+        try {
+          await inFlight;
+        } catch {
+          // best effort only
+        }
+        continue;
+      }
+      if (state.flushQueued) {
+        state.flushQueued = false;
+        this.enqueueCardFlush(streamKey);
+        continue;
+      }
+      return;
+    }
   }
 
   /**
@@ -578,6 +707,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       clearTimeout(state.throttleTimer);
       state.throttleTimer = null;
     }
+    await this.awaitCardFlushCompletion(cardKey);
 
     try {
       // Step 1: Close streaming mode
@@ -658,6 +788,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return this.activeCards.has(this.resolveStreamKey(chatId, streamKey));
   }
 
+  hasActiveStreamingUi(chatId: string, streamKey?: string): boolean {
+    return this.hasActiveCard(chatId, streamKey);
+  }
+
   // ── Streaming adapter interface ────────────────────────────────
 
   /**
@@ -688,6 +822,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
   onToolEvent(chatId: string, tools: ToolCallInfo[], streamKey?: string): void {
     if (!this.isStreamingEnabled()) return;
     this.updateToolProgress(chatId, tools, streamKey);
+  }
+
+  onStreamStatus(chatId: string, statusText: string, streamKey?: string): void {
+    if (!this.isStreamingEnabled()) return;
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    if (!this.activeCards.has(cardKey)) {
+      const messageId = this.lastIncomingMessageId.get(chatId);
+      this.createStreamingCard(chatId, messageId, cardKey).then((ok) => {
+        if (ok) this.updateCardStatus(chatId, statusText, cardKey);
+      }).catch(() => {});
+      return;
+    }
+    this.updateCardStatus(chatId, statusText, cardKey);
   }
 
   async onStreamEnd(

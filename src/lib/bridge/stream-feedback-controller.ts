@@ -38,6 +38,21 @@ export function pushStreamFeedbackTools(
   }
 }
 
+export function pushStreamFeedbackStatus(
+  target: StreamFeedbackTarget,
+  text: string,
+): void {
+  if (typeof target.adapter.onStreamStatus !== 'function') return;
+  target.ensureStarted?.();
+  const rendered = renderFeedbackTextForChannel(target.channelType, text);
+  if (!rendered) return;
+  try {
+    target.adapter.onStreamStatus(target.chatId, rendered, target.streamKey);
+  } catch {
+    // Streaming UI updates are best effort only.
+  }
+}
+
 export async function finalizeStreamFeedback(
   target: StreamFeedbackTarget,
   status: 'completed' | 'interrupted' | 'error',

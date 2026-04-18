@@ -37,6 +37,11 @@ function buildInteractiveIdleReminderNotice(): string {
   ].join('\n');
 }
 
+function shouldSkipIdleReminder(task: InteractiveTaskState): boolean {
+  return task.adapter.provider === 'feishu'
+    && task.structuredStreamUiActive;
+}
+
 export function createInteractiveRuntime(
   getState: () => BridgeInteractiveRuntimeState,
   options: CreateInteractiveRuntimeOptions,
@@ -119,6 +124,7 @@ export function createInteractiveRuntime(
     const now = Date.now();
     const tasks = Array.from(getState().activeTasks.values());
     for (const task of tasks) {
+      if (shouldSkipIdleReminder(task)) continue;
       if (task.idleReminderSent) continue;
       if (now - task.lastActivityAt < options.idleReminderMs) continue;
       await remindIdleInteractiveTask(task);

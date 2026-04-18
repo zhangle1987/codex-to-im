@@ -140,16 +140,17 @@ export function formatElapsed(ms: number): string {
 }
 
 /**
- * Build the body elements array for a streaming card update.
- * Combines main text content with tool progress.
+ * Build the body text for the primary streaming content region.
  */
-export function buildStreamingContent(text: string, tools: ToolCallInfo[]): string {
-  let content = text || '';
-  const toolMd = buildToolProgressMarkdown(tools);
-  if (toolMd) {
-    content = content ? `${content}\n\n${toolMd}` : toolMd;
-  }
-  return content || '💭 Thinking...';
+export function buildStreamingTextContent(text: string): string {
+  return text || '💭 Thinking...';
+}
+
+/**
+ * Build the tool-only markdown content for the dedicated streaming tools region.
+ */
+export function buildStreamingToolsContent(tools: ToolCallInfo[]): string {
+  return buildToolProgressMarkdown(tools);
 }
 
 /**
@@ -163,16 +164,25 @@ export function buildFinalCardJson(
   const elements: Array<Record<string, unknown>> = [];
 
   // Main text content
-  let content = preprocessFeishuMarkdown(text);
+  const content = preprocessFeishuMarkdown(text);
   const toolMd = buildToolProgressMarkdown(tools);
-  if (toolMd) {
-    content = content ? `${content}\n\n${toolMd}` : toolMd;
-  }
 
   if (content) {
     elements.push({
       tag: 'markdown',
       content,
+      text_align: 'left',
+      text_size: 'normal',
+    });
+  }
+
+  if (toolMd) {
+    if (elements.length > 0) {
+      elements.push({ tag: 'hr' });
+    }
+    elements.push({
+      tag: 'markdown',
+      content: toolMd,
       text_align: 'left',
       text_size: 'normal',
     });
@@ -184,7 +194,9 @@ export function buildFinalCardJson(
     if (footer.status) parts.push(footer.status);
     if (footer.elapsed) parts.push(footer.elapsed);
     if (parts.length > 0) {
-      elements.push({ tag: 'hr' });
+      if (elements.length > 0) {
+        elements.push({ tag: 'hr' });
+      }
       elements.push({
         tag: 'markdown',
         content: parts.join(' · '),
