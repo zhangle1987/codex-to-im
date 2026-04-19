@@ -11,6 +11,15 @@ Its main path is not to modify Codex itself, but to:
 3. bind desktop Codex sessions to IM chats
 4. continue the same conversation, switch threads, and inspect status from IM
 
+## Project Origin
+
+The current codebase is a consolidated continuation of two earlier projects:
+
+- `Claude-to-IM`
+- `Claude-to-IM-skill`
+
+`codex-to-im` continues from those two repositories and has been reworked into a single local package with a unified workbench, bridge, shared-thread workflow, and optional skill integration model.
+
 ## Core Capabilities
 
 - Shared desktop threads: bind a thread currently used in Codex Desktop to IM and continue the same conversation there.
