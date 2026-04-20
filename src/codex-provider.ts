@@ -182,6 +182,7 @@ export class CodexProvider implements LLMProvider {
               }
 
               let sawAnyEvent = false;
+              let sawTerminalEvent = false;
               try {
                 const { events } = await thread.runStreamed(input, {
                   signal: params.abortController?.signal,
@@ -222,22 +223,33 @@ export class CodexProvider implements LLMProvider {
                         } : undefined,
                         ...(threadId ? { session_id: threadId } : {}),
                       }));
+                      sawTerminalEvent = true;
                       break;
                     }
 
                     case 'turn.failed': {
                       const error = (event as { message?: string }).message;
                       controller.enqueue(sseEvent('error', error || 'Turn failed'));
+                      sawTerminalEvent = true;
                       break;
                     }
 
                     case 'error': {
                       const error = (event as { message?: string }).message;
                       controller.enqueue(sseEvent('error', error || 'Thread error'));
+                      sawTerminalEvent = true;
                       break;
                     }
 
                     // item.started, item.updated, turn.started — no action needed
+                  }
+
+                  if (sawTerminalEvent) {
+                    // Codex sometimes emits a terminal turn event but keeps the
+                    // iterator open briefly; IM callers should treat the turn
+                    // event as authoritative completion instead of waiting
+                    // indefinitely for the underlying stream to end.
+                    break;
                   }
                 }
                 break;

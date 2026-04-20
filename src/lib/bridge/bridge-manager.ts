@@ -86,6 +86,7 @@ import {
 } from './bridge-session-support.js';
 import { handleBridgeCommand } from './command-dispatch.js';
 import {
+  formatInteractiveRuntimeStatus,
   runInteractiveMessage,
 } from './interactive-message-runner.js';
 import {
@@ -99,6 +100,7 @@ import { deliverBridgeNotice, deliverResponse } from './feedback-delivery.js';
 import {
   finalizeStreamFeedback,
   pushStreamFeedbackText,
+  pushStreamFeedbackStatus,
   pushStreamFeedbackTools,
 } from './stream-feedback-controller.js';
 
@@ -112,6 +114,8 @@ const MIRROR_EVENT_BATCH_LIMIT = 8;
 const MIRROR_SUPPRESSION_WINDOW_MS = 4_000;
 const MIRROR_PROMPT_MATCH_GRACE_MS = 120_000;
 const INTERACTIVE_IDLE_REMINDER_MS = 600_000;
+const MIRROR_STREAM_STATUS_IDLE_START_MS = 180_000;
+const MIRROR_STREAM_STATUS_HEARTBEAT_MS = 10_000;
 // Idle timeout after the last desktop event before we flush a buffered turn
 // without seeing task_complete.
 const MIRROR_IDLE_TIMEOUT_MS = 600_000;
@@ -373,6 +377,25 @@ function getMirrorStreamingText(
   return rendered || buildMirrorTitle(title, markdown);
 }
 
+function getMirrorStructuredStreamStatusConfig(): {
+  idleStartMs: number;
+  heartbeatMs: number;
+} {
+  const { store } = getBridgeContext();
+  const idleStartSeconds = parseInt(store.getSetting('bridge_stream_status_idle_start_seconds') || '', 10);
+  const heartbeatSeconds = parseInt(store.getSetting('bridge_stream_status_check_interval_seconds') || '', 10);
+  return {
+    idleStartMs: Math.max(
+      0,
+      (Number.isFinite(idleStartSeconds) && idleStartSeconds > 0 ? idleStartSeconds : MIRROR_STREAM_STATUS_IDLE_START_MS / 1000) * 1000,
+    ),
+    heartbeatMs: Math.max(
+      1_000,
+      (Number.isFinite(heartbeatSeconds) && heartbeatSeconds > 0 ? heartbeatSeconds : MIRROR_STREAM_STATUS_HEARTBEAT_MS / 1000) * 1000,
+    ),
+  };
+}
+
 function startMirrorStreaming(
   subscription: DesktopMirrorSubscription,
   turnState: DesktopMirrorTurnState,
@@ -413,6 +436,73 @@ function createMirrorStreamFeedbackTarget(
   };
 }
 
+function pushMirrorStreamingStatus(
+  subscription: DesktopMirrorSubscription,
+  turnState: DesktopMirrorTurnState,
+  options: {
+    nowMs?: number;
+    silentMs?: number | null;
+    minIntervalMs?: number;
+  } = {},
+): void {
+  const adapter = getMirrorStreamingAdapter(subscription);
+  if (!adapter || typeof adapter.onStreamStatus !== 'function') return;
+  if (!(adapter.supportsStructuredStreamingUi?.(subscription.chatId) ?? true)) return;
+
+  const startedAtMs = Date.parse(turnState.startedAt);
+  if (!Number.isFinite(startedAtMs)) return;
+
+  const nowMs = options.nowMs ?? Date.now();
+  const minIntervalMs = Math.max(0, options.minIntervalMs ?? 0);
+  if (minIntervalMs > 0 && turnState.lastStatusAt > 0 && nowMs - turnState.lastStatusAt < minIntervalMs) {
+    return;
+  }
+
+  const statusText = formatInteractiveRuntimeStatus(
+    Math.max(0, nowMs - startedAtMs),
+    options.silentMs,
+  );
+  if (turnState.lastStatusText === statusText) return;
+
+  pushStreamFeedbackStatus(
+    createMirrorStreamFeedbackTarget(subscription, turnState, adapter),
+    statusText,
+  );
+  turnState.lastStatusText = statusText;
+  turnState.lastStatusAt = nowMs;
+}
+
+function refreshMirrorStreamingStatus(
+  subscription: DesktopMirrorSubscription,
+  nowMs = Date.now(),
+  config = getMirrorStructuredStreamStatusConfig(),
+): void {
+  const pendingTurn = subscription.pendingTurn;
+  if (!pendingTurn?.streamStarted) return;
+
+  const startedAtMs = Date.parse(pendingTurn.startedAt);
+  const lastActivityMs = Date.parse(pendingTurn.lastActivityAt);
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(lastActivityMs)) return;
+
+  const elapsedMs = nowMs - startedAtMs;
+  if (elapsedMs < config.idleStartMs) return;
+
+  const silentMs = nowMs - lastActivityMs;
+  if (silentMs < config.heartbeatMs) return;
+
+  pushMirrorStreamingStatus(subscription, pendingTurn, {
+    nowMs,
+    silentMs,
+    minIntervalMs: config.heartbeatMs,
+  });
+}
+
+function refreshActiveMirrorStreamingStatuses(nowMs = Date.now()): void {
+  for (const subscription of getState().mirrorSubscriptions.values()) {
+    refreshMirrorStreamingStatus(subscription, nowMs);
+  }
+}
+
 function updateMirrorStreaming(
   subscription: DesktopMirrorSubscription,
   turnState: DesktopMirrorTurnState,
@@ -423,6 +513,7 @@ function updateMirrorStreaming(
     createMirrorStreamFeedbackTarget(subscription, turnState, adapter),
     getMirrorStreamingText(subscription, turnState),
   );
+  pushMirrorStreamingStatus(subscription, turnState);
 }
 
 function updateMirrorToolProgress(
@@ -435,6 +526,7 @@ function updateMirrorToolProgress(
     createMirrorStreamFeedbackTarget(subscription, turnState, adapter),
     Array.from(turnState.toolCalls.values()),
   );
+  pushMirrorStreamingStatus(subscription, turnState);
 }
 
 function stopMirrorStreaming(
@@ -582,6 +674,7 @@ function resetMirrorSessionForInteractiveRun(sessionId: string): void {
 
 async function reconcileMirrorSubscriptions(): Promise<void> {
   await MIRROR_RUNTIME.reconcileMirrorSubscriptions();
+  refreshActiveMirrorStreamingStatuses();
 }
 
 function clearMirrorSubscriptions(): void {
@@ -652,6 +745,7 @@ export async function start(): Promise<void> {
     });
     try {
       SESSION_HEALTH_RUNTIME.reconcileSessionHealth();
+      INTERACTIVE_RUNTIME.reconcileTerminalSessionRuntimeState();
     } catch (err) {
       console.error('[bridge-manager] Session health reconcile failed:', describeUnknownError(err));
     }
@@ -1068,9 +1162,11 @@ export const _testOnly = {
   consumeMirrorRecords,
   consumeBufferedMirrorTurns,
   flushTimedOutMirrorTurn,
+  refreshMirrorStreamingStatus,
   filterSuppressedMirrorRecords,
   isMirrorSuppressed,
   reconcileIdleInteractiveTasks: () => INTERACTIVE_RUNTIME.reconcileIdleInteractiveTasks(),
+  reconcileTerminalSessionRuntimeState: () => INTERACTIVE_RUNTIME.reconcileTerminalSessionRuntimeState(),
   beginMirrorSuppression,
   abortMirrorSuppression,
   settleMirrorSuppression,

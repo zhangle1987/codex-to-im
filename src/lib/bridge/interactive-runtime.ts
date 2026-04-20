@@ -26,8 +26,19 @@ export interface InteractiveRuntime {
   releaseInteractiveTask(sessionId: string, taskId: string): void;
   syncSessionRuntimeState(sessionId: string): void;
   reconcileIdleInteractiveTasks(): Promise<void>;
+  reconcileTerminalSessionRuntimeState(): void;
   resetPersistedInteractiveRuntimeState(): void;
   processWithSessionLock(sessionId: string, fn: () => Promise<void>): Promise<void>;
+}
+
+const TERMINAL_SESSION_HEALTH_STATUSES = new Set<NonNullable<BridgeSession['health_status']>>([
+  'completed',
+  'failed',
+  'aborted',
+]);
+
+function isTerminalSessionHealthStatus(status: BridgeSession['health_status'] | undefined): boolean {
+  return Boolean(status && TERMINAL_SESSION_HEALTH_STATUSES.has(status));
 }
 
 function buildInteractiveIdleReminderNotice(): string {
@@ -131,6 +142,27 @@ export function createInteractiveRuntime(
     }
   }
 
+  function reconcileTerminalSessionRuntimeState(): void {
+    const store = deps.getStore();
+    for (const session of store.listSessions()) {
+      const queuedCount = getQueuedCount(session.id);
+      const persistedQueuedCount = session.queued_count && session.queued_count > 0
+        ? session.queued_count
+        : 0;
+      const hasActiveTask = getState().activeTasks.has(session.id);
+      if (hasActiveTask || queuedCount > 0) continue;
+      if (!isTerminalSessionHealthStatus(session.health_status)) continue;
+      if (persistedQueuedCount === 0 && session.runtime_status !== 'running' && session.runtime_status !== 'queued') {
+        continue;
+      }
+      store.updateSession(session.id, {
+        queued_count: 0,
+        runtime_status: 'idle',
+        last_runtime_update_at: deps.nowIso(),
+      });
+    }
+  }
+
   function resetPersistedInteractiveRuntimeState(): void {
     const store = deps.getStore();
     for (const session of store.listSessions()) {
@@ -197,6 +229,7 @@ export function createInteractiveRuntime(
     releaseInteractiveTask,
     syncSessionRuntimeState,
     reconcileIdleInteractiveTasks,
+    reconcileTerminalSessionRuntimeState,
     resetPersistedInteractiveRuntimeState,
     processWithSessionLock,
   };

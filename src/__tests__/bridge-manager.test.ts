@@ -682,6 +682,8 @@ describe('bridge-manager status formatting', () => {
       streamKey: 'mirror:session-1:2026-03-25T08:00:00.000Z',
       startedAt: '2026-03-25T08:00:00.000Z',
       lastActivityAt: '2026-03-25T08:00:00.000Z',
+      lastStatusText: null,
+      lastStatusAt: 0,
       userText: 'desktop prompt',
       lastAssistantText: null,
       lastCommentaryText: null,
@@ -765,6 +767,9 @@ describe('bridge-manager status formatting', () => {
       onStreamText: (_chatId: string, text: string, streamKey: string) => {
         streamEvents.push(`text:${streamKey}:${text}`);
       },
+      onStreamStatus: (_chatId: string, text: string, streamKey: string) => {
+        streamEvents.push(`status:${streamKey}:${text}`);
+      },
       onStreamEnd: async () => true,
     });
 
@@ -776,35 +781,42 @@ describe('bridge-manager status formatting', () => {
       chatId: 'chat-1',
     } as { pendingTurn: any; threadId: string };
 
-    _testOnly.consumeMirrorRecords(subscription as any, [
-      {
-        signature: 'start',
-        type: 'task_started',
-        content: '',
-        timestamp: '2026-03-25T08:00:00.000Z',
-        turnId: 'turn-1',
-      },
-    ]);
+    const originalDateNow = Date.now;
+    Date.now = () => Date.parse('2026-03-25T08:00:00.700Z');
+    try {
+      _testOnly.consumeMirrorRecords(subscription as any, [
+        {
+          signature: 'start',
+          type: 'task_started',
+          content: '',
+          timestamp: '2026-03-25T08:00:00.000Z',
+          turnId: 'turn-1',
+        },
+      ]);
 
-    assert.equal(subscription.pendingTurn?.streamStarted, false);
-    assert.deepEqual(streamEvents, []);
+      assert.equal(subscription.pendingTurn?.streamStarted, false);
+      assert.deepEqual(streamEvents, []);
 
-    _testOnly.consumeMirrorRecords(subscription as any, [
-      {
-        signature: 'user',
-        type: 'message',
-        role: 'user',
-        content: 'desktop prompt',
-        timestamp: '2026-03-25T08:00:00.500Z',
-        turnId: 'turn-1',
-      },
-    ]);
+      _testOnly.consumeMirrorRecords(subscription as any, [
+        {
+          signature: 'user',
+          type: 'message',
+          role: 'user',
+          content: 'desktop prompt',
+          timestamp: '2026-03-25T08:00:00.500Z',
+          turnId: 'turn-1',
+        },
+      ]);
 
-    assert.equal(subscription.pendingTurn?.streamStarted, true);
-    assert.deepEqual(streamEvents, [
-      'start:mirror:session-1:turn-1',
-      'text:mirror:session-1:turn-1:<桌面线程>\n\n我: desktop prompt\n\ncodex:',
-    ]);
+      assert.equal(subscription.pendingTurn?.streamStarted, true);
+      assert.deepEqual(streamEvents, [
+        'start:mirror:session-1:turn-1',
+        'text:mirror:session-1:turn-1:<桌面线程>\n\n我: desktop prompt\n\ncodex:',
+        'status:mirror:session-1:turn-1:处理中',
+      ]);
+    } finally {
+      Date.now = originalDateNow;
+    }
   });
 
   it('normalizes wrapped desktop user prompts before opening a mirror stream card', () => {
@@ -821,6 +833,9 @@ describe('bridge-manager status formatting', () => {
       onStreamText: (_chatId: string, text: string, streamKey: string) => {
         streamEvents.push(`text:${streamKey}:${text}`);
       },
+      onStreamStatus: (_chatId: string, text: string, streamKey: string) => {
+        streamEvents.push(`status:${streamKey}:${text}`);
+      },
       onStreamEnd: async () => true,
     });
 
@@ -832,29 +847,83 @@ describe('bridge-manager status formatting', () => {
       chatId: 'chat-1',
     } as { pendingTurn: any; threadId: string };
 
-    _testOnly.consumeMirrorRecords(subscription as any, [
-      {
-        signature: 'user',
-        type: 'message',
-        role: 'user',
-        content: [
-          '# Review findings:',
-          '',
-          '## Finding 1 (src/cli.ts:151-153) [added]',
-          '[P2] demo',
-          '',
-          '## My request for Codex:',
-          'ok,当前调整已经可以收尾了吗',
-        ].join('\n'),
-        timestamp: '2026-03-25T08:00:00.500Z',
-        turnId: 'turn-1',
-      },
-    ]);
+    const originalDateNow = Date.now;
+    Date.now = () => Date.parse('2026-03-25T08:00:00.700Z');
+    try {
+      _testOnly.consumeMirrorRecords(subscription as any, [
+        {
+          signature: 'user',
+          type: 'message',
+          role: 'user',
+          content: [
+            '# Review findings:',
+            '',
+            '## Finding 1 (src/cli.ts:151-153) [added]',
+            '[P2] demo',
+            '',
+            '## My request for Codex:',
+            'ok,当前调整已经可以收尾了吗',
+          ].join('\n'),
+          timestamp: '2026-03-25T08:00:00.500Z',
+          turnId: 'turn-1',
+        },
+      ]);
 
-    assert.equal(subscription.pendingTurn?.userText, '（基于 Review findings）\nok,当前调整已经可以收尾了吗');
-    assert.deepEqual(streamEvents, [
-      'start:mirror:session-1:turn-1',
-      'text:mirror:session-1:turn-1:<桌面线程>\n\n我:\n（基于 Review findings）\nok,当前调整已经可以收尾了吗\n\ncodex:',
+      assert.equal(subscription.pendingTurn?.userText, '（基于 Review findings）\nok,当前调整已经可以收尾了吗');
+      assert.deepEqual(streamEvents, [
+        'start:mirror:session-1:turn-1',
+        'text:mirror:session-1:turn-1:<桌面线程>\n\n我:\n（基于 Review findings）\nok,当前调整已经可以收尾了吗\n\ncodex:',
+        'status:mirror:session-1:turn-1:处理中',
+      ]);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  it('refreshes mirror stream status with runtime and idle time during long-running turns', () => {
+    _testOnly.resetStateForTests();
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const statusEvents: string[] = [];
+    state.adapters.set('feishu', {
+      channelType: 'feishu',
+      provider: 'feishu',
+      isRunning: () => true,
+      onStreamText: () => {},
+      onStreamStatus: (_chatId: string, text: string, streamKey: string) => {
+        statusEvents.push(`status:${streamKey}:${text}`);
+      },
+      onStreamEnd: async () => true,
+    });
+
+    const subscription = {
+      pendingTurn: {
+        turnId: 'turn-1',
+        streamKey: 'mirror:session-1:turn-1',
+        startedAt: '2026-03-25T08:00:00.000Z',
+        lastActivityAt: '2026-03-25T08:04:40.000Z',
+        lastStatusText: null,
+        lastStatusAt: 0,
+        userText: 'desktop prompt',
+        lastAssistantText: 'thinking',
+        lastCommentaryText: null,
+        streamedText: 'thinking',
+        streamStarted: true,
+        toolCalls: new Map(),
+      },
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+      channelType: 'feishu',
+      chatId: 'chat-1',
+    } as { pendingTurn: any; threadId: string };
+
+    _testOnly.refreshMirrorStreamingStatus(
+      subscription as any,
+      Date.parse('2026-03-25T08:05:00.000Z'),
+      { idleStartMs: 180_000, heartbeatMs: 10_000 },
+    );
+
+    assert.deepEqual(statusEvents, [
+      'status:mirror:session-1:turn-1:已运行 5m，最近 20s 无新输出',
     ]);
   });
 
@@ -1034,6 +1103,8 @@ describe('bridge-manager status formatting', () => {
       streamKey: 'mirror:session-1:2026-03-25T08:00:00.000Z',
       startedAt: '2026-03-25T08:00:00.000Z',
       lastActivityAt: '2026-03-25T08:00:00.000Z',
+      lastStatusText: null,
+      lastStatusAt: 0,
       userText: 'desktop prompt',
       lastAssistantText: null,
       lastCommentaryText: null,
@@ -1053,6 +1124,8 @@ describe('bridge-manager status formatting', () => {
         streamKey: 'mirror:session-1:turn-1',
         startedAt: '2026-03-25T08:00:00.000Z',
         lastActivityAt: '2026-03-25T08:00:00.000Z',
+        lastStatusText: null,
+        lastStatusAt: 0,
         userText: null,
         lastAssistantText: 'stale answer',
         lastCommentaryText: null,

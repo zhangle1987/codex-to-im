@@ -200,4 +200,82 @@ describe('interactive-runtime', () => {
     assert.match(sent[0] || '', /超过 10 分钟没有新的执行输出/);
     assert.equal(state.activeTasks.get(session.id)?.idleReminderSent, true);
   });
+
+  it('heals stale terminal runtime state back to idle when no active task remains', () => {
+    const store = new JsonFileStore(makeSettings());
+    initTestBridgeContext(store);
+    const session = store.createSession('Runtime Heal', 'test-model', undefined, 'D:\\workspace\\runtime-heal', 'code');
+    const state = {
+      activeTasks: new Map(),
+      queuedCounts: new Map(),
+      sessionLocks: new Map(),
+    };
+    const runtime = createInteractiveRuntime(() => state, {
+      idleReminderMs: 600_000,
+    }, {
+      getStore: () => store,
+      nowIso: () => '2026-04-20T16:00:00.000Z',
+    });
+
+    store.updateSession(session.id, {
+      runtime_status: 'running',
+      queued_count: 2,
+      health_status: 'completed',
+      health_reason: '任务已完成。',
+      last_runtime_update_at: '2026-04-20T15:00:00.000Z',
+    });
+
+    runtime.reconcileTerminalSessionRuntimeState();
+
+    const healed = store.getSession(session.id);
+    assert.equal(healed?.runtime_status, 'idle');
+    assert.equal(healed?.queued_count || 0, 0);
+    assert.equal(healed?.last_runtime_update_at, '2026-04-20T16:00:00.000Z');
+  });
+
+  it('does not clear runtime state during terminal healing while an active task still exists', () => {
+    const store = new JsonFileStore(makeSettings());
+    initTestBridgeContext(store);
+    const session = store.createSession('Runtime Heal Active', 'test-model', undefined, 'D:\\workspace\\runtime-heal-active', 'code');
+    const state = {
+      activeTasks: new Map(),
+      queuedCounts: new Map(),
+      sessionLocks: new Map(),
+    };
+    const runtime = createInteractiveRuntime(() => state, {
+      idleReminderMs: 600_000,
+    }, {
+      getStore: () => store,
+      nowIso: () => '2026-04-20T16:05:00.000Z',
+    });
+
+    runtime.registerInteractiveTask({
+      id: 'task-heal-active',
+      abortController: new AbortController(),
+      adapter: { channelType: 'feishu', provider: 'feishu' } as never,
+      address: { channelType: 'feishu', chatId: 'chat-heal-active' },
+      requestMessageId: 'msg-heal-active',
+      streamKey: 'stream-heal-active',
+      sessionId: session.id,
+      hasStreamingCards: false,
+      structuredStreamUiActive: false,
+      lastActivityAt: Date.now(),
+      idleReminderSent: false,
+      streamFinalized: false,
+      uiEnded: false,
+      mirrorSuppressionId: null,
+    });
+
+    store.updateSession(session.id, {
+      health_status: 'completed',
+      health_reason: '检测到桌面线程已完成当前任务。',
+      last_runtime_update_at: '2026-04-20T15:05:00.000Z',
+    });
+
+    runtime.reconcileTerminalSessionRuntimeState();
+
+    const stillRunning = store.getSession(session.id);
+    assert.equal(stillRunning?.runtime_status, 'running');
+    assert.equal(stillRunning?.last_runtime_update_at, '2026-04-20T15:05:00.000Z');
+  });
 });

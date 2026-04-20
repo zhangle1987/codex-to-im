@@ -328,6 +328,47 @@ describe('CodexProvider', () => {
     assert.equal(capturedTurnOptions?.signal, abortController.signal);
   });
 
+  it('treats turn.completed as terminal even if the SDK event iterator never closes', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const stalledAfterComplete = new Promise<never>(() => {});
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: { input_tokens: 3, output_tokens: 5, cached_input_tokens: 1 } };
+          await stalledAfterComplete;
+        })(),
+      }),
+    };
+
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: () => mockThread,
+    };
+
+    const stream = provider.streamChat({
+      prompt: 'terminal event should close the bridge stream',
+      sessionId: 'stalled-after-complete-session',
+    });
+
+    const chunks = await Promise.race([
+      collectStream(stream),
+      new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error('stream did not close after turn.completed')), 250)),
+    ]);
+    const events = parseSSEChunks(chunks);
+    const resultEvent = events.find(e => e.type === 'result');
+
+    assert.ok(resultEvent, 'Should emit a result event');
+    const result = JSON.parse(resultEvent!.data);
+    assert.deepEqual(result.usage, {
+      input_tokens: 3,
+      output_tokens: 5,
+      cache_read_input_tokens: 1,
+    });
+  });
+
   it('reuses the in-memory Codex thread even when the stored model is Claude-like', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');

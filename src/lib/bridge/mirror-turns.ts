@@ -11,6 +11,8 @@ export interface DesktopMirrorTurnState {
   streamKey: string;
   startedAt: string;
   lastActivityAt: string;
+  lastStatusText: string | null;
+  lastStatusAt: number;
   userText: string | null;
   lastAssistantText: string | null;
   lastCommentaryText: string | null;
@@ -55,6 +57,8 @@ export function createMirrorTurnState(
     streamKey: buildMirrorStreamKey(sessionId, turnId || null, safeTimestamp),
     startedAt: safeTimestamp,
     lastActivityAt: safeTimestamp,
+    lastStatusText: null,
+    lastStatusAt: 0,
     userText: null,
     lastAssistantText: null,
     lastCommentaryText: null,
