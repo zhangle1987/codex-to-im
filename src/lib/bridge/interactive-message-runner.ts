@@ -1,5 +1,11 @@
-import type { InboundMessage, OutboundAttachment, StreamingPreviewState, ToolCallInfo } from './types.js';
-import type { BaseChannelAdapter } from './channel-adapter.js';
+import type {
+  InboundMessage,
+  OutboundAttachment,
+  StreamingPreviewState,
+  TaskProgressInfo,
+  ToolCallInfo,
+} from './types.js';
+import type { BaseChannelAdapter, StructuredStreamingUiSnapshot } from './channel-adapter.js';
 import * as router from './channel-router.js';
 import * as engine from './conversation-engine.js';
 import * as broker from './permission-broker.js';
@@ -9,6 +15,7 @@ import { buildInteractiveStreamKey } from './mirror-formatters.js';
 import {
   finalizeStreamFeedback,
   pushStreamFeedbackStatus,
+  pushStreamFeedbackTasks,
   pushStreamFeedbackText,
   pushStreamFeedbackTools,
 } from './stream-feedback-controller.js';
@@ -96,12 +103,18 @@ function formatRuntimeDuration(ms: number): string {
   return `${hours}h ${minutes}m ${seconds}s`;
 }
 
-export function formatInteractiveRuntimeStatus(elapsedMs: number, silentMs?: number | null): string {
+export function formatInteractiveRuntimeStatus(
+  elapsedMs: number,
+  silentMs?: number | null,
+  statusNote?: string | null,
+): string {
   const parts = [elapsedMs < 1000 ? '处理中' : `已运行 ${formatRuntimeDuration(elapsedMs)}`];
   if (typeof silentMs === 'number' && silentMs >= 0) {
     parts.push(`最近 ${formatRuntimeDuration(silentMs)} 无新输出`);
   }
-  return parts.join('，');
+  const runtimeText = parts.join('，');
+  const note = (statusNote || '').trim();
+  return note ? `当前步骤：${note}\n${runtimeText}` : runtimeText;
 }
 
 export interface InteractiveTaskState {
@@ -129,6 +142,7 @@ export interface RunInteractiveMessageDeps {
   recordInteractiveHealthStart(sessionId: string, detail?: string): void;
   recordInteractiveHealthProgress(sessionId: string, type: 'text' | 'permission_wait', detail?: string): void;
   recordInteractiveHealthTool(sessionId: string, toolId: string, toolName: string, status: 'running' | 'complete' | 'error'): void;
+  recordInteractiveStreamUiSnapshot?(sessionId: string, snapshot: StructuredStreamingUiSnapshot): void;
   recordInteractiveHealthEnd(sessionId: string, outcome: 'completed' | 'failed' | 'aborted', detail?: string): void;
   beginMirrorSuppression(sessionId: string, promptText: string): string;
   abortMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
@@ -268,25 +282,37 @@ export async function runInteractiveMessage(
     channelType: adapter.channelType,
     chatId: msg.address.chatId,
     streamKey,
+    ensureStarted: () => {
+      adapter.onMessageStart?.(msg.address.chatId, streamKey);
+    },
   };
   const supportsPersistentStreamStatus = hasStreamingCards
     && adapter.provider === 'feishu'
     && typeof adapter.onStreamStatus === 'function';
   const supportsStructuredStreamUi = supportsPersistentStreamStatus
     && (adapter.supportsStructuredStreamingUi?.(msg.address.chatId) ?? true);
+  let latestStatusNote: string | null = null;
+  let latestTasks: TaskProgressInfo[] = [];
   const syncStructuredStreamUiState = () => {
     if (!supportsStructuredStreamUi || taskState.structuredStreamUiActive) return;
     if (adapter.hasActiveStreamingUi?.(msg.address.chatId, streamKey)) {
       taskState.structuredStreamUiActive = true;
     }
   };
+  const syncStructuredStreamUiSnapshot = () => {
+    if (!supportsStructuredStreamUi) return;
+    syncStructuredStreamUiState();
+    const snapshot = adapter.getStructuredStreamingUiSnapshot?.(msg.address.chatId, streamKey);
+    if (!snapshot) return;
+    deps.recordInteractiveStreamUiSnapshot?.(binding.codepilotSessionId, snapshot);
+  };
   const pushRunningStatus = (silentMs?: number | null) => {
     if (!supportsStructuredStreamUi || streamStatusUpdatesClosed) return;
     pushStreamFeedbackStatus(
       streamFeedbackTarget,
-      formatInteractiveRuntimeStatus(nowMs() - taskStartedAt, silentMs),
+      formatInteractiveRuntimeStatus(nowMs() - taskStartedAt, silentMs, latestStatusNote),
     );
-    syncStructuredStreamUiState();
+    syncStructuredStreamUiSnapshot();
   };
 
   let streamStatusHeartbeat: unknown = null;
@@ -323,7 +349,26 @@ export async function runInteractiveMessage(
       pushStreamFeedbackTools(streamFeedbackTarget, Array.from(toolCallTracker.values()));
     }
     pushRunningStatus(null);
-    syncStructuredStreamUiState();
+    syncStructuredStreamUiSnapshot();
+  };
+
+  const onTaskEvent = (tasks: TaskProgressInfo[]) => {
+    if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
+    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+    latestTasks = tasks;
+    if (hasStreamingCards) {
+      pushStreamFeedbackTasks(streamFeedbackTarget, latestTasks);
+    }
+    pushRunningStatus(null);
+    syncStructuredStreamUiSnapshot();
+  };
+
+  const onStatusNote = (note: string | null) => {
+    if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
+    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+    latestStatusNote = (note || '').trim() || null;
+    pushRunningStatus(null);
+    syncStructuredStreamUiSnapshot();
   };
 
   const onPartialText = (fullText: string) => {
@@ -333,7 +378,7 @@ export async function runInteractiveMessage(
     previewOnPartialText?.(fullText);
     onStreamCardText?.(fullText);
     pushRunningStatus(null);
-    syncStructuredStreamUiState();
+    syncStructuredStreamUiSnapshot();
   };
 
   if (supportsStructuredStreamUi) {
@@ -348,11 +393,13 @@ export async function runInteractiveMessage(
         return;
       }
       const elapsedMs = nowMs() - taskStartedAt;
-      if (elapsedMs < streamStatusIdleDetectionStartMs) return;
       const silentMs = nowMs() - taskState.lastActivityAt;
-      if (silentMs < streamStatusHeartbeatMs) return;
-      pushRunningStatus(silentMs);
-      syncStructuredStreamUiState();
+      const showSilentDuration = elapsedMs >= streamStatusIdleDetectionStartMs
+        && silentMs >= streamStatusHeartbeatMs
+        ? silentMs
+        : null;
+      pushRunningStatus(showSilentDuration);
+      syncStructuredStreamUiSnapshot();
     }, streamStatusHeartbeatMs);
   }
 
@@ -382,11 +429,16 @@ export async function runInteractiveMessage(
           'permission_wait',
           `当前正在等待工具 ${perm.toolName} 的权限确认。`,
         );
+        deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+        pushRunningStatus(null);
+        syncStructuredStreamUiSnapshot();
       },
       taskAbort.signal,
       attachments && attachments.length > 0 ? attachments : undefined,
       onPartialText,
       onToolEvent,
+      onTaskEvent,
+      onStatusNote,
       (preparedPrompt) => {
         if (!taskState.mirrorSuppressionId) {
           taskState.mirrorSuppressionId = deps.beginMirrorSuppression(binding.codepilotSessionId, preparedPrompt);
@@ -410,16 +462,20 @@ export async function runInteractiveMessage(
       taskState.streamFinalized = cardFinalized;
     }
 
-    if (result.responseText || result.outboundAttachments.length > 0) {
+    if (
+      result.responseText || result.outboundAttachments.length > 0
+    ) {
       const textToDeliver = cardFinalized ? '' : result.responseText;
-      await deps.deliverResponse(
-        adapter,
-        msg.address,
-        textToDeliver,
-        binding.codepilotSessionId,
-        msg.messageId,
-        result.outboundAttachments,
-      );
+      if (!cardFinalized || result.outboundAttachments.length > 0) {
+        await deps.deliverResponse(
+          adapter,
+          msg.address,
+          textToDeliver,
+          binding.codepilotSessionId,
+          msg.messageId,
+          result.outboundAttachments,
+        );
+      }
     } else if (result.hasError) {
       await deps.deliverResponse(
         adapter,
@@ -442,6 +498,7 @@ export async function runInteractiveMessage(
       : undefined;
   } finally {
     stopStructuredStreamStatusUpdates();
+    deps.recordInteractiveStreamUiSnapshot?.(binding.codepilotSessionId, { active: false });
     if (previewState) {
       if (previewState.throttleTimer) {
         clearTimeout(previewState.throttleTimer);

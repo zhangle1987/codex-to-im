@@ -5,12 +5,14 @@ export const HEALTH_RECENT_PROGRESS_MS = 10 * 60 * 1000;
 export const HEALTH_SLOW_OBSERVED_MS = 30 * 60 * 1000;
 export const HEALTH_PROGRESS_PERSIST_THROTTLE_MS = 15 * 1000;
 export const HEALTH_PROCESS_PROBE_CACHE_MS = 30 * 1000;
+export const HEALTH_STREAM_UI_STALL_MS = 60 * 1000;
 
 const RUNNING_HEALTH_STATUSES = new Set<BridgeSessionHealthStatus>([
   'running_active',
   'waiting_tool',
   'slow_observed',
   'suspected_stall',
+  'suspected_stream_ui_stall',
   'suspected_detached',
 ]);
 
@@ -18,6 +20,8 @@ export type SessionProgressType =
   | 'task_started'
   | 'message'
   | 'commentary'
+  | 'reasoning'
+  | 'plan_update'
   | 'text'
   | 'permission_wait'
   | 'tool_running'
@@ -47,6 +51,12 @@ export interface SessionHealthDiagnosis {
   activeToolName: string | null;
   activeToolStartedAt: string | null;
   lastToolFinishedAt: string | null;
+  lastStreamUiAttemptAt: string | null;
+  lastStreamUiUpdateAt: string | null;
+  streamUiFlushStartedAt: string | null;
+  lastStreamUiErrorAt: string | null;
+  lastStreamUiError: string | null;
+  streamUiConsecutiveFailures: number;
   sdkSessionId: string | null;
   processProbe: ThreadProcessProbeResult | null;
 }
@@ -137,6 +147,10 @@ export function buildProgressReason(type: SessionProgressType, detail?: string):
       return '最近收到了新的桌面会话消息。';
     case 'commentary':
       return '最近收到了新的执行进展说明。';
+    case 'reasoning':
+      return '最近收到了新的思考/状态说明。';
+    case 'plan_update':
+      return '最近更新了任务计划。';
     case 'text':
       return '最近收到了新的正文输出。';
     case 'permission_wait':
@@ -193,6 +207,16 @@ export function computeBaseDiagnosis(
   const activeToolName = summarizeActiveTools(activeTools) || trimOrNull(session.active_tool_name);
   const activeToolStartedAt = getActiveToolStartedAt(activeTools) || trimOrNull(session.active_tool_started_at);
   const lastToolFinishedAt = trimOrNull(session.last_tool_finished_at);
+  const lastStreamUiAttemptAt = trimOrNull(session.last_stream_ui_attempt_at);
+  const lastStreamUiUpdateAt = trimOrNull(session.last_stream_ui_update_at);
+  const streamUiFlushStartedAt = trimOrNull(session.stream_ui_flush_started_at);
+  const lastStreamUiErrorAt = trimOrNull(session.last_stream_ui_error_at);
+  const lastStreamUiError = trimOrNull(session.last_stream_ui_error);
+  const streamUiConsecutiveFailures = typeof session.stream_ui_consecutive_failures === 'number'
+    && Number.isFinite(session.stream_ui_consecutive_failures)
+    && session.stream_ui_consecutive_failures > 0
+    ? session.stream_ui_consecutive_failures
+    : 0;
   const sdkSessionId = trimOrNull(session.sdk_session_id);
   const lastProgressMs = parseIsoMs(lastProgressAt || undefined);
   const previousStatus = session.health_status || 'idle';
@@ -213,6 +237,12 @@ export function computeBaseDiagnosis(
       activeToolName,
       activeToolStartedAt,
       lastToolFinishedAt,
+      lastStreamUiAttemptAt,
+      lastStreamUiUpdateAt,
+      streamUiFlushStartedAt,
+      lastStreamUiErrorAt,
+      lastStreamUiError,
+      streamUiConsecutiveFailures,
       sdkSessionId,
     };
   }
@@ -257,6 +287,12 @@ export function computeBaseDiagnosis(
     activeToolName,
     activeToolStartedAt,
     lastToolFinishedAt,
+    lastStreamUiAttemptAt,
+    lastStreamUiUpdateAt,
+    streamUiFlushStartedAt,
+    lastStreamUiErrorAt,
+    lastStreamUiError,
+    streamUiConsecutiveFailures,
     sdkSessionId,
   };
 }
@@ -306,4 +342,64 @@ export function applyProcessProbeDiagnosis(
     ...diagnosis,
     processProbe,
   };
+}
+
+export function applyStreamUiDiagnosis(
+  diagnosis: SessionHealthDiagnosis,
+  nowMs: number,
+): SessionHealthDiagnosis {
+  if (!isRunningRuntimeStatus(diagnosis.runtimeStatus)) {
+    return diagnosis;
+  }
+
+  const lastProgressMs = parseIsoMs(diagnosis.lastProgressAt || undefined);
+  if (!lastProgressMs || nowMs - lastProgressMs > HEALTH_RECENT_PROGRESS_MS) {
+    return diagnosis;
+  }
+
+  const lastStreamUiUpdateMs = parseIsoMs(diagnosis.lastStreamUiUpdateAt || undefined);
+  const lastStreamUiAttemptMs = parseIsoMs(diagnosis.lastStreamUiAttemptAt || undefined);
+  const streamUiFlushStartedMs = parseIsoMs(diagnosis.streamUiFlushStartedAt || undefined);
+  const lastStreamUiErrorText = diagnosis.lastStreamUiError?.trim();
+
+  if (streamUiFlushStartedMs && nowMs - streamUiFlushStartedMs >= HEALTH_STREAM_UI_STALL_MS) {
+    const details = ['任务仍在继续，但流式 UI 刷新请求已长时间未完成，疑似卡住。'];
+    if (diagnosis.streamUiConsecutiveFailures > 0) {
+      details.push(`最近连续失败 ${diagnosis.streamUiConsecutiveFailures} 次。`);
+    }
+    if (lastStreamUiErrorText) {
+      details.push(`最近错误：${lastStreamUiErrorText}`);
+    }
+    return {
+      ...diagnosis,
+      healthStatus: 'suspected_stream_ui_stall',
+      healthReason: details.join(' '),
+    };
+  }
+
+  if (lastStreamUiUpdateMs && lastProgressMs - lastStreamUiUpdateMs >= HEALTH_STREAM_UI_STALL_MS) {
+    const details = ['任务仍在继续，但流式 UI 已长时间没有跟上最新执行进展，疑似停更。'];
+    if (lastStreamUiErrorText) {
+      details.push(`最近错误：${lastStreamUiErrorText}`);
+    }
+    return {
+      ...diagnosis,
+      healthStatus: 'suspected_stream_ui_stall',
+      healthReason: details.join(' '),
+    };
+  }
+
+  if (!lastStreamUiUpdateMs && lastStreamUiAttemptMs && lastProgressMs - lastStreamUiAttemptMs >= HEALTH_STREAM_UI_STALL_MS) {
+    const details = ['任务仍在继续，但流式 UI 只有发送尝试、没有成功刷新记录，疑似停更。'];
+    if (lastStreamUiErrorText) {
+      details.push(`最近错误：${lastStreamUiErrorText}`);
+    }
+    return {
+      ...diagnosis,
+      healthStatus: 'suspected_stream_ui_stall',
+      healthReason: details.join(' '),
+    };
+  }
+
+  return diagnosis;
 }

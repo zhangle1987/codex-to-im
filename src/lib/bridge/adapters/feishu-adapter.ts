@@ -25,6 +25,7 @@ import type {
   OutboundAttachment,
   OutboundMessage,
   SendResult,
+  TaskProgressInfo,
 } from '../types.js';
 import type { FileAttachment } from '../types.js';
 import type { ToolCallInfo } from '../types.js';
@@ -33,7 +34,12 @@ import {
   normalizeFeishuSite,
   type FeishuChannelConfig,
 } from '../../../config.js';
-import { BaseChannelAdapter, registerAdapterFactory, type AdapterRuntimeInstance } from '../channel-adapter.js';
+import {
+  BaseChannelAdapter,
+  registerAdapterFactory,
+  type AdapterRuntimeInstance,
+  type StructuredStreamingUiSnapshot,
+} from '../channel-adapter.js';
 import { getBridgeContext } from '../context.js';
 import {
   htmlToFeishuMarkdown,
@@ -41,6 +47,7 @@ import {
   hasComplexMarkdown,
   buildCardContent,
   buildPostContent,
+  buildStreamingTaskContent,
   buildStreamingTextContent,
   buildStreamingToolsContent,
   buildFinalCardJson,
@@ -64,22 +71,32 @@ interface FeishuCardState {
   messageId: string;
   sequence: number;
   startTime: number;
+  taskItems: TaskProgressInfo[];
   toolCalls: ToolCallInfo[];
   thinking: boolean;
   pendingText: string | null;
+  pendingTasksText: string | null;
   pendingStatusText: string | null;
   renderedText: string | null;
+  renderedTasksText: string | null;
   renderedToolsText: string | null;
   renderedStatusText: string | null;
   lastUpdateAt: number;
   throttleTimer: ReturnType<typeof setTimeout> | null;
   flushInFlight: Promise<void> | null;
   flushQueued: boolean;
+  lastFlushStartedAt: number | null;
+  lastSuccessfulFlushAt: number | null;
+  lastFlushErrorAt: number | null;
+  lastFlushError: string | null;
+  consecutiveFlushFailures: number;
 }
 
 /** Streaming card throttle interval (ms). */
 const CARD_THROTTLE_MS = 200;
+const CARD_REQUEST_TIMEOUT_MS = 15_000;
 const INITIAL_STREAMING_STATUS = '处理中';
+const EMPTY_STREAMING_TASKS = '';
 const EMPTY_STREAMING_TOOLS = '';
 
 /** Shape of the SDK's im.message.receive_v1 event data. */
@@ -143,6 +160,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private tenantTokenCache:
     | { token: string; expiresAt: number; appId: string; appSecret: string; domain: string }
     | null = null;
+  private cardRequestTimeoutMs = CARD_REQUEST_TIMEOUT_MS;
 
   constructor(instance?: AdapterRuntimeInstance) {
     super();
@@ -437,6 +455,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
             },
             {
               tag: 'markdown',
+              content: EMPTY_STREAMING_TASKS,
+              text_align: 'left',
+              text_size: 'normal',
+              element_id: 'streaming_tasks',
+            },
+            {
+              tag: 'markdown',
               content: EMPTY_STREAMING_TOOLS,
               text_align: 'left',
               text_size: 'normal',
@@ -453,9 +478,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
       };
 
-      const createResp = await cardkit.card.create({
+      const createResp = await this.withFeishuRequestTimeout<{ data?: { card_id?: string } }>(cardKey, 'card.create', () => cardkit.card.create({
         data: { type: 'card_json', data: JSON.stringify(cardBody) },
-      });
+      }));
       const cardId = createResp?.data?.card_id;
       if (!cardId) {
         console.warn('[feishu-adapter] Card create returned no card_id');
@@ -466,19 +491,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const cardContent = JSON.stringify({ type: 'card', data: { card_id: cardId } });
       let msgResp;
       if (replyToMessageId) {
-        msgResp = await this.restClient.im.message.reply({
+        msgResp = await this.withFeishuRequestTimeout(cardKey, 'im.message.reply:interactive', () => this.restClient!.im.message.reply({
           path: { message_id: replyToMessageId },
           data: { content: cardContent, msg_type: 'interactive' },
-        });
+        }));
       } else {
-        msgResp = await this.restClient.im.message.create({
+        msgResp = await this.withFeishuRequestTimeout(cardKey, 'im.message.create:interactive', () => this.restClient!.im.message.create({
           params: { receive_id_type: 'chat_id' },
           data: {
             receive_id: chatId,
             msg_type: 'interactive',
             content: cardContent,
           },
-        });
+        }));
       }
 
       const messageId = msgResp?.data?.message_id;
@@ -494,17 +519,25 @@ export class FeishuAdapter extends BaseChannelAdapter {
         messageId,
         sequence: 0,
         startTime: Date.now(),
+        taskItems: [],
         toolCalls: [],
         thinking: true,
         pendingText: null,
+        pendingTasksText: EMPTY_STREAMING_TASKS,
         pendingStatusText: INITIAL_STREAMING_STATUS,
         renderedText: '💭 Thinking...',
+        renderedTasksText: EMPTY_STREAMING_TASKS,
         renderedToolsText: EMPTY_STREAMING_TOOLS,
         renderedStatusText: INITIAL_STREAMING_STATUS,
         lastUpdateAt: 0,
         throttleTimer: null,
         flushInFlight: null,
         flushQueued: false,
+        lastFlushStartedAt: null,
+        lastSuccessfulFlushAt: null,
+        lastFlushErrorAt: null,
+        lastFlushError: null,
+        consecutiveFlushFailures: 0,
       });
 
       console.log(`[feishu-adapter] Streaming card created: streamKey=${cardKey}, cardId=${cardId}, msgId=${messageId}`);
@@ -540,6 +573,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.scheduleCardFlush(cardKey);
   }
 
+  private updateTaskProgress(chatId: string, tasks: TaskProgressInfo[], streamKey?: string): void {
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    const state = this.activeCards.get(cardKey);
+    if (!state) return;
+    state.taskItems = tasks;
+    state.pendingTasksText = buildStreamingTaskContent(tasks) || EMPTY_STREAMING_TASKS;
+    this.scheduleCardFlush(cardKey);
+  }
+
   private enqueueCardFlush(streamKey: string): void {
     const state = this.activeCards.get(streamKey);
     if (!state) return;
@@ -548,6 +590,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
 
+    state.lastFlushStartedAt = Date.now();
     state.flushInFlight = this.flushCardUpdate(streamKey)
       .catch((err: unknown) => {
         console.warn('[feishu-adapter] cardElement.content failed:', err instanceof Error ? err.message : err);
@@ -596,6 +639,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!cardkit?.cardElement?.content) return;
 
     const content = buildStreamingTextContent(state.pendingText || '');
+    const tasksText = state.pendingTasksText || EMPTY_STREAMING_TASKS;
     const toolsText = buildStreamingToolsContent(state.toolCalls) || EMPTY_STREAMING_TOOLS;
     const statusText = state.pendingStatusText || INITIAL_STREAMING_STATUS;
     const updates: Array<{ elementId: string; content: string; onSuccess: () => void }> = [];
@@ -606,6 +650,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
         content,
         onSuccess: () => {
           state.renderedText = content;
+        },
+      });
+    }
+    if (tasksText !== state.renderedTasksText) {
+      updates.push({
+        elementId: 'streaming_tasks',
+        content: tasksText,
+        onSuccess: () => {
+          state.renderedTasksText = tasksText;
         },
       });
     }
@@ -633,13 +686,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
     for (const update of updates) {
       state.sequence++;
       try {
-        await cardkit.cardElement.content({
+        await this.withFeishuRequestTimeout(streamKey, `cardElement.content:${update.elementId}`, () => cardkit.cardElement.content({
           path: { card_id: cardId, element_id: update.elementId },
           data: { content: update.content, sequence: state.sequence },
-        });
+        }));
         update.onSuccess();
-        state.lastUpdateAt = Date.now();
+        this.markCardFlushSuccess(state);
       } catch (err) {
+        this.markCardFlushFailure(state, err);
         console.warn(
           `[feishu-adapter] cardElement.content failed for ${update.elementId}:`,
           err instanceof Error ? err.message : err,
@@ -712,13 +766,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
     try {
       // Step 1: Close streaming mode
       state.sequence++;
-      await cardkit.card.settings({
+      await this.withFeishuRequestTimeout(cardKey, 'card.settings', () => cardkit.card.settings({
         path: { card_id: state.cardId },
         data: {
           settings: JSON.stringify({ streaming_mode: false }),
           sequence: state.sequence,
         },
-      });
+      }));
 
       // Step 2: Build and apply final card
       const statusLabels: Record<string, string> = {
@@ -746,16 +800,16 @@ export class FeishuAdapter extends BaseChannelAdapter {
         finalText = `${trimmedExisting}\n\n${trimmedResponse}`;
       }
 
-      const finalCardJson = buildFinalCardJson(finalText, state.toolCalls, footer);
+      const finalCardJson = buildFinalCardJson(finalText, state.taskItems, state.toolCalls, footer);
 
       state.sequence++;
-      await cardkit.card.update({
+      await this.withFeishuRequestTimeout(cardKey, 'card.update', () => cardkit.card.update({
         path: { card_id: state.cardId },
         data: {
           card: { type: 'card_json', data: finalCardJson },
           sequence: state.sequence,
         },
-      });
+      }));
 
       console.log(`[feishu-adapter] Card finalized: streamKey=${cardKey}, cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
       return true;
@@ -792,6 +846,95 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return this.hasActiveCard(chatId, streamKey);
   }
 
+  getStructuredStreamingUiSnapshot(chatId: string, streamKey?: string): StructuredStreamingUiSnapshot | null {
+    const state = this.activeCards.get(this.resolveStreamKey(chatId, streamKey));
+    if (!state) return null;
+    return {
+      active: true,
+      lastAttemptAt: state.lastFlushStartedAt,
+      lastUpdateAt: state.lastSuccessfulFlushAt ?? (state.lastUpdateAt > 0 ? state.lastUpdateAt : null),
+      lastErrorAt: state.lastFlushErrorAt,
+      lastError: state.lastFlushError,
+      flushInFlight: Boolean(state.flushInFlight),
+      flushInFlightSince: state.flushInFlight ? state.lastFlushStartedAt : null,
+      consecutiveFailures: state.consecutiveFlushFailures,
+    };
+  }
+
+  private getCardRequestTimeoutMs(): number {
+    return Math.max(1, this.cardRequestTimeoutMs);
+  }
+
+  private logRequestOperation(
+    phase: 'start' | 'success' | 'timeout' | 'error',
+    scope: string,
+    target: string,
+    startedAt: number,
+    detail?: string,
+  ): void {
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    const suffix = detail ? `, detail=${detail}` : '';
+    const line = `[feishu-adapter] Request ${phase}: scope=${scope}, target=${target}, duration=${durationMs}ms${suffix}`;
+    if (phase === 'start' || phase === 'success') {
+      console.log(line);
+      return;
+    }
+    console.warn(line);
+  }
+
+  private async withFeishuRequestTimeout<T>(
+    scope: string,
+    target: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const startedAt = Date.now();
+    const timeoutMs = this.getCardRequestTimeoutMs();
+    this.logRequestOperation('start', scope, target, startedAt);
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+    const operationPromise = operation();
+    operationPromise.catch(() => {
+      // Promise.race may already reject on timeout; keep late failures handled.
+    });
+
+    try {
+      const result = await Promise.race([operationPromise, timeoutPromise]);
+      this.logRequestOperation('success', scope, target, startedAt);
+      return result;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logRequestOperation(
+        detail.startsWith('timeout after ') ? 'timeout' : 'error',
+        scope,
+        target,
+        startedAt,
+        detail,
+      );
+      throw error;
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
+  }
+
+  private markCardFlushFailure(state: FeishuCardState, error: unknown): void {
+    state.lastFlushErrorAt = Date.now();
+    state.lastFlushError = error instanceof Error ? error.message : String(error);
+    state.consecutiveFlushFailures += 1;
+  }
+
+  private markCardFlushSuccess(state: FeishuCardState): void {
+    const now = Date.now();
+    state.lastUpdateAt = now;
+    state.lastSuccessfulFlushAt = now;
+    state.lastFlushError = null;
+    state.consecutiveFlushFailures = 0;
+  }
+
   // ── Streaming adapter interface ────────────────────────────────
 
   /**
@@ -821,7 +964,28 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   onToolEvent(chatId: string, tools: ToolCallInfo[], streamKey?: string): void {
     if (!this.isStreamingEnabled()) return;
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    if (!this.activeCards.has(cardKey)) {
+      const messageId = this.lastIncomingMessageId.get(chatId);
+      this.createStreamingCard(chatId, messageId, cardKey).then((ok) => {
+        if (ok) this.updateToolProgress(chatId, tools, cardKey);
+      }).catch(() => {});
+      return;
+    }
     this.updateToolProgress(chatId, tools, streamKey);
+  }
+
+  onTaskEvent(chatId: string, tasks: TaskProgressInfo[], streamKey?: string): void {
+    if (!this.isStreamingEnabled()) return;
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    if (!this.activeCards.has(cardKey)) {
+      const messageId = this.lastIncomingMessageId.get(chatId);
+      this.createStreamingCard(chatId, messageId, cardKey).then((ok) => {
+        if (ok) this.updateTaskProgress(chatId, tasks, cardKey);
+      }).catch(() => {});
+      return;
+    }
+    this.updateTaskProgress(chatId, tasks, streamKey);
   }
 
   onStreamStatus(chatId: string, statusText: string, streamKey?: string): void {
@@ -1042,18 +1206,18 @@ export class FeishuAdapter extends BaseChannelAdapter {
   ): Promise<SendResult> {
     try {
       const res = replyToMessageId
-        ? await this.restClient!.im.message.reply({
+        ? await this.withFeishuRequestTimeout(chatId, `im.message.reply:${msgType}`, () => this.restClient!.im.message.reply({
           path: { message_id: replyToMessageId },
           data: { msg_type: msgType, content },
-        })
-        : await this.restClient!.im.message.create({
+        }))
+        : await this.withFeishuRequestTimeout(chatId, `im.message.create:${msgType}`, () => this.restClient!.im.message.create({
           params: { receive_id_type: 'chat_id' },
           data: {
             receive_id: chatId,
             msg_type: msgType,
             content,
           },
-        });
+        }));
 
       if (res?.data?.message_id) {
         return { ok: true, messageId: res.data.message_id };
@@ -1072,14 +1236,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const cardContent = buildCardContent(text);
 
     try {
-      const res = await this.restClient!.im.message.create({
+      const res = await this.withFeishuRequestTimeout(chatId, 'im.message.create:interactive-card', () => this.restClient!.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
           msg_type: 'interactive',
           content: cardContent,
         },
-      });
+      }));
 
       if (res?.data?.message_id) {
         return { ok: true, messageId: res.data.message_id };
@@ -1101,14 +1265,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const postContent = buildPostContent(text);
 
     try {
-      const res = await this.restClient!.im.message.create({
+      const res = await this.withFeishuRequestTimeout(chatId, 'im.message.create:post', () => this.restClient!.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
           msg_type: 'post',
           content: postContent,
         },
-      });
+      }));
 
       if (res?.data?.message_id) {
         return { ok: true, messageId: res.data.message_id };
@@ -1124,14 +1288,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private async sendAsPlainText(chatId: string, text: string): Promise<SendResult> {
     try {
-      const res = await this.restClient!.im.message.create({
+      const res = await this.withFeishuRequestTimeout(chatId, 'im.message.create:text', () => this.restClient!.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
           msg_type: 'text',
           content: JSON.stringify({ text }),
         },
-      });
+      }));
       if (res?.data?.message_id) {
         return { ok: true, messageId: res.data.message_id };
       }
@@ -1181,14 +1345,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const cardJson = buildPermissionButtonCard(mdText, permId, chatId);
 
       try {
-        const res = await this.restClient.im.message.create({
+        const res = await this.withFeishuRequestTimeout(chatId, 'im.message.create:permission-button-card', () => this.restClient!.im.message.create({
           params: { receive_id_type: 'chat_id' },
           data: {
             receive_id: chatId,
             msg_type: 'interactive',
             content: cardJson,
           },
-        });
+        }));
         if (res?.data?.message_id) {
           return { ok: true, messageId: res.data.message_id };
         }
@@ -1237,14 +1401,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
     });
 
     try {
-      const res = await this.restClient.im.message.create({
+      const res = await this.withFeishuRequestTimeout(chatId, 'im.message.create:permission-fallback-card', () => this.restClient!.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
           msg_type: 'interactive',
           content: cardJson,
         },
-      });
+      }));
       if (res?.data?.message_id) {
         return { ok: true, messageId: res.data.message_id };
       }
@@ -1264,14 +1428,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
     ].join('\n');
 
     try {
-      const res = await this.restClient.im.message.create({
+      const res = await this.withFeishuRequestTimeout(chatId, 'im.message.create:permission-fallback-text', () => this.restClient!.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
           msg_type: 'text',
           content: JSON.stringify({ text: plainText }),
         },
-      });
+      }));
       if (res?.data?.message_id) {
         return { ok: true, messageId: res.data.message_id };
       }

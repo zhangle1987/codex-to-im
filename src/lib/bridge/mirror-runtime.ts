@@ -3,7 +3,12 @@ import fs from 'node:fs';
 import type { DesktopMirrorRecord, DesktopSessionSummary } from '../../desktop-sessions.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import { getBridgeContext } from './context.js';
-import type { FinalizedDesktopMirrorTurn } from './mirror-turns.js';
+import {
+  enqueuePendingMirrorDeliveries,
+  removePendingMirrorDeliveries,
+  selectPendingMirrorDeliveries,
+  type FinalizedDesktopMirrorTurn,
+} from './mirror-turns.js';
 import type { DesktopMirrorSubscription } from './mirror-subscription-state.js';
 import {
   clearMirrorSubscriptionFailure,
@@ -57,7 +62,7 @@ export interface CreateMirrorRuntimeDeps {
   deliverMirrorTurns(
     subscription: DesktopMirrorSubscription,
     turns: FinalizedDesktopMirrorTurn[],
-  ): Promise<void>;
+  ): Promise<{ deliveredCount: number; error?: unknown }>;
 }
 
 export interface MirrorRuntime {
@@ -267,22 +272,38 @@ export function createMirrorRuntime(
       return 'processed';
     }
 
-    const deliverableRecords = readMirrorDeliverableRecords(subscription, snapshot);
+    const readResult = readMirrorDeliverableRecords(subscription, snapshot);
+    const deliverableRecords = readResult.records;
+    for (const kind of readResult.unknownKinds) {
+      if (subscription.unknownMirrorKindsSeen.has(kind)) continue;
+      subscription.unknownMirrorKindsSeen.add(kind);
+      console.warn(
+        `[bridge-manager] Unhandled desktop mirror event for thread ${subscription.threadId}: ${kind}`,
+      );
+    }
     if (deliverableRecords.length > 0) {
       deps.observeSessionHealthRecords(subscription.sessionId, subscription.threadId, deliverableRecords);
     }
+    const blocked = getState().activeTasks.has(subscription.sessionId) || deps.isMirrorSuppressed(subscription.sessionId);
     const deliveryPlan = buildMirrorDeliveryPlan(subscription, deliverableRecords, {
-      blocked: getState().activeTasks.has(subscription.sessionId) || deps.isMirrorSuppressed(subscription.sessionId),
+      blocked,
       filterSuppressedRecords: deps.filterSuppressedMirrorRecords,
       flushTimedOutTurn: (currentSubscription) => deps.flushTimedOutMirrorTurn(currentSubscription),
       consumeBufferedTurns: (currentSubscription) => deps.consumeBufferedMirrorTurns(currentSubscription),
     });
 
-    if (deliveryPlan.turnsToDeliver.length > 0) {
-      try {
-        await deps.deliverMirrorTurns(subscription, deliveryPlan.turnsToDeliver);
-      } catch (error) {
-        subscription.dirty = true;
+    if (deliveryPlan.finalizedTurns.length > 0) {
+      enqueuePendingMirrorDeliveries(subscription, deliveryPlan.finalizedTurns);
+    }
+
+    const turnsToAttempt = selectPendingMirrorDeliveries(subscription, blocked);
+    if (turnsToAttempt.length > 0) {
+      const deliveryResult = await deps.deliverMirrorTurns(subscription, turnsToAttempt);
+      if (deliveryResult.deliveredCount > 0) {
+        removePendingMirrorDeliveries(subscription, turnsToAttempt.slice(0, deliveryResult.deliveredCount));
+      }
+      if (deliveryResult.error) {
+        const error = deliveryResult.error;
         console.warn('[bridge-manager] Mirror delivery failed:', error instanceof Error ? error.message : error);
       }
     }

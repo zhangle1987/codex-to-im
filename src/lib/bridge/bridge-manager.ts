@@ -101,6 +101,7 @@ import {
   finalizeStreamFeedback,
   pushStreamFeedbackText,
   pushStreamFeedbackStatus,
+  pushStreamFeedbackTasks,
   pushStreamFeedbackTools,
 } from './stream-feedback-controller.js';
 
@@ -461,6 +462,7 @@ function pushMirrorStreamingStatus(
   const statusText = formatInteractiveRuntimeStatus(
     Math.max(0, nowMs - startedAtMs),
     options.silentMs,
+    turnState.statusNote,
   );
   if (turnState.lastStatusText === statusText) return;
 
@@ -526,6 +528,28 @@ function updateMirrorToolProgress(
     createMirrorStreamFeedbackTarget(subscription, turnState, adapter),
     Array.from(turnState.toolCalls.values()),
   );
+  pushMirrorStreamingStatus(subscription, turnState);
+}
+
+function updateMirrorTaskProgress(
+  subscription: DesktopMirrorSubscription,
+  turnState: DesktopMirrorTurnState,
+): void {
+  const adapter = getMirrorStreamingAdapter(subscription);
+  if (!adapter) return;
+  pushStreamFeedbackTasks(
+    createMirrorStreamFeedbackTarget(subscription, turnState, adapter),
+    turnState.taskItems,
+  );
+  pushMirrorStreamingStatus(subscription, turnState);
+}
+
+function updateMirrorStatusProgress(
+  subscription: DesktopMirrorSubscription,
+  turnState: DesktopMirrorTurnState,
+): void {
+  const adapter = getMirrorStreamingAdapter(subscription);
+  if (!adapter) return;
   pushMirrorStreamingStatus(subscription, turnState);
 }
 
@@ -609,14 +633,23 @@ async function deliverMirrorTurn(
 async function deliverMirrorTurns(
   subscription: DesktopMirrorSubscription,
   turns: FinalizedDesktopMirrorTurn[],
-): Promise<void> {
-  for (const turn of turns.slice(-MIRROR_EVENT_BATCH_LIMIT)) {
-    await deliverMirrorTurn(subscription, turn);
+): Promise<{ deliveredCount: number; error?: unknown }> {
+  let deliveredCount = 0;
+  for (const turn of turns.slice(0, MIRROR_EVENT_BATCH_LIMIT)) {
+    try {
+      await deliverMirrorTurn(subscription, turn);
+      deliveredCount += 1;
+    } catch (error) {
+      return { deliveredCount, error };
+    }
   }
+  return { deliveredCount };
 }
 
 const MIRROR_TURN_HOOKS: MirrorTurnHooks<DesktopMirrorSubscription> = {
   onStreamText: updateMirrorStreaming,
+  onStatusProgress: updateMirrorStatusProgress,
+  onTaskProgress: updateMirrorTaskProgress,
   onToolProgress: updateMirrorToolProgress,
 };
 
@@ -1036,6 +1069,9 @@ async function handleMessage(
       recordInteractiveHealthProgress: (sessionId, type, detail) => SESSION_HEALTH_RUNTIME.recordInteractiveProgress(sessionId, type, detail),
       recordInteractiveHealthTool: (sessionId, toolId, toolName, status) => {
         SESSION_HEALTH_RUNTIME.recordToolState(sessionId, toolId, toolName, status);
+      },
+      recordInteractiveStreamUiSnapshot: (sessionId, snapshot) => {
+        SESSION_HEALTH_RUNTIME.recordStructuredStreamUi(sessionId, snapshot);
       },
       recordInteractiveHealthEnd: (sessionId, outcome, detail) => SESSION_HEALTH_RUNTIME.recordInteractiveEnd(sessionId, outcome, detail),
       beginMirrorSuppression,

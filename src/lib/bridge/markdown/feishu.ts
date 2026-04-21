@@ -1,4 +1,4 @@
-import type { ToolCallInfo } from '../types.js';
+import type { TaskProgressInfo, ToolCallInfo } from '../types.js';
 
 /**
  * Feishu-specific Markdown processing.
@@ -93,7 +93,7 @@ export function htmlToFeishuMarkdown(html: string): string {
 
 /**
  * Build tool progress markdown lines.
- * Tools are grouped by name so repeated shell/apply_patch/update_plan calls
+ * Tools are grouped by name so repeated shell/apply_patch calls
  * do not flood the card. The icon reflects the highest-priority live state:
  * running > error > complete.
  */
@@ -127,6 +127,25 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   return lines.join('\n');
 }
 
+export function buildTaskProgressMarkdown(tasks: TaskProgressInfo[]): string {
+  if (tasks.length === 0) return '';
+  return tasks
+    .map((task) => {
+      const icon = task.status === 'completed'
+        ? '✅'
+        : task.status === 'in_progress'
+          ? '🔄'
+          : '⏳';
+      const label = task.status === 'completed'
+        ? '已完成'
+        : task.status === 'in_progress'
+          ? '执行中'
+          : '等待中';
+      return `${icon} ${task.text}（${label}）`;
+    })
+    .join('\n');
+}
+
 /**
  * Format elapsed time for card footer.
  */
@@ -153,11 +172,16 @@ export function buildStreamingToolsContent(tools: ToolCallInfo[]): string {
   return buildToolProgressMarkdown(tools);
 }
 
+export function buildStreamingTaskContent(tasks: TaskProgressInfo[]): string {
+  return buildTaskProgressMarkdown(tasks);
+}
+
 /**
  * Build the final card JSON (schema 2.0) with text, tool progress, and footer.
  */
 export function buildFinalCardJson(
   text: string,
+  tasks: TaskProgressInfo[],
   tools: ToolCallInfo[],
   footer: { status: string; elapsed: string } | null,
 ): string {
@@ -165,12 +189,25 @@ export function buildFinalCardJson(
 
   // Main text content
   const content = preprocessFeishuMarkdown(text);
+  const taskMd = buildTaskProgressMarkdown(tasks);
   const toolMd = buildToolProgressMarkdown(tools);
 
   if (content) {
     elements.push({
       tag: 'markdown',
       content,
+      text_align: 'left',
+      text_size: 'normal',
+    });
+  }
+
+  if (taskMd) {
+    if (elements.length > 0) {
+      elements.push({ tag: 'hr' });
+    }
+    elements.push({
+      tag: 'markdown',
+      content: taskMd,
       text_align: 'left',
       text_size: 'normal',
     });

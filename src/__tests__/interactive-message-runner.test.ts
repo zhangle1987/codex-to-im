@@ -297,7 +297,7 @@ describe('interactive-message-runner', () => {
           assert.equal(adapter.streamedStatuses.at(-1), '处理中');
 
           clock.advance(30_000);
-          assert.equal(adapter.streamedStatuses.at(-1), '处理中');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 30s');
 
           clock.advance(150_000);
           assert.equal(adapter.streamedStatuses.at(-1), '已运行 3m，最近 3m 无新输出');
@@ -319,6 +319,88 @@ describe('interactive-message-runner', () => {
         streamStatusHeartbeatMs: 10_000,
       },
     );
+  });
+
+  it('skips normal text delivery when the structured stream UI already finalized the reply', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-card-final',
+      userId: 'user-card-final',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\card-final');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const deliveredTexts: string[] = [];
+
+    adapter.onStreamEnd = async (
+      _chatId: string,
+      status: 'completed' | 'interrupted' | 'error',
+      responseText: string,
+    ): Promise<boolean> => {
+      adapter.streamEnds.push({ status, text: responseText });
+      return true;
+    };
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-card-final-1',
+        address,
+        text: 'hello',
+        timestamp: Date.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = Date.now();
+          task.idleReminderSent = false;
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-card-final'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse(_adapter, _address, responseText) {
+          deliveredTexts.push(responseText);
+        },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
+          onPartialText?.('第一段输出');
+          return {
+            responseText: '最终回复',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: false,
+            errorMessage: '',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+      },
+    );
+
+    assert.deepEqual(deliveredTexts, []);
+    assert.equal(adapter.streamEnds.length, 1);
+    assert.deepEqual(adapter.streamEnds[0], { status: 'completed', text: '最终回复' });
   });
 
   it('stops the runtime heartbeat before stream finalization begins', async () => {

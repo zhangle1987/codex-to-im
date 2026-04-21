@@ -40,8 +40,11 @@ describe('mirror-subscription-state', () => {
       fileIdentity: null,
       trailingText: '',
       activeMirrorTurnId: null,
+      activeSpecialCallIds: new Set(),
       bufferedRecords: [],
       pendingTurn: null,
+      pendingDeliveries: [],
+      unknownMirrorKindsSeen: new Set(),
       missingThreadPolls: 0,
       consecutiveFailures: 0,
       suspendedUntil: null,
@@ -73,11 +76,13 @@ describe('mirror-subscription-state', () => {
       lastActivityAt: '2026-04-13T12:00:01.000Z',
       lastStatusText: null,
       lastStatusAt: 0,
+      statusNote: null,
       userText: 'hello',
       lastAssistantText: 'world',
       lastCommentaryText: null,
       streamedText: 'world',
       streamStarted: true,
+      taskItems: [],
       toolCalls: new Map(),
     };
     subscription.fileOffset = 99;
@@ -86,12 +91,21 @@ describe('mirror-subscription-state', () => {
     subscription.fileIdentity = 'dev:ino';
     subscription.trailingText = 'partial';
     subscription.activeMirrorTurnId = 'turn-old';
+    subscription.activeSpecialCallIds.add('plan-old');
     subscription.bufferedRecords.push({
       signature: 'sig-1',
       type: 'message',
       role: 'assistant',
       content: 'hello',
       timestamp: '2026-04-13T12:00:01.000Z',
+    });
+    subscription.pendingDeliveries.push({
+      streamKey: 'mirror:session-old:turn-old',
+      userText: 'hello',
+      text: 'world',
+      signature: 'complete-old',
+      timestamp: '2026-04-13T12:00:02.000Z',
+      status: 'completed',
     });
     subscription.missingThreadPolls = 2;
     subscription.consecutiveFailures = 2;
@@ -126,7 +140,10 @@ describe('mirror-subscription-state', () => {
     assert.equal(subscription.fileIdentity, null);
     assert.equal(subscription.trailingText, '');
     assert.equal(subscription.activeMirrorTurnId, null);
+    assert.deepEqual(subscription.activeSpecialCallIds, new Set());
     assert.deepEqual(subscription.bufferedRecords, []);
+    assert.deepEqual(subscription.pendingDeliveries, []);
+    assert.deepEqual(subscription.unknownMirrorKindsSeen, new Set());
     assert.equal(subscription.missingThreadPolls, 0);
     assert.equal(subscription.consecutiveFailures, 0);
     assert.equal(subscription.suspendedUntil, null);
@@ -157,11 +174,13 @@ describe('mirror-subscription-state', () => {
       lastActivityAt: '2026-04-13T12:00:01.000Z',
       lastStatusText: null,
       lastStatusAt: 0,
+      statusNote: null,
       userText: 'hello',
       lastAssistantText: null,
       lastCommentaryText: null,
       streamedText: '',
       streamStarted: false,
+      taskItems: [],
       toolCalls: new Map(),
     };
     subscription.fileOffset = 99;
@@ -170,12 +189,21 @@ describe('mirror-subscription-state', () => {
     subscription.fileIdentity = 'dev:ino';
     subscription.trailingText = 'partial';
     subscription.activeMirrorTurnId = 'turn-old';
+    subscription.activeSpecialCallIds.add('plan-old');
     subscription.bufferedRecords.push({
       signature: 'sig-1',
       type: 'message',
       role: 'assistant',
       content: 'hello',
       timestamp: '2026-04-13T12:00:01.000Z',
+    });
+    subscription.pendingDeliveries.push({
+      streamKey: 'mirror:session-1:turn-old',
+      userText: 'hello',
+      text: 'world',
+      signature: 'complete-old',
+      timestamp: '2026-04-13T12:00:02.000Z',
+      status: 'completed',
     });
     subscription.missingThreadPolls = 2;
     subscription.consecutiveFailures = 2;
@@ -209,7 +237,18 @@ describe('mirror-subscription-state', () => {
     assert.equal(subscription.fileIdentity, null);
     assert.equal(subscription.trailingText, '');
     assert.equal(subscription.activeMirrorTurnId, null);
+    assert.deepEqual(subscription.activeSpecialCallIds, new Set());
     assert.deepEqual(subscription.bufferedRecords, []);
+    assert.deepEqual(subscription.pendingDeliveries, [
+      {
+        streamKey: 'mirror:session-1:turn-old',
+        userText: 'hello',
+        text: 'world',
+        signature: 'complete-old',
+        timestamp: '2026-04-13T12:00:02.000Z',
+        status: 'completed',
+      },
+    ]);
     assert.equal(subscription.missingThreadPolls, 2);
     assert.equal(subscription.consecutiveFailures, 0);
     assert.equal(subscription.suspendedUntil, null);
@@ -233,11 +272,13 @@ describe('mirror-subscription-state', () => {
       lastActivityAt: '2026-04-13T12:00:01.000Z',
       lastStatusText: null,
       lastStatusAt: 0,
+      statusNote: null,
       userText: 'hello',
       lastAssistantText: null,
       lastCommentaryText: null,
       streamedText: '',
       streamStarted: false,
+      taskItems: [],
       toolCalls: new Map(),
     };
     subscription.bufferedRecords.push({
@@ -246,6 +287,14 @@ describe('mirror-subscription-state', () => {
       role: 'assistant',
       content: 'hello',
       timestamp: '2026-04-13T12:00:01.000Z',
+    });
+    subscription.pendingDeliveries.push({
+      streamKey: 'mirror:session-1:turn-queued',
+      userText: 'hello',
+      text: 'world',
+      signature: 'complete-queued',
+      timestamp: '2026-04-13T12:00:02.000Z',
+      status: 'completed',
     });
 
     const firstSuspended = recordMirrorSubscriptionFailure(subscription, 3, 60_000, 1_000);
@@ -257,6 +306,16 @@ describe('mirror-subscription-state', () => {
     assert.equal(thirdSuspended, true);
     assert.equal(subscription.pendingTurn, null);
     assert.deepEqual(subscription.bufferedRecords, []);
+    assert.deepEqual(subscription.pendingDeliveries, [
+      {
+        streamKey: 'mirror:session-1:turn-queued',
+        userText: 'hello',
+        text: 'world',
+        signature: 'complete-queued',
+        timestamp: '2026-04-13T12:00:02.000Z',
+        status: 'completed',
+      },
+    ]);
     assert.equal(subscription.status, 'stale');
     assert.equal(subscription.dirty, false);
     assert.equal(subscription.consecutiveFailures, 3);

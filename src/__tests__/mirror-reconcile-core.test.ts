@@ -27,6 +27,7 @@ describe('mirror-reconcile-core', () => {
     subscription.fileIdentity = 'dev:ino';
     subscription.trailingText = 'partial';
     subscription.activeMirrorTurnId = 'turn-1';
+    subscription.activeSpecialCallIds.add('plan-1');
     subscription.bufferedRecords.push({
       signature: 'sig-1',
       type: 'message',
@@ -52,6 +53,7 @@ describe('mirror-reconcile-core', () => {
     assert.equal(subscription.fileIdentity, null);
     assert.equal(subscription.trailingText, '');
     assert.equal(subscription.activeMirrorTurnId, null);
+    assert.deepEqual(subscription.activeSpecialCallIds, new Set());
     assert.deepEqual(subscription.bufferedRecords, []);
   });
 
@@ -73,6 +75,7 @@ describe('mirror-reconcile-core', () => {
     subscription.fileIdentity = 'dev:ino';
     subscription.trailingText = 'partial';
     subscription.activeMirrorTurnId = 'turn-1';
+    subscription.activeSpecialCallIds.add('plan-1');
     subscription.bufferedRecords.push({
       signature: 'sig-1',
       type: 'message',
@@ -91,6 +94,7 @@ describe('mirror-reconcile-core', () => {
     assert.equal(subscription.fileIdentity, null);
     assert.equal(subscription.trailingText, '');
     assert.equal(subscription.activeMirrorTurnId, null);
+    assert.deepEqual(subscription.activeSpecialCallIds, new Set());
     assert.deepEqual(subscription.bufferedRecords, []);
   });
 

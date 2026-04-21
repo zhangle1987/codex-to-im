@@ -83,6 +83,37 @@ describe('session-health-runtime', () => {
     assert.equal(diagnosis?.processProbe?.pid, 31340);
   });
 
+  it('marks a session as suspected_stream_ui_stall when progress continues but stream UI stops refreshing', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Stream UI Stall', 'test-model', undefined, 'D:\\workspace\\health-stream-ui', 'code');
+    store.updateSession(session.id, { runtime_status: 'running' });
+
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => new Date().toISOString(),
+    });
+
+    runtime.recordInteractiveStart(session.id);
+    runtime.recordStructuredStreamUi(session.id, {
+      active: true,
+      lastAttemptAt: Date.now() - (3 * 60 * 1000),
+      lastUpdateAt: Date.now() - (3 * 60 * 1000),
+      lastErrorAt: Date.now() - (2 * 60 * 1000),
+      lastError: 'timeout after 15000ms',
+      consecutiveFailures: 2,
+      flushInFlight: false,
+    });
+    store.updateSession(session.id, {
+      last_progress_at: new Date().toISOString(),
+      last_progress_type: 'tool_complete',
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+    assert.ok(diagnosis);
+    assert.equal(diagnosis?.healthStatus, 'suspected_stream_ui_stall');
+    assert.match(diagnosis?.healthReason || '', /流式 UI/);
+  });
+
   it('updates completion state from mirrored desktop records', () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createSession('Health Mirror', 'test-model', undefined, 'D:\\workspace\\health-mirror', 'code');
@@ -124,6 +155,76 @@ describe('session-health-runtime', () => {
     const refreshed = store.getSession(session.id);
     assert.equal(refreshed?.health_status, 'completed');
     assert.match(refreshed?.health_reason || '', /桌面线程已完成/);
+  });
+
+  it('treats mirror reasoning and plan updates as active progress', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Mirror Progress', 'test-model', undefined, 'D:\\workspace\\health-mirror-progress', 'code');
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:30:00.000Z',
+    });
+
+    runtime.observeDesktopMirrorRecords(session.id, 'thread-1', [
+      {
+        signature: 'task-start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-04-13T12:00:00.000Z',
+      },
+      {
+        signature: 'reasoning-1',
+        type: 'reasoning',
+        content: '先检查镜像状态',
+        timestamp: '2026-04-13T12:01:00.000Z',
+      },
+      {
+        signature: 'plan-1',
+        type: 'plan_update',
+        content: '',
+        timestamp: '2026-04-13T12:02:00.000Z',
+        tasks: [
+          { text: '检查镜像状态', status: 'completed' },
+          { text: '补交界测试', status: 'in_progress' },
+          { text: '回归验证', status: 'pending' },
+        ],
+      },
+    ]);
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.health_status, 'running_active');
+    assert.equal(refreshed?.last_progress_type, 'plan_update');
+    assert.match(refreshed?.health_reason || '', /任务计划/);
+    assert.match(refreshed?.health_reason || '', /执行中 1 项/);
+  });
+
+  it('updates aborted state from mirrored desktop records', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Mirror Abort', 'test-model', undefined, 'D:\\workspace\\health-mirror-abort', 'code');
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:30:00.000Z',
+    });
+
+    runtime.observeDesktopMirrorRecords(session.id, 'thread-1', [
+      {
+        signature: 'task-start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-04-13T12:00:00.000Z',
+      },
+      {
+        signature: 'task-abort',
+        type: 'task_aborted',
+        content: 'user interrupted',
+        timestamp: '2026-04-13T12:01:00.000Z',
+      },
+    ]);
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.health_status, 'aborted');
+    assert.equal(refreshed?.last_progress_type, 'task_aborted');
+    assert.match(refreshed?.health_reason || '', /已停止/);
   });
 
   it('keeps waiting_tool while another active tool is still running', () => {

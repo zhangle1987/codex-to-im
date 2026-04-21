@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type { BridgeMessage } from './lib/bridge/host.js';
+import type { TaskProgressInfo } from './lib/bridge/types.js';
 
 export interface DesktopSessionSummary {
   threadId: string;
@@ -33,7 +34,7 @@ export interface DesktopSessionEventDelta {
 
 export interface DesktopMirrorRecord {
   signature: string;
-  type: 'message' | 'task_started' | 'task_complete' | 'tool_started' | 'tool_finished';
+  type: 'message' | 'reasoning' | 'plan_update' | 'task_started' | 'task_complete' | 'task_aborted' | 'tool_started' | 'tool_finished';
   role?: 'user' | 'assistant' | 'commentary';
   content: string;
   timestamp: string;
@@ -41,6 +42,7 @@ export interface DesktopMirrorRecord {
   toolId?: string;
   toolName?: string;
   isError?: boolean;
+  tasks?: TaskProgressInfo[];
 }
 
 export interface DesktopMirrorRecordDelta {
@@ -48,6 +50,8 @@ export interface DesktopMirrorRecordDelta {
   nextOffset: number;
   trailingText: string;
   nextTurnId: string | null;
+  nextSpecialCallIds: string[];
+  unknownKinds: string[];
 }
 
 interface SessionMetaLine {
@@ -75,6 +79,11 @@ interface SessionMessageLine {
     call_id?: unknown;
     output?: unknown;
     is_error?: boolean;
+    status?: unknown;
+    input?: unknown;
+    query?: unknown;
+    server?: unknown;
+    tool?: unknown;
     content?: Array<{
       type?: string;
       text?: unknown;
@@ -88,8 +97,17 @@ interface SessionEventLine {
   payload?: {
     type?: string;
     message?: unknown;
+    text?: unknown;
     last_agent_message?: unknown;
     turn_id?: string;
+    reason?: unknown;
+    call_id?: unknown;
+    query?: unknown;
+    invocation?: {
+      server?: unknown;
+      tool?: unknown;
+      arguments?: unknown;
+    };
   };
 }
 
@@ -546,6 +564,61 @@ function extractNormalizedStructuredText(value: unknown): string {
   return parts.length > 0 ? normalizeStructuredText(parts.join('\n\n')) : '';
 }
 
+function parseJsonSafely(value: string | undefined): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTaskStatus(value: unknown): TaskProgressInfo['status'] {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'in_progress' || normalized === 'running' || normalized === 'active') {
+    return 'in_progress';
+  }
+  if (normalized === 'completed' || normalized === 'complete' || normalized === 'done') {
+    return 'completed';
+  }
+  return 'pending';
+}
+
+function parseTaskProgressItems(value: unknown): TaskProgressInfo[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      const record = item as { step?: unknown; text?: unknown; status?: unknown };
+      const text = extractNormalizedStructuredText(record.text ?? record.step);
+      if (!text) return null;
+      return {
+        text,
+        status: normalizeTaskStatus(record.status),
+      } satisfies TaskProgressInfo;
+    })
+    .filter((item): item is TaskProgressInfo => Boolean(item));
+}
+
+function parseUpdatePlanTasks(argumentsJson: string | undefined): TaskProgressInfo[] {
+  const parsed = parseJsonSafely(argumentsJson) as { plan?: unknown; tasks?: unknown } | null;
+  if (!parsed || typeof parsed !== 'object') return [];
+  return parseTaskProgressItems(parsed.plan ?? parsed.tasks);
+}
+
+function extractToolOutputText(value: unknown): string {
+  if (typeof value !== 'string') return extractNormalizedFreeText(value);
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    const parsed = parseJsonSafely(trimmed) as { output?: unknown } | null;
+    if (parsed && typeof parsed === 'object') {
+      const extracted = extractNormalizedFreeText(parsed.output ?? parsed);
+      if (extracted) return extracted;
+    }
+  }
+  return extractNormalizedFreeText(value);
+}
+
 function createDesktopEventSignature(rawLine: string): string {
   return crypto.createHash('sha1').update(rawLine).digest('hex');
 }
@@ -581,6 +654,20 @@ function isSessionMessageLine(line: SessionMessageLine | SessionEventLine | Turn
 
 function isTurnContextLine(line: SessionMessageLine | SessionEventLine | TurnContextLine): line is TurnContextLine {
   return line.type === 'turn_context';
+}
+
+function describeUnhandledMirrorLineKind(
+  line: SessionMessageLine | SessionEventLine | TurnContextLine,
+): string | null {
+  if (isSessionEventLine(line)) {
+    const payloadType = typeof line.payload?.type === 'string' ? line.payload.type.trim() : '';
+    return `event_msg:${payloadType || '<unknown>'}`;
+  }
+  if (isSessionMessageLine(line)) {
+    const payloadType = typeof line.payload?.type === 'string' ? line.payload.type.trim() : '';
+    return `response_item:${payloadType || '<unknown>'}`;
+  }
+  return null;
 }
 
 export function listDesktopSessions(limit?: number): DesktopSessionSummary[] {
@@ -712,86 +799,241 @@ function pushDesktopMirrorRecord(
   parsed: SessionMessageLine | SessionEventLine | TurnContextLine,
   rawLine: string,
   activeTurnId: string | null,
-): void {
-  if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_started') {
+  activeSpecialCallIds: Set<string>,
+): boolean {
+  if (isSessionEventLine(parsed)) {
+    return pushDesktopMirrorEventRecord(records, parsed, rawLine, activeTurnId);
+  }
+  if (isSessionMessageLine(parsed)) {
+    return pushDesktopMirrorResponseRecord(records, parsed, rawLine, activeTurnId, activeSpecialCallIds);
+  }
+  return false;
+}
+
+function pushDesktopMirrorEventRecord(
+  records: DesktopMirrorRecord[],
+  parsed: SessionEventLine,
+  rawLine: string,
+  activeTurnId: string | null,
+): boolean {
+  const signature = createDesktopEventSignature(rawLine);
+  const timestamp = parsed.timestamp || '';
+
+  if (parsed.payload?.type === 'task_started') {
     records.push({
-      signature: createDesktopEventSignature(rawLine),
+      signature,
       type: 'task_started',
       content: '',
-      timestamp: parsed.timestamp || '',
+      timestamp,
       turnId: parsed.payload.turn_id || '',
     });
-    return;
+    return true;
   }
 
-  if (isSessionEventLine(parsed) && parsed.payload?.type === 'user_message') {
-    const text = extractNormalizedStructuredText(parsed.payload.message);
-    if (!text) return;
+  if (parsed.payload?.type === 'turn_aborted') {
     records.push({
-      signature: createDesktopEventSignature(rawLine),
+      signature,
+      type: 'task_aborted',
+      content: extractNormalizedStructuredText(parsed.payload.reason),
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'agent_reasoning') {
+    const text = extractNormalizedStructuredText(parsed.payload.text);
+    if (!text) return true;
+    records.push({
+      signature,
+      type: 'reasoning',
+      content: text,
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'web_search_end') {
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    records.push({
+      signature,
+      type: 'tool_finished',
+      content: extractNormalizedStructuredText(parsed.payload.query),
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+      toolId,
+      toolName: 'Web Search',
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'mcp_tool_call_end') {
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    const server = extractNormalizedFreeText(parsed.payload.invocation?.server);
+    const tool = extractNormalizedFreeText(parsed.payload.invocation?.tool);
+    const toolName = server && tool ? `mcp__${server}__${tool}` : 'mcp_tool_call';
+    records.push({
+      signature,
+      type: 'tool_finished',
+      content: '',
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+      toolId,
+      toolName,
+      isError: false,
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'user_message') {
+    const text = extractNormalizedStructuredText(parsed.payload.message);
+    if (!text) return true;
+    records.push({
+      signature,
       type: 'message',
       role: 'user',
       content: text,
-      timestamp: parsed.timestamp || '',
+      timestamp,
       ...(activeTurnId ? { turnId: activeTurnId } : {}),
     });
-    return;
+    return true;
   }
 
-  if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_complete') {
+  if (parsed.payload?.type === 'task_complete') {
     records.push({
-      signature: createDesktopEventSignature(rawLine),
+      signature,
       type: 'task_complete',
       role: 'assistant',
       content: extractNormalizedStructuredText(parsed.payload.last_agent_message),
-      timestamp: parsed.timestamp || '',
+      timestamp,
       turnId: parsed.payload.turn_id || '',
     });
-    return;
+    return true;
   }
 
-  if (isSessionMessageLine(parsed) && parsed.payload?.type === 'message' && parsed.payload.role === 'assistant') {
+  return false;
+}
+
+function pushDesktopMirrorResponseRecord(
+  records: DesktopMirrorRecord[],
+  parsed: SessionMessageLine,
+  rawLine: string,
+  activeTurnId: string | null,
+  activeSpecialCallIds: Set<string>,
+): boolean {
+  const signature = createDesktopEventSignature(rawLine);
+  const timestamp = parsed.timestamp || '';
+
+  if (parsed.payload?.type === 'message' && parsed.payload.role === 'assistant') {
     const text = extractDesktopMessageText(parsed);
-    if (!text) return;
+    if (!text) return true;
     records.push({
-      signature: createDesktopEventSignature(rawLine),
+      signature,
       type: 'message',
       role: parsed.payload.phase === 'commentary' ? 'commentary' : 'assistant',
       content: parsed.payload.phase === 'commentary' ? text.replace(/^\[commentary\]\n/, '') : text,
-      timestamp: parsed.timestamp || '',
+      timestamp,
       ...(activeTurnId ? { turnId: activeTurnId } : {}),
     });
-    return;
+    return true;
   }
 
-  if (isSessionMessageLine(parsed) && parsed.payload?.type === 'function_call') {
+  if (parsed.payload?.type === 'function_call') {
     const toolName = extractNormalizedFreeText(parsed.payload.name);
-    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || createDesktopEventSignature(rawLine);
-    if (!toolName) return;
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    if (!toolName) return true;
+    if (toolName === 'update_plan') {
+      const tasks = parseUpdatePlanTasks(parsed.payload.arguments);
+      activeSpecialCallIds.add(toolId);
+      records.push({
+        signature,
+        type: 'plan_update',
+        content: '',
+        timestamp,
+        ...(activeTurnId ? { turnId: activeTurnId } : {}),
+        tasks,
+      });
+      return true;
+    }
     records.push({
-      signature: createDesktopEventSignature(rawLine),
+      signature,
       type: 'tool_started',
       content: '',
-      timestamp: parsed.timestamp || '',
+      timestamp,
       ...(activeTurnId ? { turnId: activeTurnId } : {}),
       toolId,
       toolName,
     });
-    return;
+    return true;
   }
 
-  if (isSessionMessageLine(parsed) && parsed.payload?.type === 'function_call_output') {
-    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || createDesktopEventSignature(rawLine);
+  if (parsed.payload?.type === 'custom_tool_call') {
+    const toolName = extractNormalizedFreeText(parsed.payload.name);
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    if (!toolName) return true;
+    if (toolName === 'update_plan') {
+      const tasks = parseUpdatePlanTasks(typeof parsed.payload.input === 'string' ? parsed.payload.input : undefined);
+      activeSpecialCallIds.add(toolId);
+      records.push({
+        signature,
+        type: 'plan_update',
+        content: '',
+        timestamp,
+        ...(activeTurnId ? { turnId: activeTurnId } : {}),
+        tasks,
+      });
+      return true;
+    }
     records.push({
-      signature: createDesktopEventSignature(rawLine),
+      signature,
+      type: 'tool_started',
+      content: '',
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+      toolId,
+      toolName,
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'function_call_output') {
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    if (activeSpecialCallIds.has(toolId)) {
+      activeSpecialCallIds.delete(toolId);
+      return true;
+    }
+    records.push({
+      signature,
       type: 'tool_finished',
-      content: extractNormalizedFreeText(parsed.payload.output),
-      timestamp: parsed.timestamp || '',
+      content: extractToolOutputText(parsed.payload.output),
+      timestamp,
       ...(activeTurnId ? { turnId: activeTurnId } : {}),
       toolId,
       isError: parsed.payload.is_error === true,
     });
+    return true;
   }
+
+  if (parsed.payload?.type === 'custom_tool_call_output') {
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    if (activeSpecialCallIds.has(toolId)) {
+      activeSpecialCallIds.delete(toolId);
+      return true;
+    }
+    records.push({
+      signature,
+      type: 'tool_finished',
+      content: extractToolOutputText(parsed.payload.output),
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+      toolId,
+      isError: parsed.payload.is_error === true,
+    });
+    return true;
+  }
+
+  return false;
 }
 
 function parseDesktopSessionEventText(
@@ -843,6 +1085,7 @@ function parseDesktopMirrorRecordText(
   leadingText = '',
   flushTrailingText = false,
   initialTurnId: string | null = null,
+  initialSpecialCallIds: Iterable<string> = [],
 ): DesktopMirrorRecordDelta {
   const combined = `${leadingText}${content}`;
   if (!combined) {
@@ -851,6 +1094,8 @@ function parseDesktopMirrorRecordText(
       nextOffset: 0,
       trailingText: '',
       nextTurnId: initialTurnId,
+      nextSpecialCallIds: [],
+      unknownKinds: [],
     };
   }
 
@@ -863,6 +1108,8 @@ function parseDesktopMirrorRecordText(
   }
   const records: DesktopMirrorRecord[] = [];
   let activeTurnId = initialTurnId;
+  const activeSpecialCallIds = new Set(initialSpecialCallIds);
+  const unknownKinds = new Set<string>();
 
   for (const line of rawLines) {
     const trimmed = line.trim();
@@ -885,14 +1132,22 @@ function parseDesktopMirrorRecordText(
       activeTurnId = eventPayload?.turn_id || activeTurnId;
     }
 
-    pushDesktopMirrorRecord(records, parsed, trimmed, activeTurnId);
+    const handled = pushDesktopMirrorRecord(records, parsed, trimmed, activeTurnId, activeSpecialCallIds);
+    if (!handled) {
+      const unknownKind = describeUnhandledMirrorLineKind(parsed);
+      if (unknownKind) unknownKinds.add(unknownKind);
+    }
 
-    if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_complete') {
+    if (
+      isSessionEventLine(parsed)
+      && (parsed.payload?.type === 'task_complete' || parsed.payload?.type === 'turn_aborted')
+    ) {
       const eventPayload = parsed.payload as SessionEventLine['payload'];
       const completedTurnId = eventPayload?.turn_id || activeTurnId;
       if (!completedTurnId || completedTurnId === activeTurnId) {
         activeTurnId = null;
       }
+      activeSpecialCallIds.clear();
     }
   }
 
@@ -901,6 +1156,8 @@ function parseDesktopMirrorRecordText(
     nextOffset: 0,
     trailingText,
     nextTurnId: activeTurnId,
+    nextSpecialCallIds: Array.from(activeSpecialCallIds),
+    unknownKinds: Array.from(unknownKinds),
   };
 }
 
@@ -960,7 +1217,7 @@ export function readDesktopSessionMirrorRecordStreamByFilePath(filePath: string)
     return [];
   }
 
-  return parseDesktopMirrorRecordText(content, '', true).records;
+  return parseDesktopMirrorRecordText(content, '', true, null, []).records;
 }
 
 export function readDesktopSessionMirrorRecordDeltaByFilePath(
@@ -969,6 +1226,7 @@ export function readDesktopSessionMirrorRecordDeltaByFilePath(
   endOffset: number,
   trailingText = '',
   currentTurnId: string | null = null,
+  currentSpecialCallIds: Iterable<string> = [],
 ): DesktopMirrorRecordDelta {
   let content = '';
   try {
@@ -979,15 +1237,19 @@ export function readDesktopSessionMirrorRecordDeltaByFilePath(
       nextOffset: startOffset,
       trailingText,
       nextTurnId: currentTurnId,
+      nextSpecialCallIds: Array.from(currentSpecialCallIds),
+      unknownKinds: [],
     };
   }
 
-  const parsed = parseDesktopMirrorRecordText(content, trailingText, false, currentTurnId);
+  const parsed = parseDesktopMirrorRecordText(content, trailingText, false, currentTurnId, currentSpecialCallIds);
   return {
     records: parsed.records,
     nextOffset: Math.max(startOffset, endOffset),
     trailingText: parsed.trailingText,
     nextTurnId: parsed.nextTurnId,
+    nextSpecialCallIds: parsed.nextSpecialCallIds,
+    unknownKinds: parsed.unknownKinds,
   };
 }
 

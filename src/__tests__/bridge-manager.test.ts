@@ -684,11 +684,13 @@ describe('bridge-manager status formatting', () => {
       lastActivityAt: '2026-03-25T08:00:00.000Z',
       lastStatusText: null,
       lastStatusAt: 0,
+      statusNote: null,
       userText: 'desktop prompt',
       lastAssistantText: null,
       lastCommentaryText: null,
       streamedText: '',
       streamStarted: false,
+      taskItems: [],
       toolCalls: new Map(),
     });
   });
@@ -1105,11 +1107,13 @@ describe('bridge-manager status formatting', () => {
       lastActivityAt: '2026-03-25T08:00:00.000Z',
       lastStatusText: null,
       lastStatusAt: 0,
+      statusNote: null,
       userText: 'desktop prompt',
       lastAssistantText: null,
       lastCommentaryText: null,
       streamedText: '',
       streamStarted: false,
+      taskItems: [],
       toolCalls: new Map(),
     });
   });

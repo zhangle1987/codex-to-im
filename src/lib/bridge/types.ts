@@ -194,6 +194,14 @@ export interface ToolCallInfo {
   status: 'running' | 'complete' | 'error';
 }
 
+export type TaskProgressStatus = 'in_progress' | 'pending' | 'completed';
+
+/** Structured task / plan progress for product-style streaming UIs. */
+export interface TaskProgressInfo {
+  text: string;
+  status: TaskProgressStatus;
+}
+
 // ── Config ─────────────────────────────────────────────────────
 
 /** Platform-specific message length limits */

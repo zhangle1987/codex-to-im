@@ -150,6 +150,12 @@ describe('command-dispatch', () => {
           activeToolName: 'shell_command',
           activeToolStartedAt: '2026-04-13T11:50:00.000Z',
           lastToolFinishedAt: null,
+          lastStreamUiAttemptAt: null,
+          lastStreamUiUpdateAt: null,
+          streamUiFlushStartedAt: null,
+          lastStreamUiErrorAt: null,
+          lastStreamUiError: null,
+          streamUiConsecutiveFailures: 0,
           sdkSessionId: null,
           processProbe: null,
         }),
@@ -162,5 +168,105 @@ describe('command-dispatch', () => {
     assert.match(response, new RegExp(binding.codepilotSessionId));
     assert.match(response, /长时运行，待观察/);
     assert.match(response, /shell_command/);
+  });
+
+  it('renders /status for a chat that is still on the draft thread', async () => {
+    initTestContext();
+    const sent: string[] = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: 'reply-status-1' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-status-draft' } as const;
+
+    await handleBridgeCommand(
+      adapter,
+      {
+        address,
+        text: '/status',
+        messageId: 'incoming-status-1',
+      } as any,
+      '/status',
+      {
+        getActiveTask: () => undefined,
+        diagnoseSessionHealth: async () => null,
+        diagnoseAllActiveSessions: async () => [],
+      },
+    );
+
+    const response = sent[0] || '';
+    assert.match(response, /当前会话/);
+    assert.match(response, /临时草稿线程/);
+    assert.match(response, /ask/);
+  });
+
+  it('creates a new IM session with /new and points the binding at the requested directory', async () => {
+    const store = initTestContext();
+    const sent: string[] = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: 'reply-new-1' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-new-command' } as const;
+
+    await handleBridgeCommand(
+      adapter,
+      {
+        address,
+        text: '/new D:\\workspace\\common-flow',
+        messageId: 'incoming-new-1',
+      } as any,
+      '/new D:\\workspace\\common-flow',
+      {
+        getActiveTask: () => undefined,
+        diagnoseSessionHealth: async () => null,
+        diagnoseAllActiveSessions: async () => [],
+      },
+    );
+
+    const binding = store.getChannelBinding(address.channelType, address.chatId);
+    assert.ok(binding);
+    assert.equal(binding?.workingDirectory, path.resolve('D:\\workspace\\common-flow'));
+    assert.match(sent[0] || '', /已新建会话/);
+    assert.match(sent[0] || '', /common-flow/);
+  });
+
+  it('removes the current binding on /unbind', async () => {
+    const store = initTestContext();
+    const sent: string[] = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: 'reply-unbind-1' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-unbind' } as const;
+    const binding = router.createBinding(address, 'D:\\workspace\\unbind');
+
+    await handleBridgeCommand(
+      adapter,
+      {
+        address,
+        text: '/unbind',
+        messageId: 'incoming-unbind-1',
+      } as any,
+      '/unbind',
+      {
+        getActiveTask: () => undefined,
+        diagnoseSessionHealth: async () => null,
+        diagnoseAllActiveSessions: async () => [],
+      },
+    );
+
+    assert.equal(store.getChannelBinding(address.channelType, address.chatId), null);
+    assert.match(sent[0] || '', /已解绑当前聊天/);
+    assert.match(sent[0] || '', /自动进入新的临时草稿线程/);
   });
 });

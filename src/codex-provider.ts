@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
 import type { LLMProvider, StreamChatParams } from './lib/bridge/host.js';
 import type { PendingPermissions } from './permission-gateway.js';
 import { sseEvent } from './sse-utils.js';
@@ -67,6 +68,72 @@ function shouldRetryFreshThread(message: string): boolean {
     lower.includes('no such session') ||
     (lower.includes('resume') && lower.includes('session'))
   );
+}
+
+function normalizeCodexErrorMessage(message: string | null | undefined): string {
+  const trimmed = (message || '').trim();
+  if (!trimmed) return 'Codex 执行失败，请稍后重试。';
+
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.includes('timeout waiting for child process to exit')
+    || lower.includes('reconnecting...')
+  ) {
+    return 'Codex 会话恢复失败，上一轮执行进程未正常退出。请稍后重试；如果连续失败，请新开线程或切换到 `/t 0`。';
+  }
+
+  return trimmed;
+}
+
+function normalizeTaskText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function mapTodoListItems(items: unknown): Array<{ text: string; status: 'in_progress' | 'pending' | 'completed' }> {
+  if (!Array.isArray(items)) return [];
+  const normalized = items
+    .map((item) => ({
+      text: normalizeTaskText((item as { text?: unknown })?.text),
+      completed: (item as { completed?: unknown })?.completed === true,
+    }))
+    .filter((item) => item.text);
+
+  let firstIncompleteSeen = false;
+  return normalized.map((item) => {
+    if (item.completed) {
+      return { text: item.text, status: 'completed' as const };
+    }
+    if (!firstIncompleteSeen) {
+      firstIncompleteSeen = true;
+      return { text: item.text, status: 'in_progress' as const };
+    }
+    return { text: item.text, status: 'pending' as const };
+  });
+}
+
+function extractMcpContentText(value: unknown): string {
+  if (!Array.isArray(value)) return '';
+  return value
+    .map((block) => {
+      if (!block || typeof block !== 'object') return '';
+      const record = block as { text?: unknown; content?: unknown };
+      if (typeof record.text === 'string') return record.text.trim();
+      if (typeof record.content === 'string') return record.content.trim();
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+function stringifyUnknown(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 export class CodexProvider implements LLMProvider {
@@ -168,6 +235,7 @@ export class CodexProvider implements LLMProvider {
             }
 
             let retryFresh = false;
+            const emittedToolStarts = new Set<string>();
 
             while (true) {
               let thread: ThreadInstance;
@@ -188,7 +256,7 @@ export class CodexProvider implements LLMProvider {
                   signal: params.abortController?.signal,
                 });
 
-                for await (const event of events) {
+                for await (const event of events as AsyncGenerator<ThreadEvent>) {
                   sawAnyEvent = true;
                   if (params.abortController?.signal.aborted) {
                     break;
@@ -205,9 +273,24 @@ export class CodexProvider implements LLMProvider {
                       break;
                     }
 
+                    case 'turn.started':
+                      break;
+
+                    case 'item.started':
+                    case 'item.updated':
                     case 'item.completed': {
-                      const item = event.item as Record<string, unknown>;
-                      self.handleCompletedItem(controller, item);
+                      const item = event.item as ThreadItem;
+                      self.handleItemEvent(
+                        controller,
+                        item,
+                        event.type === 'item.started'
+                          ? 'started'
+                          : event.type === 'item.updated'
+                            ? 'updated'
+                            : 'completed',
+                        params.sessionId,
+                        emittedToolStarts,
+                      );
                       break;
                     }
 
@@ -228,20 +311,27 @@ export class CodexProvider implements LLMProvider {
                     }
 
                     case 'turn.failed': {
-                      const error = (event as { message?: string }).message;
-                      controller.enqueue(sseEvent('error', error || 'Turn failed'));
+                      const error = (event as { error?: { message?: string } }).error?.message;
+                      controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(error || 'Turn failed')));
                       sawTerminalEvent = true;
                       break;
                     }
 
                     case 'error': {
                       const error = (event as { message?: string }).message;
-                      controller.enqueue(sseEvent('error', error || 'Thread error'));
+                      controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(error || 'Thread error')));
                       sawTerminalEvent = true;
                       break;
                     }
 
-                    // item.started, item.updated, turn.started — no action needed
+                    default: {
+                      const exhaustiveEvent: never = event;
+                      console.warn(
+                        '[codex-provider] Unhandled thread event:',
+                        stringifyUnknown(exhaustiveEvent),
+                      );
+                      break;
+                    }
                   }
 
                   if (sawTerminalEvent) {
@@ -270,7 +360,7 @@ export class CodexProvider implements LLMProvider {
             const message = err instanceof Error ? err.message : String(err);
             console.error('[codex-provider] Error:', err instanceof Error ? err.stack || err.message : err);
             try {
-              controller.enqueue(sseEvent('error', message));
+              controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(message)));
               controller.close();
             } catch {
               // Controller already closed
@@ -287,17 +377,30 @@ export class CodexProvider implements LLMProvider {
   }
 
   /**
-   * Map a completed Codex item to SSE events.
+   * Map a Codex item event to SSE events.
    */
-  private handleCompletedItem(
+  private handleItemEvent(
     controller: ReadableStreamDefaultController<string>,
-    item: Record<string, unknown>,
+    item: ThreadItem,
+    phase: 'started' | 'updated' | 'completed',
+    sessionId: string,
+    emittedToolStarts: Set<string>,
   ): void {
-    const itemType = item.type as string;
+    const itemType = item.type;
+    const ensureToolUse = (toolId: string, name: string, input: unknown) => {
+      if (emittedToolStarts.has(toolId)) return;
+      emittedToolStarts.add(toolId);
+      controller.enqueue(sseEvent('tool_use', {
+        id: toolId,
+        name,
+        input,
+      }));
+    };
 
     switch (itemType) {
       case 'agent_message': {
-        const text = (item.text as string) || '';
+        if (phase !== 'completed') break;
+        const text = item.text || '';
         if (text) {
           controller.enqueue(sseEvent('text', text));
         }
@@ -305,17 +408,16 @@ export class CodexProvider implements LLMProvider {
       }
 
       case 'command_execution': {
-        const toolId = (item.id as string) || `tool-${Date.now()}`;
-        const command = item.command as string || '';
-        const output = item.aggregated_output as string || '';
-        const exitCode = item.exit_code as number | undefined;
+        const toolId = item.id || `tool-${Date.now()}`;
+        const command = item.command || '';
+        const output = item.aggregated_output || '';
+        const exitCode = item.exit_code;
+        const status = item.status;
         const isError = exitCode != null && exitCode !== 0;
+        const terminal = phase === 'completed' || status === 'completed' || status === 'failed';
 
-        controller.enqueue(sseEvent('tool_use', {
-          id: toolId,
-          name: 'Bash',
-          input: { command },
-        }));
+        ensureToolUse(toolId, 'Bash', { command });
+        if (!terminal) break;
 
         const resultContent = output || (isError ? `Exit code: ${exitCode}` : 'Done');
         controller.enqueue(sseEvent('tool_result', {
@@ -327,15 +429,12 @@ export class CodexProvider implements LLMProvider {
       }
 
       case 'file_change': {
-        const toolId = (item.id as string) || `tool-${Date.now()}`;
-        const changes = item.changes as Array<{ path: string; kind: string }> || [];
+        if (phase !== 'completed') break;
+        const toolId = item.id || `tool-${Date.now()}`;
+        const changes = item.changes || [];
         const summary = changes.map(c => `${c.kind}: ${c.path}`).join('\n');
 
-        controller.enqueue(sseEvent('tool_use', {
-          id: toolId,
-          name: 'Edit',
-          input: { files: changes },
-        }));
+        ensureToolUse(toolId, 'Edit', { files: changes });
 
         controller.enqueue(sseEvent('tool_result', {
           tool_use_id: toolId,
@@ -346,21 +445,21 @@ export class CodexProvider implements LLMProvider {
       }
 
       case 'mcp_tool_call': {
-        const toolId = (item.id as string) || `tool-${Date.now()}`;
-        const server = item.server as string || '';
-        const tool = item.tool as string || '';
-        const args = item.arguments as unknown;
-        const result = item.result as { content?: unknown; structured_content?: unknown } | undefined;
-        const error = item.error as { message?: string } | undefined;
+        const toolId = item.id || `tool-${Date.now()}`;
+        const server = item.server || '';
+        const tool = item.tool || '';
+        const args = item.arguments;
+        const result = item.result;
+        const error = item.error;
+        const status = item.status;
+        const terminal = phase === 'completed' || status === 'completed' || status === 'failed';
 
-        const resultContent = result?.content ?? result?.structured_content;
-        const resultText = typeof resultContent === 'string' ? resultContent : (resultContent ? JSON.stringify(resultContent) : undefined);
+        const resultText = extractMcpContentText(result?.content)
+          || stringifyUnknown(result?.structured_content)
+          || stringifyUnknown(result?.content);
 
-        controller.enqueue(sseEvent('tool_use', {
-          id: toolId,
-          name: `mcp__${server}__${tool}`,
-          input: args,
-        }));
+        ensureToolUse(toolId, `mcp__${server}__${tool}`, args);
+        if (!terminal) break;
 
         controller.enqueue(sseEvent('tool_result', {
           tool_use_id: toolId,
@@ -370,14 +469,59 @@ export class CodexProvider implements LLMProvider {
         break;
       }
 
+      case 'web_search': {
+        const toolId = item.id || `tool-${Date.now()}`;
+        const query = item.query || '';
+        ensureToolUse(toolId, 'Web Search', { query });
+        if (phase !== 'completed') break;
+        controller.enqueue(sseEvent('tool_result', {
+          tool_use_id: toolId,
+          content: query || 'Search completed',
+          is_error: false,
+        }));
+        break;
+      }
+
       case 'reasoning': {
         // Reasoning is internal; emit as status
-        const text = (item.text as string) || '';
+        const text = item.text || '';
         if (text) {
           controller.enqueue(sseEvent('status', { reasoning: text }));
         }
         break;
       }
+
+      case 'todo_list': {
+        const tasks = mapTodoListItems(item.items);
+        controller.enqueue(sseEvent('task_update', {
+          session_id: sessionId,
+          sdk_session_id: this.threadIds.get(sessionId) || undefined,
+          tasks,
+          todos: tasks,
+        }));
+        break;
+      }
+
+      case 'error': {
+        controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(item.message || 'Codex error')));
+        break;
+      }
+
+      default: {
+        const exhaustiveItem: never = item;
+        console.warn(
+          '[codex-provider] Unhandled thread item:',
+          stringifyUnknown(exhaustiveItem),
+        );
+        break;
+      }
     }
+  }
+
+  private handleCompletedItem(
+    controller: ReadableStreamDefaultController<string>,
+    item: ThreadItem,
+  ): void {
+    this.handleItemEvent(controller, item, 'completed', 'test-session', new Set());
   }
 }

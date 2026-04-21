@@ -8,8 +8,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import type { ChannelBinding } from './types.js';
-import type { OutboundAttachment } from './types.js';
+import type { ChannelBinding, OutboundAttachment, TaskProgressInfo } from './types.js';
 import type {
   BridgeSession,
   FileAttachment,
@@ -54,6 +53,8 @@ export type OnPartialText = (fullText: string) => void;
  * Used by bridge-manager to forward tool progress to adapters for real-time display.
  */
 export type OnToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => void;
+export type OnTaskEvent = (tasks: TaskProgressInfo[]) => void;
+export type OnStatusNote = (note: string | null) => void;
 
 export interface ConversationResult {
   responseText: string;
@@ -135,6 +136,8 @@ export async function processMessage(
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
   onToolEvent?: OnToolEvent,
+  onTaskEvent?: OnTaskEvent,
+  onStatusNote?: OnStatusNote,
   onPromptPrepared?: (promptText: string) => void,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
@@ -267,7 +270,15 @@ export async function processMessage(
     // Consume the stream server-side (replicate collectStreamResponse pattern).
     // Permission requests are forwarded immediately via the callback during streaming
     // because the stream blocks until permission is resolved — we can't wait until after.
-    return await consumeStream(stream, sessionId, onPermissionRequest, onPartialText, onToolEvent);
+    return await consumeStream(
+      stream,
+      sessionId,
+      onPermissionRequest,
+      onPartialText,
+      onToolEvent,
+      onTaskEvent,
+      onStatusNote,
+    );
   } finally {
     clearInterval(renewalInterval);
     store.releaseSessionLock(sessionId, lockId);
@@ -285,6 +296,8 @@ async function consumeStream(
   onPermissionRequest?: OnPermissionRequest,
   onPartialText?: OnPartialText,
   onToolEvent?: OnToolEvent,
+  onTaskEvent?: OnTaskEvent,
+  onStatusNote?: OnStatusNote,
 ): Promise<ConversationResult> {
   const { store } = getBridgeContext();
   const contentBlocks: MessageContentBlock[] = [];
@@ -390,6 +403,9 @@ async function consumeStream(
             if (statusData.model) {
               store.updateSessionModel(sessionId, statusData.model);
             }
+            if (typeof statusData.reasoning === 'string' && onStatusNote) {
+              try { onStatusNote(statusData.reasoning); } catch { /* non-critical */ }
+            }
           } catch { /* skip */ }
           break;
         }
@@ -397,8 +413,14 @@ async function consumeStream(
         case 'task_update': {
           try {
             const taskData = JSON.parse(event.data);
-            if (taskData.session_id && taskData.todos) {
-              store.syncSdkTasks(taskData.session_id, taskData.todos);
+            const tasks = Array.isArray(taskData.tasks)
+              ? taskData.tasks
+              : (Array.isArray(taskData.todos) ? taskData.todos : null);
+            if (tasks) {
+              store.syncSdkTasks(sessionId, tasks);
+              if (onTaskEvent) {
+                try { onTaskEvent(tasks as TaskProgressInfo[]); } catch { /* non-critical */ }
+              }
             }
           } catch { /* skip */ }
           break;

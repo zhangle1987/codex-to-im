@@ -1,5 +1,5 @@
 import type { BaseChannelAdapter } from './channel-adapter.js';
-import type { ToolCallInfo } from './types.js';
+import type { TaskProgressInfo, ToolCallInfo } from './types.js';
 import { renderFeedbackTextForChannel } from './bridge-channel-runtime.js';
 
 export interface StreamFeedbackTarget {
@@ -33,6 +33,19 @@ export function pushStreamFeedbackTools(
   target.ensureStarted?.();
   try {
     target.adapter.onToolEvent(target.chatId, tools, target.streamKey);
+  } catch {
+    // Streaming UI updates are best effort only.
+  }
+}
+
+export function pushStreamFeedbackTasks(
+  target: StreamFeedbackTarget,
+  tasks: TaskProgressInfo[],
+): void {
+  if (typeof target.adapter.onTaskEvent !== 'function') return;
+  target.ensureStarted?.();
+  try {
+    target.adapter.onTaskEvent(target.chatId, tasks, target.streamKey);
   } catch {
     // Streaming UI updates are best effort only.
   }

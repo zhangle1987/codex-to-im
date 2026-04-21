@@ -73,6 +73,7 @@ export type BridgeSessionHealthStatus =
   | 'waiting_tool'
   | 'slow_observed'
   | 'suspected_stall'
+  | 'suspected_stream_ui_stall'
   | 'suspected_detached'
   | 'completed'
   | 'failed'
@@ -103,6 +104,12 @@ export interface BridgeSession {
   active_tool_name?: string;
   active_tool_started_at?: string;
   last_tool_finished_at?: string;
+  last_stream_ui_attempt_at?: string;
+  last_stream_ui_update_at?: string;
+  stream_ui_flush_started_at?: string;
+  last_stream_ui_error_at?: string;
+  last_stream_ui_error?: string;
+  stream_ui_consecutive_failures?: number;
   last_health_check_at?: string;
   mirror_status?: 'inactive' | 'watching' | 'stale';
   mirror_last_event_at?: string;

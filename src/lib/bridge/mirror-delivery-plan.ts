@@ -20,7 +20,7 @@ export interface MirrorDeliveryPlan {
     | 'mirror reconcile active task'
     | 'mirror reconcile no finalized turns'
     | 'mirror reconcile delivered turns';
-  turnsToDeliver: FinalizedDesktopMirrorTurn[];
+  finalizedTurns: FinalizedDesktopMirrorTurn[];
 }
 
 export function buildMirrorDeliveryPlan<TSubscription extends MirrorDeliveryPlanSubscription>(
@@ -39,7 +39,7 @@ export function buildMirrorDeliveryPlan<TSubscription extends MirrorDeliveryPlan
   if (options.blocked) {
     return {
       syncReason: 'mirror reconcile active task',
-      turnsToDeliver: timedOutTurn ? [timedOutTurn] : [],
+      finalizedTurns: timedOutTurn ? [timedOutTurn] : [],
     };
   }
 
@@ -48,12 +48,12 @@ export function buildMirrorDeliveryPlan<TSubscription extends MirrorDeliveryPlan
   if (finalizedTurns.length === 0) {
     return {
       syncReason: 'mirror reconcile no finalized turns',
-      turnsToDeliver: [],
+      finalizedTurns: [],
     };
   }
 
   return {
     syncReason: 'mirror reconcile delivered turns',
-    turnsToDeliver: finalizedTurns,
+    finalizedTurns,
   };
 }

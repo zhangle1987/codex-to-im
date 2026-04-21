@@ -1,6 +1,6 @@
 {
   "name": "codex-to-im",
-  "version": "1.0.40",
+  "version": "1.0.41",
   "description": "Installable Codex-to-IM bridge with local setup UI and background service",
   "license": "MIT",
   "homepage": "https://github.com/zhangle1987/codex-to-im#readme",
@@ -42,7 +42,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",
     "@larksuiteoapi/node-sdk": "^1.59.0",
-    "@openai/codex-sdk": "^0.116.0",
+    "@openai/codex-sdk": "^0.122.0",
     "discord.js": "^14.25.1",
     "markdown-it": "^14.1.1",
     "qrcode": "^1.5.4",

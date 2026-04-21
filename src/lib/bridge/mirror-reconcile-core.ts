@@ -64,6 +64,7 @@ export function readMirrorDeliverableRecords(
   snapshot: MirrorFileSnapshot,
 ) {
   let deliverableRecords: DesktopMirrorRecord[] = [];
+  let unknownKinds: string[] = [];
 
   const requiresFullRecover = !subscription.cursor.initialized
     || subscription.fileOffset === 0
@@ -84,6 +85,7 @@ export function readMirrorDeliverableRecords(
       snapshot.size,
       '',
       null,
+      [],
     );
     const delta = reconcileDesktopMirrorCursor(subscription.cursor, fullDelta.records);
     subscription.cursor = delta.nextCursor;
@@ -91,6 +93,8 @@ export function readMirrorDeliverableRecords(
     subscription.trailingText = '';
     subscription.fileOffset = snapshot.size;
     subscription.activeMirrorTurnId = fullDelta.nextTurnId;
+    subscription.activeSpecialCallIds = new Set(fullDelta.nextSpecialCallIds);
+    unknownKinds = fullDelta.unknownKinds;
   } else if (snapshot.size > subscription.fileOffset || subscription.trailingText) {
     const previousCursor = subscription.cursor;
     const delta = readDesktopSessionMirrorRecordDeltaByFilePath(
@@ -99,12 +103,15 @@ export function readMirrorDeliverableRecords(
       snapshot.size,
       subscription.trailingText,
       subscription.activeMirrorTurnId,
+      subscription.activeSpecialCallIds,
     );
     deliverableRecords = filterDuplicateAssistantEvents(previousCursor, delta.records);
     subscription.cursor = advanceDesktopMirrorCursor(subscription.cursor, delta.records);
     subscription.trailingText = delta.trailingText;
     subscription.fileOffset = delta.nextOffset;
     subscription.activeMirrorTurnId = delta.nextTurnId;
+    subscription.activeSpecialCallIds = new Set(delta.nextSpecialCallIds);
+    unknownKinds = delta.unknownKinds;
   }
 
   subscription.fileSize = snapshot.size;
@@ -112,5 +119,8 @@ export function readMirrorDeliverableRecords(
   subscription.fileIdentity = snapshot.identity;
   subscription.dirty = false;
 
-  return deliverableRecords;
+  return {
+    records: deliverableRecords,
+    unknownKinds,
+  };
 }

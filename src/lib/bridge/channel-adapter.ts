@@ -18,6 +18,17 @@ export interface AdapterRuntimeInstance extends Pick<ChannelInstance, 'id' | 'al
   provider: string;
 }
 
+export interface StructuredStreamingUiSnapshot {
+  active: boolean;
+  lastAttemptAt?: number | null;
+  lastUpdateAt?: number | null;
+  lastErrorAt?: number | null;
+  lastError?: string | null;
+  flushInFlight?: boolean;
+  flushInFlightSince?: number | null;
+  consecutiveFailures?: number;
+}
+
 export abstract class BaseChannelAdapter {
   private inboundQueue: InboundMessage[] = [];
   private inboundWaiters: Array<(msg: InboundMessage | null) => void> = [];
@@ -137,6 +148,13 @@ export abstract class BaseChannelAdapter {
   hasActiveStreamingUi?(_chatId: string, _streamKey?: string): boolean;
 
   /**
+   * Return a runtime snapshot for the active structured streaming UI. This is
+   * used by health diagnostics to detect UI-side stalls separately from task
+   * execution stalls.
+   */
+  getStructuredStreamingUiSnapshot?(_chatId: string, _streamKey?: string): StructuredStreamingUiSnapshot | null;
+
+  /**
    * Start a detached streaming UI cycle that is not tied to the current
    * inbound IM message. Shared desktop-thread mirroring uses this to create
    * a standalone streaming card/message in channels that support it.
@@ -148,6 +166,12 @@ export abstract class BaseChannelAdapter {
    * Adapter can use this to display tool progress in the streaming card.
    */
   onToolEvent?(_chatId: string, _tools: import('./types.js').ToolCallInfo[], _streamKey?: string): void;
+
+  /**
+   * Called when structured task / plan updates arrive during streaming.
+   * Adapters can use this to render a dedicated task progress region.
+   */
+  onTaskEvent?(_chatId: string, _tasks: import('./types.js').TaskProgressInfo[], _streamKey?: string): void;
 
   /**
    * Called when streaming ends. Adapter should finalize the streaming card

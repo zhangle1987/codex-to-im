@@ -1,5 +1,5 @@
 import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
-import type { ToolCallInfo } from './types.js';
+import type { TaskProgressInfo, ToolCallInfo } from './types.js';
 import { buildMirrorStreamKey, formatMirrorUserText } from './mirror-formatters.js';
 
 function nowIso(): string {
@@ -13,11 +13,13 @@ export interface DesktopMirrorTurnState {
   lastActivityAt: string;
   lastStatusText: string | null;
   lastStatusAt: number;
+  statusNote: string | null;
   userText: string | null;
   lastAssistantText: string | null;
   lastCommentaryText: string | null;
   streamedText: string;
   streamStarted: boolean;
+  taskItems: TaskProgressInfo[];
   toolCalls: Map<string, ToolCallInfo>;
 }
 
@@ -41,8 +43,14 @@ export interface BufferedMirrorTurnStateHolder extends MirrorTurnStateHolder {
   bufferedRecords: DesktopMirrorRecord[];
 }
 
+export interface PendingMirrorDeliveryStateHolder {
+  pendingDeliveries: FinalizedDesktopMirrorTurn[];
+}
+
 export interface MirrorTurnHooks<TSubscription extends MirrorTurnStateHolder = MirrorTurnStateHolder> {
   onStreamText?: (subscription: TSubscription, turnState: DesktopMirrorTurnState) => void;
+  onStatusProgress?: (subscription: TSubscription, turnState: DesktopMirrorTurnState) => void;
+  onTaskProgress?: (subscription: TSubscription, turnState: DesktopMirrorTurnState) => void;
   onToolProgress?: (subscription: TSubscription, turnState: DesktopMirrorTurnState) => void;
 }
 
@@ -59,11 +67,13 @@ export function createMirrorTurnState(
     lastActivityAt: safeTimestamp,
     lastStatusText: null,
     lastStatusAt: 0,
+    statusNote: null,
     userText: null,
     lastAssistantText: null,
     lastCommentaryText: null,
     streamedText: '',
     streamStarted: false,
+    taskItems: [],
     toolCalls: new Map(),
   };
 }
@@ -132,7 +142,7 @@ export function finalizeMirrorTurn<TSubscription extends MirrorTurnStateHolder>(
     .map((value) => (value || '').trim())
     .find(Boolean) || '';
   const userText = pendingTurn.userText?.trim() || null;
-  if (!text && !userText && pendingTurn.toolCalls.size === 0) return null;
+  if (!text && !userText && pendingTurn.toolCalls.size === 0 && pendingTurn.taskItems.length === 0) return null;
 
   return {
     streamKey: pendingTurn.streamKey,
@@ -184,6 +194,13 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
       continue;
     }
 
+    if (record.type === 'task_aborted') {
+      ensureMirrorTurnState(subscription, record);
+      const interrupted = finalizeMirrorTurn(subscription, record.signature, record.timestamp, 'interrupted');
+      if (interrupted) finalized.push(interrupted);
+      continue;
+    }
+
     if (record.type === 'message' && record.role === 'user') {
       const pendingTurn = ensureMirrorTurnState(subscription, record);
       const text = record.content.trim();
@@ -211,6 +228,22 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
           hooks.onStreamText?.(subscription, pendingTurn);
         }
       }
+      continue;
+    }
+
+    if (record.type === 'reasoning') {
+      const pendingTurn = ensureMirrorTurnState(subscription, record);
+      const text = record.content.trim();
+      if (!text) continue;
+      pendingTurn.statusNote = text;
+      hooks.onStatusProgress?.(subscription, pendingTurn);
+      continue;
+    }
+
+    if (record.type === 'plan_update') {
+      const pendingTurn = ensureMirrorTurnState(subscription, record);
+      pendingTurn.taskItems = record.tasks || [];
+      hooks.onTaskProgress?.(subscription, pendingTurn);
       continue;
     }
 
@@ -265,8 +298,46 @@ export function flushTimedOutMirrorTurn<TSubscription extends MirrorTurnStateHol
   );
 }
 
-export function hasPendingMirrorWork(subscription: BufferedMirrorTurnStateHolder): boolean {
-  return subscription.bufferedRecords.length > 0 || subscription.pendingTurn !== null;
+export function enqueuePendingMirrorDeliveries<TSubscription extends PendingMirrorDeliveryStateHolder>(
+  subscription: TSubscription,
+  turns: FinalizedDesktopMirrorTurn[],
+): void {
+  if (turns.length === 0) return;
+  const existingSignatures = new Set(subscription.pendingDeliveries.map((turn) => turn.signature));
+  for (const turn of turns) {
+    if (existingSignatures.has(turn.signature)) continue;
+    subscription.pendingDeliveries.push(turn);
+    existingSignatures.add(turn.signature);
+  }
+}
+
+export function removePendingMirrorDeliveries<TSubscription extends PendingMirrorDeliveryStateHolder>(
+  subscription: TSubscription,
+  turns: FinalizedDesktopMirrorTurn[],
+): void {
+  if (turns.length === 0 || subscription.pendingDeliveries.length === 0) return;
+  const deliveredSignatures = new Set(turns.map((turn) => turn.signature));
+  subscription.pendingDeliveries = subscription.pendingDeliveries.filter(
+    (turn) => !deliveredSignatures.has(turn.signature),
+  );
+}
+
+export function selectPendingMirrorDeliveries<TSubscription extends PendingMirrorDeliveryStateHolder>(
+  subscription: TSubscription,
+  blocked: boolean,
+): FinalizedDesktopMirrorTurn[] {
+  if (!blocked) {
+    return subscription.pendingDeliveries.slice();
+  }
+  return subscription.pendingDeliveries.filter((turn) => turn.timedOut);
+}
+
+export function hasPendingMirrorWork(
+  subscription: BufferedMirrorTurnStateHolder & PendingMirrorDeliveryStateHolder,
+): boolean {
+  return subscription.bufferedRecords.length > 0
+    || subscription.pendingTurn !== null
+    || subscription.pendingDeliveries.length > 0;
 }
 
 export function consumeBufferedMirrorTurns<TSubscription extends BufferedMirrorTurnStateHolder>(

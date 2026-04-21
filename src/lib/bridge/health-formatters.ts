@@ -17,6 +17,8 @@ export function formatHealthStatusLabel(healthStatus: string | undefined | null)
       return '长时运行，待观察';
     case 'suspected_stall':
       return '疑似卡住';
+    case 'suspected_stream_ui_stall':
+      return '流式 UI 疑似卡住';
     case 'suspected_detached':
       return '疑似脱挂';
     case 'completed':
@@ -87,8 +89,12 @@ export function buildHealthCommandResponse(
       ['健康状态', formatHealthStatusLabel(diagnosis.healthStatus)],
       ['当前阶段', currentStage],
       ['最后进展', formatCommandTimestamp(diagnosis.lastProgressAt)],
+      ['流式 UI 刷新', formatCommandTimestamp(diagnosis.lastStreamUiUpdateAt)],
       ['工具开始', formatCommandTimestamp(diagnosis.activeToolStartedAt)],
       ['最近工具完成', formatCommandTimestamp(diagnosis.lastToolFinishedAt)],
+      ['流式 UI 错误', diagnosis.lastStreamUiErrorAt
+        ? `${formatCommandTimestamp(diagnosis.lastStreamUiErrorAt)}${diagnosis.lastStreamUiError ? ` · ${diagnosis.lastStreamUiError}` : ''}`
+        : '-'],
       ['本地进程', formatHealthProcessProbe(diagnosis)],
     ],
     [diagnosis.healthReason],

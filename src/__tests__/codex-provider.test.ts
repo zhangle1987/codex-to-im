@@ -227,6 +227,132 @@ describe('CodexProvider', () => {
     assert.equal(toolResult.content, JSON.stringify({ items: [1, 2, 3] }));
   });
 
+  it('maps mcp_tool_call content blocks to readable text', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const chunks: string[] = [];
+    const mockController = {
+      enqueue: (chunk: string) => chunks.push(chunk),
+    } as unknown as ReadableStreamDefaultController<string>;
+
+    (provider as any).handleCompletedItem(mockController, {
+      type: 'mcp_tool_call',
+      id: 'mcp-3',
+      server: 'myserver',
+      tool: 'summarize',
+      arguments: {},
+      result: {
+        content: [
+          { type: 'text', text: '第一段' },
+          { type: 'text', text: '第二段' },
+        ],
+      },
+      status: 'completed',
+    });
+
+    const events = parseSSEChunks(chunks);
+    const toolResult = JSON.parse(events[1].data);
+    assert.equal(toolResult.content, '第一段\n\n第二段');
+  });
+
+  it('maps todo_list item to task_update SSE event', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const chunks: string[] = [];
+    const mockController = {
+      enqueue: (chunk: string) => chunks.push(chunk),
+    } as unknown as ReadableStreamDefaultController<string>;
+
+    (provider as any).threadIds.set('test-session', 'sdk-thread-1');
+    (provider as any).handleCompletedItem(mockController, {
+      type: 'todo_list',
+      id: 'todo-1',
+      items: [
+        { text: '第一步', completed: true },
+        { text: '第二步', completed: false },
+        { text: '第三步', completed: false },
+      ],
+    });
+
+    const events = parseSSEChunks(chunks);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, 'task_update');
+    const payload = JSON.parse(events[0].data);
+    assert.equal(payload.session_id, 'test-session');
+    assert.equal(payload.sdk_session_id, 'sdk-thread-1');
+    assert.deepEqual(payload.tasks, [
+      { text: '第一步', status: 'completed' },
+      { text: '第二步', status: 'in_progress' },
+      { text: '第三步', status: 'pending' },
+    ]);
+  });
+
+  it('emits web_search tool_use only once across started and completed phases', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const chunks: string[] = [];
+    const mockController = {
+      enqueue: (chunk: string) => chunks.push(chunk),
+    } as unknown as ReadableStreamDefaultController<string>;
+    const emittedToolStarts = new Set<string>();
+
+    (provider as any).handleItemEvent(
+      mockController,
+      { type: 'web_search', id: 'search-1', query: 'codex sdk' },
+      'started',
+      'test-session',
+      emittedToolStarts,
+    );
+    (provider as any).handleItemEvent(
+      mockController,
+      { type: 'web_search', id: 'search-1', query: 'codex sdk' },
+      'completed',
+      'test-session',
+      emittedToolStarts,
+    );
+
+    const events = parseSSEChunks(chunks);
+    assert.equal(events.length, 2);
+    assert.equal(events[0].type, 'tool_use');
+    assert.equal(events[1].type, 'tool_result');
+
+    const toolUse = JSON.parse(events[0].data);
+    assert.equal(toolUse.name, 'Web Search');
+    const toolResult = JSON.parse(events[1].data);
+    assert.equal(toolResult.tool_use_id, 'search-1');
+    assert.equal(toolResult.content, 'codex sdk');
+  });
+
+  it('maps reasoning item to status SSE event', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const chunks: string[] = [];
+    const mockController = {
+      enqueue: (chunk: string) => chunks.push(chunk),
+    } as unknown as ReadableStreamDefaultController<string>;
+
+    (provider as any).handleCompletedItem(mockController, {
+      type: 'reasoning',
+      id: 'reason-1',
+      text: '先检查 bridge manager 的状态流转',
+    });
+
+    const events = parseSSEChunks(chunks);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, 'status');
+    assert.deepEqual(JSON.parse(events[0].data), {
+      reasoning: '先检查 bridge manager 的状态流转',
+    });
+  });
+
   it('skips empty agent_message', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
@@ -758,7 +884,7 @@ describe('CodexProvider error events', () => {
     const mockThread = {
       runStreamed: () => ({
         events: (async function* () {
-          yield { type: 'turn.failed', message: 'Rate limit exceeded' };
+          yield { type: 'turn.failed', error: { message: 'Rate limit exceeded' } };
         })(),
       }),
     };
@@ -779,6 +905,41 @@ describe('CodexProvider error events', () => {
     const errorEvent = events.find(e => e.type === 'error');
     assert.ok(errorEvent, 'Should emit an error event');
     assert.equal(errorEvent!.data, 'Rate limit exceeded');
+  });
+
+  it('normalizes reconnect-style turn failures to a user-visible resume hint', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield {
+            type: 'turn.failed',
+            error: { message: 'Reconnecting... 2/5 (timeout waiting for child process to exit)' },
+          };
+        })(),
+      }),
+    };
+    (provider as any).sdk = {
+      Codex: class { constructor() {} },
+    };
+    (provider as any).codex = {
+      startThread: () => mockThread,
+    };
+
+    const stream = provider.streamChat({
+      prompt: 'test',
+      sessionId: 'err-session-reconnect',
+    });
+
+    const chunks = await collectStream(stream);
+    const events = parseSSEChunks(chunks);
+    const errorEvent = events.find(e => e.type === 'error');
+    assert.ok(errorEvent);
+    assert.match(errorEvent!.data, /会话恢复失败/);
+    assert.match(errorEvent!.data, /`\/t 0`/);
   });
 
   it('reads message field from error event', async () => {

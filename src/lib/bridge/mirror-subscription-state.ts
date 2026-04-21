@@ -1,7 +1,7 @@
 import type { FSWatcher } from 'node:fs';
 import type { DesktopMirrorCursor } from '../../desktop-session-mirror.js';
 import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
-import type { DesktopMirrorTurnState } from './mirror-turns.js';
+import type { DesktopMirrorTurnState, FinalizedDesktopMirrorTurn } from './mirror-turns.js';
 
 export interface DesktopMirrorSubscription {
   bindingId: string;
@@ -23,8 +23,11 @@ export interface DesktopMirrorSubscription {
   fileIdentity: string | null;
   trailingText: string;
   activeMirrorTurnId: string | null;
+  activeSpecialCallIds: Set<string>;
   bufferedRecords: DesktopMirrorRecord[];
   pendingTurn: DesktopMirrorTurnState | null;
+  pendingDeliveries: FinalizedDesktopMirrorTurn[];
+  unknownMirrorKindsSeen: Set<string>;
   missingThreadPolls: number;
   consecutiveFailures: number;
   suspendedUntil: number | null;
@@ -68,6 +71,7 @@ export function resetMirrorReadState(subscription: DesktopMirrorSubscription): v
   subscription.fileIdentity = null;
   subscription.trailingText = '';
   subscription.activeMirrorTurnId = null;
+  subscription.activeSpecialCallIds.clear();
   subscription.bufferedRecords = [];
 }
 
@@ -94,8 +98,11 @@ export function createMirrorSubscription(
     fileIdentity: null,
     trailingText: '',
     activeMirrorTurnId: null,
+    activeSpecialCallIds: new Set<string>(),
     bufferedRecords: [],
     pendingTurn: null,
+    pendingDeliveries: [],
+    unknownMirrorKindsSeen: new Set<string>(),
     missingThreadPolls: 0,
     consecutiveFailures: 0,
     suspendedUntil: null,
@@ -110,6 +117,8 @@ function resetMirrorSubscriptionForThreadChange(
   subscription.lastDeliveredAt = lastDeliveredAt;
   subscription.dirty = true;
   subscription.pendingTurn = null;
+  subscription.pendingDeliveries = [];
+  subscription.unknownMirrorKindsSeen.clear();
   subscription.missingThreadPolls = 0;
   subscription.consecutiveFailures = 0;
   subscription.suspendedUntil = null;

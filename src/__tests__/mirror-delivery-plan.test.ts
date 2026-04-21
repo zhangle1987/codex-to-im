@@ -46,7 +46,7 @@ describe('mirror-delivery-plan', () => {
     ]);
     assert.deepEqual(plan, {
       syncReason: 'mirror reconcile active task',
-      turnsToDeliver: [
+      finalizedTurns: [
         {
           streamKey: 'mirror:session-1:turn-1',
           userText: null,
@@ -75,7 +75,7 @@ describe('mirror-delivery-plan', () => {
 
     assert.deepEqual(plan, {
       syncReason: 'mirror reconcile no finalized turns',
-      turnsToDeliver: [],
+      finalizedTurns: [],
     });
   });
 
@@ -111,7 +111,7 @@ describe('mirror-delivery-plan', () => {
 
     assert.deepEqual(plan, {
       syncReason: 'mirror reconcile delivered turns',
-      turnsToDeliver: [
+      finalizedTurns: [
         {
           streamKey: 'mirror:session-1:timeout',
           userText: null,

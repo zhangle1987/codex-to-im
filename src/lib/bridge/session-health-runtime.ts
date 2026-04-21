@@ -1,7 +1,9 @@
 import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
+import type { StructuredStreamingUiSnapshot } from './channel-adapter.js';
 import type { BridgeSession, BridgeStore } from './host.js';
 import type { ThreadProcessProbeResult } from './session-health-process.js';
 import {
+  applyStreamUiDiagnosis,
   applyProcessProbeDiagnosis,
   getActiveToolStartedAt,
   buildEndStatus,
@@ -42,6 +44,7 @@ export interface SessionHealthRuntime {
   recordInteractiveStart(sessionId: string, detail?: string): void;
   recordInteractiveProgress(sessionId: string, type: SessionProgressType, detail?: string): void;
   recordToolState(sessionId: string, toolId: string, toolName: string, status: SessionToolStatus): void;
+  recordStructuredStreamUi(sessionId: string, snapshot: StructuredStreamingUiSnapshot): void;
   recordInteractiveEnd(sessionId: string, outcome: SessionEndOutcome, detail?: string): void;
   observeDesktopMirrorRecords(sessionId: string, threadId: string, records: DesktopMirrorRecord[]): void;
   reconcileSessionHealth(): void;
@@ -54,6 +57,21 @@ export function createSessionHealthRuntime(
 ): SessionHealthRuntime {
   const lastProgressPersistAt = new Map<string, number>();
   const processProbeCache = new Map<string, SessionHealthProbeCacheEntry>();
+
+  function summarizePlanUpdate(tasks: DesktopMirrorRecord['tasks']): string {
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      return '检测到桌面线程更新了任务计划。';
+    }
+    let inProgress = 0;
+    let pending = 0;
+    let completed = 0;
+    for (const task of tasks) {
+      if (task?.status === 'completed') completed += 1;
+      else if (task?.status === 'in_progress') inProgress += 1;
+      else pending += 1;
+    }
+    return `检测到桌面线程更新了任务计划（执行中 ${inProgress} 项，等待中 ${pending} 项，已完成 ${completed} 项）。`;
+  }
 
   function updateSessionHealth(
     sessionId: string,
@@ -119,6 +137,12 @@ export function createSessionHealthRuntime(
       active_tool_name: undefined,
       active_tool_started_at: undefined,
       last_tool_finished_at: undefined,
+      last_stream_ui_attempt_at: undefined,
+      last_stream_ui_update_at: undefined,
+      stream_ui_flush_started_at: undefined,
+      last_stream_ui_error_at: undefined,
+      last_stream_ui_error: undefined,
+      stream_ui_consecutive_failures: undefined,
     });
   }
 
@@ -204,10 +228,36 @@ export function createSessionHealthRuntime(
       active_tools_json: undefined,
       active_tool_name: undefined,
       active_tool_started_at: undefined,
+      stream_ui_flush_started_at: undefined,
       last_health_check_at: nowIso,
     }, { force: true });
     lastProgressPersistAt.set(sessionId, Date.now());
     processProbeCache.delete(sessionId);
+  }
+
+  function toIso(value: number | null | undefined): string | undefined {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+    return new Date(value).toISOString();
+  }
+
+  function recordStructuredStreamUi(sessionId: string, snapshot: StructuredStreamingUiSnapshot): void {
+    const updates: Partial<BridgeSession> = {
+      stream_ui_flush_started_at: snapshot.active && snapshot.flushInFlight
+        ? toIso(snapshot.flushInFlightSince ?? snapshot.lastAttemptAt)
+        : undefined,
+    };
+
+    if (snapshot.active) {
+      updates.last_stream_ui_attempt_at = toIso(snapshot.lastAttemptAt);
+      updates.last_stream_ui_update_at = toIso(snapshot.lastUpdateAt);
+      updates.last_stream_ui_error_at = toIso(snapshot.lastErrorAt);
+      updates.last_stream_ui_error = snapshot.lastError?.trim() || undefined;
+      updates.stream_ui_consecutive_failures = snapshot.consecutiveFailures && snapshot.consecutiveFailures > 0
+        ? snapshot.consecutiveFailures
+        : undefined;
+    }
+
+    updateSessionHealth(sessionId, updates);
   }
 
   function observeDesktopMirrorRecords(sessionId: string, _threadId: string, records: DesktopMirrorRecord[]): void {
@@ -220,6 +270,10 @@ export function createSessionHealthRuntime(
         recordInteractiveEnd(sessionId, 'completed', '检测到桌面线程已完成当前任务。');
         continue;
       }
+      if (record.type === 'task_aborted') {
+        recordInteractiveEnd(sessionId, 'aborted', '检测到桌面线程已停止当前任务。');
+        continue;
+      }
       if (record.type === 'tool_started') {
         recordToolState(sessionId, record.toolId || record.signature, record.toolName || 'tool', 'running');
         continue;
@@ -230,6 +284,22 @@ export function createSessionHealthRuntime(
           record.toolId || record.signature,
           record.toolName || '',
           record.isError ? 'error' : 'complete',
+        );
+        continue;
+      }
+      if (record.type === 'reasoning') {
+        recordInteractiveProgress(
+          sessionId,
+          'reasoning',
+          '检测到桌面线程新的思考/状态说明。',
+        );
+        continue;
+      }
+      if (record.type === 'plan_update') {
+        recordInteractiveProgress(
+          sessionId,
+          'plan_update',
+          summarizePlanUpdate(record.tasks),
         );
         continue;
       }
@@ -250,7 +320,10 @@ export function createSessionHealthRuntime(
     const store = deps.getStore();
     for (const session of store.listSessions()) {
       if (!shouldTrackSession(session)) continue;
-      const diagnosis = computeBaseDiagnosis(session, nowMs);
+      const diagnosis = applyStreamUiDiagnosis(
+        { ...computeBaseDiagnosis(session, nowMs), processProbe: null },
+        nowMs,
+      );
       updateSessionHealth(session.id, {
         health_status: diagnosis.healthStatus,
         health_reason: diagnosis.healthReason,
@@ -283,7 +356,10 @@ export function createSessionHealthRuntime(
 
     const base = computeBaseDiagnosis(session, Date.now());
     const processProbe = await loadProcessProbe(session);
-    const diagnosis = applyProcessProbeDiagnosis(base, processProbe);
+    const diagnosis = applyStreamUiDiagnosis(
+      applyProcessProbeDiagnosis(base, processProbe),
+      Date.now(),
+    );
 
     updateSessionHealth(sessionId, {
       health_status: diagnosis.healthStatus,
@@ -305,6 +381,7 @@ export function createSessionHealthRuntime(
     recordInteractiveStart,
     recordInteractiveProgress,
     recordToolState,
+    recordStructuredStreamUi,
     recordInteractiveEnd,
     observeDesktopMirrorRecords,
     reconcileSessionHealth,
