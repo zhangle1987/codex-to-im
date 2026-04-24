@@ -20,6 +20,7 @@ import { JsonFileStore } from './store.js';
 import { SDKLLMProvider, resolveClaudeCliPath, preflightCheck } from './llm-provider.js';
 import { PendingPermissions } from './permission-gateway.js';
 import { setupLogger } from './logger.js';
+import { releaseBridgeInstanceLock, tryAcquireBridgeInstanceLock } from './bridge-instance-lock.js';
 
 const RUNTIME_DIR = path.join(CTI_HOME, 'runtime');
 const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');
@@ -124,6 +125,26 @@ function getAdapterStatuses(): ReturnType<typeof bridgeManager.getStatus>['adapt
 }
 
 async function main(): Promise<void> {
+  const lockState = tryAcquireBridgeInstanceLock();
+  if (!lockState.acquired) {
+    const holderPid = lockState.holderPid;
+    writeStatus({
+      running: true,
+      ...(Number.isFinite(holderPid) && holderPid ? { pid: holderPid } : {}),
+    });
+    console.log(
+      `[codex-to-im] Another bridge daemon is already running${holderPid ? ` (PID: ${holderPid})` : ''}. Exiting duplicate launcher.`,
+    );
+    process.exit(0);
+  }
+
+  let instanceLockHeld = true;
+  const releaseInstanceLock = () => {
+    if (!instanceLockHeld) return;
+    releaseBridgeInstanceLock(undefined, process.pid);
+    instanceLockHeld = false;
+  };
+
   const config = loadConfig();
   setupLogger();
 
@@ -172,6 +193,7 @@ async function main(): Promise<void> {
         console.log(`[codex-to-im] Active channels updated: ${channels.join(', ') || 'none'}`);
       },
       onBridgeStop: () => {
+        releaseInstanceLock();
         writeStatus({ running: false, channels: [], adapters: [] });
         console.log('[codex-to-im] Bridge stopped');
       },
@@ -189,6 +211,7 @@ async function main(): Promise<void> {
     console.log(`[codex-to-im] Shutting down (${reason})...`);
     pendingPerms.denyAll();
     await bridgeManager.stop();
+    releaseInstanceLock();
     writeStatus({ running: false, lastExitReason: reason });
     process.exit(0);
   };
@@ -204,6 +227,7 @@ async function main(): Promise<void> {
   });
   process.on('uncaughtException', (err) => {
     console.error('[codex-to-im] uncaughtException:', err.stack || err.message);
+    releaseInstanceLock();
     writeStatus({ running: false, lastExitReason: `uncaughtException: ${err.message}` });
     process.exit(1);
   });
@@ -211,6 +235,7 @@ async function main(): Promise<void> {
     console.log(`[codex-to-im] beforeExit (code: ${code})`);
   });
   process.on('exit', (code) => {
+    releaseInstanceLock();
     console.log(`[codex-to-im] exit (code: ${code})`);
   });
 
@@ -222,6 +247,7 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   console.error('[codex-to-im] Fatal error:', err instanceof Error ? err.stack || err.message : err);
+  releaseBridgeInstanceLock(undefined, process.pid);
   try { writeStatus({ running: false, lastExitReason: `fatal: ${err instanceof Error ? err.message : String(err)}` }); } catch { /* ignore */ }
   process.exit(1);
 });

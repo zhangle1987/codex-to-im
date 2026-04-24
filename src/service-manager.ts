@@ -6,6 +6,11 @@ import { fileURLToPath } from 'node:url';
 
 import { CTI_HOME, loadConfig, loadRawConfigEnv } from './config.js';
 import type { ChannelInstance } from './config.js';
+import {
+  clearStaleBridgeInstanceLock,
+  readBridgeInstanceLock,
+  releaseBridgeInstanceLock,
+} from './bridge-instance-lock.js';
 
 export interface BridgeStatus {
   running: boolean;
@@ -112,9 +117,10 @@ function isProcessAlive(pid?: number): boolean {
 function collectTrackedBridgePids(
   bridgePid: number | undefined,
   statusPid: number | undefined,
+  instanceLockPid?: number,
 ): number[] {
   const unique = new Set<number>();
-  for (const pid of [bridgePid, statusPid]) {
+  for (const pid of [bridgePid, statusPid, instanceLockPid]) {
     if (Number.isFinite(pid) && (pid as number) > 0) {
       unique.add(pid as number);
     }
@@ -125,16 +131,22 @@ function collectTrackedBridgePids(
 function resolveTrackedBridgePid(
   bridgePid: number | undefined,
   statusPid: number | undefined,
+  instanceLockPid: number | undefined,
   isAlive: (pid?: number) => boolean = isProcessAlive,
 ): number | undefined {
   if (isAlive(bridgePid)) return bridgePid;
   if (isAlive(statusPid)) return statusPid;
-  return bridgePid ?? statusPid;
+  if (isAlive(instanceLockPid)) return instanceLockPid;
+  return bridgePid ?? statusPid ?? instanceLockPid;
 }
 
 function getTrackedBridgePids(status?: BridgeStatus): number[] {
   const resolvedStatus = status ?? readJsonFile<BridgeStatus>(bridgeStatusFile, { running: false });
-  return collectTrackedBridgePids(readPid(bridgePidFile), resolvedStatus.pid);
+  return collectTrackedBridgePids(
+    readPid(bridgePidFile),
+    resolvedStatus.pid,
+    readBridgeInstanceLock()?.pid,
+  );
 }
 
 function clearBridgePidFile(): void {
@@ -436,7 +448,11 @@ export function getCurrentUiServerUrl(): string | undefined {
 
 export function getBridgeStatus(): BridgeStatus {
   const status = readJsonFile<BridgeStatus>(bridgeStatusFile, { running: false });
-  const pid = resolveTrackedBridgePid(readPid(bridgePidFile), status.pid);
+  const pid = resolveTrackedBridgePid(
+    readPid(bridgePidFile),
+    status.pid,
+    readBridgeInstanceLock()?.pid,
+  );
   if (!isProcessAlive(pid)) {
     return {
       ...status,
@@ -631,6 +647,7 @@ export async function stopBridge(): Promise<BridgeStatus> {
   const pids = getTrackedBridgePids(status).filter((pid) => isProcessAlive(pid));
   if (pids.length === 0) {
     clearBridgePidFile();
+    clearStaleBridgeInstanceLock();
     return { ...getBridgeStatus(), running: false };
   }
 
@@ -657,12 +674,14 @@ export async function stopBridge(): Promise<BridgeStatus> {
   while (Date.now() - startedAt < 10_000) {
     if (pids.every((pid) => !isProcessAlive(pid))) {
       clearBridgePidFile();
+      clearStaleBridgeInstanceLock();
       return getBridgeStatus();
     }
     await sleep(300);
   }
 
   clearBridgePidFile();
+  clearStaleBridgeInstanceLock();
   return getBridgeStatus();
 }
 
@@ -675,6 +694,9 @@ export const _testOnly = {
   isBridgeStartLockStale,
   tryAcquireBridgeStartLock,
   releaseBridgeStartLock,
+  readBridgeInstanceLock,
+  releaseBridgeInstanceLock,
+  clearStaleBridgeInstanceLock,
 };
 
 export async function restartBridge(): Promise<BridgeStatus> {

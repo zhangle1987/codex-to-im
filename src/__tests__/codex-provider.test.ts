@@ -939,7 +939,75 @@ describe('CodexProvider error events', () => {
     const errorEvent = events.find(e => e.type === 'error');
     assert.ok(errorEvent);
     assert.match(errorEvent!.data, /会话恢复失败/);
-    assert.match(errorEvent!.data, /`\/t 0`/);
+    assert.match(errorEvent!.data, /\/t 0/);
+  });
+
+  it('clears the cached thread id after a failed turn so the next message starts fresh', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    let startCount = 0;
+    let resumeCount = 0;
+
+    const failedThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'thread.started', thread_id: 'stale-thread' };
+          yield {
+            type: 'turn.failed',
+            error: { message: 'Reconnecting... 2/5 (timeout waiting for child process to exit)' },
+          };
+        })(),
+      }),
+    };
+
+    const freshThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'thread.started', thread_id: 'fresh-thread' };
+          yield {
+            type: 'turn.completed',
+            usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 },
+          };
+        })(),
+      }),
+    };
+
+    (provider as any).sdk = {
+      Codex: class { constructor() {} },
+    };
+    (provider as any).codex = {
+      startThread: () => {
+        startCount += 1;
+        return startCount === 1 ? failedThread : freshThread;
+      },
+      resumeThread: () => {
+        resumeCount += 1;
+        return freshThread;
+      },
+    };
+
+    const firstStream = provider.streamChat({
+      prompt: 'first',
+      sessionId: 'err-session-reset',
+    });
+    await collectStream(firstStream);
+
+    assert.equal((provider as any).threadIds.has('err-session-reset'), false);
+
+    const secondStream = provider.streamChat({
+      prompt: 'second',
+      sessionId: 'err-session-reset',
+    });
+    const secondChunks = await collectStream(secondStream);
+    const secondEvents = parseSSEChunks(secondChunks);
+    const resultEvent = secondEvents.find(e => e.type === 'result');
+
+    assert.equal(resumeCount, 0, 'failed in-memory thread id must not be resumed');
+    assert.equal(startCount, 2, 'second request should start a fresh thread');
+    assert.ok(resultEvent, 'fresh thread should complete successfully');
+    assert.equal((provider as any).threadIds.get('err-session-reset'), 'fresh-thread');
   });
 
   it('reads message field from error event', async () => {

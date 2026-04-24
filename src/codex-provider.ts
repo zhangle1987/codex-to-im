@@ -79,7 +79,7 @@ function normalizeCodexErrorMessage(message: string | null | undefined): string 
     lower.includes('timeout waiting for child process to exit')
     || lower.includes('reconnecting...')
   ) {
-    return 'Codex 会话恢复失败，上一轮执行进程未正常退出。请稍后重试；如果连续失败，请新开线程或切换到 `/t 0`。';
+    return 'Codex 会话恢复失败，上一轮执行进程未正常退出。请稍后重试；如果连续失败，请新开线程或切换到 /t 0。';
   }
 
   return trimmed;
@@ -144,6 +144,10 @@ export class CodexProvider implements LLMProvider {
   private threadIds = new Map<string, string>();
 
   constructor(_pendingPerms?: PendingPermissions) {}
+
+  private clearCachedThreadId(sessionId: string): void {
+    this.threadIds.delete(sessionId);
+  }
 
   /**
    * Lazily load the Codex SDK. Throws a clear error if the installation is incomplete.
@@ -312,6 +316,7 @@ export class CodexProvider implements LLMProvider {
 
                     case 'turn.failed': {
                       const error = (event as { error?: { message?: string } }).error?.message;
+                      self.clearCachedThreadId(params.sessionId);
                       controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(error || 'Turn failed')));
                       sawTerminalEvent = true;
                       break;
@@ -319,6 +324,7 @@ export class CodexProvider implements LLMProvider {
 
                     case 'error': {
                       const error = (event as { message?: string }).message;
+                      self.clearCachedThreadId(params.sessionId);
                       controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(error || 'Thread error')));
                       sawTerminalEvent = true;
                       break;
@@ -347,10 +353,12 @@ export class CodexProvider implements LLMProvider {
                 const message = err instanceof Error ? err.message : String(err);
                 if (savedThreadId && !retryFresh && !sawAnyEvent && shouldRetryFreshThread(message)) {
                   console.warn('[codex-provider] Resume failed, retrying with a fresh thread:', message);
+                  self.clearCachedThreadId(params.sessionId);
                   savedThreadId = undefined;
                   retryFresh = true;
                   continue;
                 }
+                self.clearCachedThreadId(params.sessionId);
                 throw err;
               }
             }
@@ -359,6 +367,7 @@ export class CodexProvider implements LLMProvider {
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             console.error('[codex-provider] Error:', err instanceof Error ? err.stack || err.message : err);
+            self.clearCachedThreadId(params.sessionId);
             try {
               controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(message)));
               controller.close();
@@ -503,6 +512,7 @@ export class CodexProvider implements LLMProvider {
       }
 
       case 'error': {
+        this.clearCachedThreadId(sessionId);
         controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(item.message || 'Codex error')));
         break;
       }
