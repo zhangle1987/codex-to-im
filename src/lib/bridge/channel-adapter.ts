@@ -1,7 +1,7 @@
 /**
  * Abstract base class for IM channel adapters.
  *
- * Each adapter (Telegram, Discord, Slack, ...) extends this class to provide
+ * Each adapter (Feishu/Lark, Weixin, ...) extends this class to provide
  * platform-specific message consumption and delivery.
  */
 
@@ -35,7 +35,7 @@ export abstract class BaseChannelAdapter {
 
   /** Which channel type this adapter handles */
   abstract readonly channelType: ChannelType;
-  /** Underlying provider family (feishu / weixin / telegram / discord / qq). */
+  /** Underlying provider family (feishu / weixin). */
   abstract readonly provider: string;
   /** Human-readable instance alias, when applicable. */
   readonly alias?: string;
@@ -69,7 +69,7 @@ export abstract class BaseChannelAdapter {
   abstract send(message: OutboundMessage): Promise<SendResult>;
 
   /**
-   * Answer a callback query (e.g. Telegram inline button press).
+   * Answer a callback query or interactive-card action when supported.
    * Not all platforms support this — default implementation is a no-op.
    */
   async answerCallback(_callbackQueryId: string, _text?: string): Promise<void> {

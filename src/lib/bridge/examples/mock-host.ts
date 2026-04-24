@@ -204,7 +204,7 @@ async function main() {
   });
 
   // 2. Simulate an inbound message
-  const address = { channelType: 'telegram', chatId: '12345', displayName: 'Test User' };
+  const address = { channelType: 'feishu-default', chatId: '12345', displayName: 'Test User' };
 
   console.log('Resolving channel binding...');
   const binding = router.resolve(address);
@@ -212,8 +212,8 @@ async function main() {
   console.log(`  CWD: ${binding.workingDirectory}\n`);
 
   // 3. Process message through conversation engine
-  console.log('Processing message: "Hello, Claude!"');
-  const result = await engine.processMessage(binding, 'Hello, Claude!');
+  console.log('Processing message: "Hello, Codex!"');
+  const result = await engine.processMessage(binding, 'Hello, Codex!');
 
   console.log(`\nResult:`);
   console.log(`  Response: "${result.responseText}"`);

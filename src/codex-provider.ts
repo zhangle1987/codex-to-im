@@ -2,8 +2,7 @@
  * Codex Provider — LLMProvider implementation backed by @openai/codex-sdk.
  *
  * Maps Codex SDK thread events to the SSE stream format consumed by
- * the bridge conversation engine, making Codex a drop-in alternative
- * to the Claude Code SDK backend.
+ * the bridge conversation engine.
  *
  * The provider lazily imports the installed SDK at first use and throws
  * a clear error if the package is missing from the current installation.
@@ -31,6 +30,8 @@ const MIME_EXT: Record<string, string> = {
   'image/gif': '.gif',
   'image/webp': '.webp',
 };
+
+const DEFAULT_TERMINAL_DRAIN_TIMEOUT_MS = 3_000;
 
 // Keep SDK types as `any` because we lazy-load the package at runtime.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -83,6 +84,22 @@ function normalizeCodexErrorMessage(message: string | null | undefined): string 
   }
 
   return trimmed;
+}
+
+function getTerminalDrainTimeoutMs(): number {
+  const configured = parseInt(process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS || '', 10);
+  if (Number.isFinite(configured) && configured >= 10) {
+    return configured;
+  }
+  return DEFAULT_TERMINAL_DRAIN_TIMEOUT_MS;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof DOMException && error.name === 'AbortError'
+  ) || (
+    error instanceof Error && error.name === 'AbortError'
+  );
 }
 
 function normalizeTaskText(value: unknown): string {
@@ -255,9 +272,36 @@ export class CodexProvider implements LLMProvider {
 
               let sawAnyEvent = false;
               let sawTerminalEvent = false;
+              const runAbortController = new AbortController();
+              let terminalDrainTimer: NodeJS.Timeout | null = null;
+              const clearTerminalDrainTimer = () => {
+                if (!terminalDrainTimer) return;
+                clearTimeout(terminalDrainTimer);
+                terminalDrainTimer = null;
+              };
+              const scheduleTerminalDrainAbort = () => {
+                if (terminalDrainTimer || params.abortController?.signal.aborted) return;
+                terminalDrainTimer = setTimeout(() => {
+                  terminalDrainTimer = null;
+                  if (!runAbortController.signal.aborted) {
+                    runAbortController.abort();
+                  }
+                }, getTerminalDrainTimeoutMs());
+              };
+              const forwardUserAbort = () => {
+                if (!runAbortController.signal.aborted) {
+                  runAbortController.abort();
+                }
+              };
+              if (params.abortController?.signal.aborted) {
+                forwardUserAbort();
+              } else {
+                params.abortController?.signal.addEventListener('abort', forwardUserAbort, { once: true });
+              }
+
               try {
                 const { events } = await thread.runStreamed(input, {
-                  signal: params.abortController?.signal,
+                  signal: runAbortController.signal,
                 });
 
                 for await (const event of events as AsyncGenerator<ThreadEvent>) {
@@ -341,16 +385,25 @@ export class CodexProvider implements LLMProvider {
                   }
 
                   if (sawTerminalEvent) {
-                    // Codex sometimes emits a terminal turn event but keeps the
-                    // iterator open briefly; IM callers should treat the turn
-                    // event as authoritative completion instead of waiting
-                    // indefinitely for the underlying stream to end.
-                    break;
+                    // Codex can emit the terminal turn event slightly before the
+                    // underlying child process exits. Keep draining briefly so
+                    // the SDK can shut down the child cleanly instead of leaving
+                    // a reconnectable rollout behind for the next request.
+                    scheduleTerminalDrainAbort();
                   }
                 }
+                clearTerminalDrainTimer();
                 break;
               } catch (err) {
+                clearTerminalDrainTimer();
                 const message = err instanceof Error ? err.message : String(err);
+                const userAborted = params.abortController?.signal.aborted === true;
+                if (userAborted && isAbortError(err)) {
+                  break;
+                }
+                if (sawTerminalEvent && (runAbortController.signal.aborted || isAbortError(err)) && !userAborted) {
+                  break;
+                }
                 if (savedThreadId && !retryFresh && !sawAnyEvent && shouldRetryFreshThread(message)) {
                   console.warn('[codex-provider] Resume failed, retrying with a fresh thread:', message);
                   self.clearCachedThreadId(params.sessionId);
@@ -360,6 +413,9 @@ export class CodexProvider implements LLMProvider {
                 }
                 self.clearCachedThreadId(params.sessionId);
                 throw err;
+              } finally {
+                clearTerminalDrainTimer();
+                params.abortController?.signal.removeEventListener('abort', forwardUserAbort);
               }
             }
 
@@ -528,10 +584,4 @@ export class CodexProvider implements LLMProvider {
     }
   }
 
-  private handleCompletedItem(
-    controller: ReadableStreamDefaultController<string>,
-    item: ThreadItem,
-  ): void {
-    this.handleItemEvent(controller, item, 'completed', 'test-session', new Set());
-  }
 }

@@ -8,6 +8,7 @@ import {
   configToSettings,
   feishuSiteToApiBaseUrl,
   findChannelInstance,
+  isSupportedChannelProvider,
   loadConfig,
   normalizeFeishuSite,
   saveConfig,
@@ -342,8 +343,9 @@ function configToPayload(config: Config) {
     codexReasoningEffort: config.codexReasoningEffort || 'medium',
     uiAllowLan: config.uiAllowLan === true,
     uiAccessToken: config.uiAccessToken || '',
-    autoApprove: config.autoApprove === true,
-    channels: (config.channels || []).map(channelToPayload),
+    channels: (config.channels || [])
+      .filter((channel) => isSupportedChannelProvider(channel.provider))
+      .map(channelToPayload),
   };
 }
 
@@ -360,7 +362,7 @@ function mergeConfig(payload: Record<string, unknown>): Config {
 
   return {
     ...current,
-    runtime: payload.runtime === 'claude' || payload.runtime === 'auto' ? payload.runtime : 'codex',
+    runtime: 'codex',
     enabledChannels: current.enabledChannels,
     defaultWorkspaceRoot: asString(payload.defaultWorkspaceRoot),
     defaultModel: rawDefaultModel === undefined
@@ -391,7 +393,6 @@ function mergeConfig(payload: Record<string, unknown>): Config {
       : 'medium',
     uiAllowLan,
     uiAccessToken,
-    autoApprove: payload.autoApprove === true,
     channels: current.channels,
   };
 }
@@ -2277,8 +2278,6 @@ function renderHtml(): string {
                   Runtime
                   <select id="runtime">
                     <option value="codex" selected>codex</option>
-                    <option value="auto">auto</option>
-                    <option value="claude">claude</option>
                   </select>
                 </label>
                 <label>
@@ -2294,11 +2293,11 @@ function renderHtml(): string {
                   <input id="historyMessageLimit" type="number" min="1" max="20" value="8" />
                 </label>
                 <label>
-                  静默检测启动时长（秒）
+                  上次响应距今显示启动时长（秒）
                   <input id="streamStatusIdleStartSeconds" type="number" min="1" value="180" />
                 </label>
                 <label>
-                  静默检测间隔（秒）
+                  上次响应距今检查间隔（秒）
                   <input id="streamStatusCheckIntervalSeconds" type="number" min="1" value="10" />
                 </label>
               </div>
@@ -2330,11 +2329,8 @@ function renderHtml(): string {
                   </select>
                 </label>
               </div>
-              <div class="small">未绑定的 IM 聊天会先进入临时草稿线程（等同 <code>/t 0</code>）；“默认工作空间”只用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。默认模型候选项来自启动时读取的 Codex 模型缓存：隐藏模型不会展示，CLI only 模型会标成“仅 IM / CLI”。留空则继续跟随 Codex 当前默认模型。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。静默检测配置只影响飞书长任务底部“最近 X 无新输出”的出现时机。</div>
-              <div class="small">当前需要重启 Bridge 的配置：<code>Runtime</code>、<code>自动批准工具权限</code>、<code>允许在未信任 Git 目录运行 Codex</code>。通道实例的接入配置请在“通道”页维护。</div>
-              <div class="checkbox-row">
-                <label class="checkbox"><input id="autoApprove" type="checkbox" /> 自动批准工具权限</label>
-              </div>
+              <div class="small">未绑定的 IM 聊天会先进入临时草稿线程（等同 <code>/t 0</code>）；“默认工作空间”只用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。默认模型候选项来自启动时读取的 Codex 模型缓存：隐藏模型不会展示，CLI only 模型会标成“仅 IM / CLI”。留空则继续跟随 Codex 当前默认模型。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。上次响应距今配置只影响飞书长任务底部“上次响应距今 X”的出现时机。</div>
+              <div class="small">当前需要重启 Bridge 的配置：<code>Runtime</code>、<code>允许在未信任 Git 目录运行 Codex</code>。通道实例的接入配置请在“通道”页维护。</div>
               <div class="checkbox-row">
                 <label class="checkbox"><input id="codexSkipGitRepoCheck" type="checkbox" checked /> 允许在未信任 Git 目录运行 Codex</label>
               </div>
@@ -2659,7 +2655,6 @@ function renderHtml(): string {
           codexReasoningEffort: document.getElementById('codexReasoningEffort').value,
           uiAllowLan: document.getElementById('uiAllowLan').checked,
           uiAccessToken: document.getElementById('uiAccessToken').value,
-          autoApprove: document.getElementById('autoApprove').checked,
         };
       }
 
@@ -2829,20 +2824,18 @@ function renderHtml(): string {
         defaultModel: '默认模型',
         defaultMode: '默认模式',
         historyMessageLimit: '/history 返回条数',
-        streamStatusIdleStartSeconds: '静默检测启动时长',
-        streamStatusCheckIntervalSeconds: '静默检测间隔',
+        streamStatusIdleStartSeconds: '上次响应距今显示启动时长',
+        streamStatusCheckIntervalSeconds: '上次响应距今检查间隔',
         codexSkipGitRepoCheck: '允许在未信任 Git 目录运行 Codex',
         codexSandboxMode: 'Codex 文件系统权限',
         codexReasoningEffort: 'Codex 思考级别',
         uiAllowLan: '允许局域网访问 Web 控制台',
         uiAccessToken: '局域网访问 token',
-        autoApprove: '自动批准工具权限',
       };
 
       const BRIDGE_RESTART_FIELDS = new Set([
         'runtime',
         'codexSkipGitRepoCheck',
-        'autoApprove',
       ]);
 
       const AUTO_SYNC_FIELDS = new Set([]);
@@ -3434,7 +3427,6 @@ function renderHtml(): string {
         document.getElementById('codexReasoningEffort').value = config.codexReasoningEffort || 'medium';
         document.getElementById('uiAllowLan').checked = config.uiAllowLan === true;
         document.getElementById('uiAccessToken').value = config.uiAccessToken || '';
-        document.getElementById('autoApprove').checked = config.autoApprove === true;
         renderUiAccess();
         ensureActiveChannelId();
         renderChannelsWorkspace();

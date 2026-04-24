@@ -9,6 +9,7 @@ import type { ChannelAddress, ChannelBinding, ChannelType } from './types.js';
 import { getBridgeContext } from './context.js';
 import { bindStoreToSdkSession, bindStoreToSession } from '../../session-bindings.js';
 import { getOrCreateDraftSession } from '../../internal-sessions.js';
+import { recordBindingChange } from './binding-audit.js';
 
 /**
  * Resolve an inbound address to a ChannelBinding.
@@ -35,9 +36,25 @@ export function resolve(address: ChannelAddress): ChannelBinding {
       return existing;
     }
     // Session was deleted — recreate
-    return createBinding(address);
+    const created = createBinding(address);
+    recordBindingChange(store, {
+      action: 'auto_recreate_missing_session',
+      address,
+      fromBinding: existing,
+      toBinding: created,
+      reason: 'bound session was missing',
+    });
+    return created;
   }
-  return createBinding(address);
+  const created = createBinding(address);
+  recordBindingChange(store, {
+    action: 'auto_create_draft',
+    address,
+    fromBinding: null,
+    toBinding: created,
+    reason: 'no existing binding',
+  });
+  return created;
 }
 
 /**

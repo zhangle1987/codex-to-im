@@ -1,26 +1,33 @@
 /**
- * Permission Broker — forwards Claude permission requests to IM channels
+ * Permission Broker — forwards LLM permission requests to IM channels
  * and handles user responses via inline buttons.
  *
- * When Claude needs tool approval, the broker:
+ * When the provider needs tool approval, the broker:
  * 1. Formats a permission prompt with inline keyboard buttons
  * 2. Sends it via the delivery layer
  * 3. Records the link between permission ID and IM message
  * 4. When a callback arrives, resolves the permission via the gateway
  */
 
-import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
 import type { ChannelAddress, OutboundMessage } from './types.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import { deliver } from './delivery-layer.js';
 import { getBridgeContext } from './context.js';
-import { escapeHtml } from './adapters/telegram-utils.js';
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 /**
  * Dedup recent permission forwards to prevent duplicate cards.
  * Key: permissionRequestId, value: timestamp. Entries expire after 30s.
  */
 const recentPermissionForwards = new Map<string, number>();
+type PermissionUpdate = Record<string, unknown>;
 
 /**
  * Forward a permission request to an IM channel as an interactive message.
@@ -59,9 +66,8 @@ export async function forwardPermissionRequest(
 
   let result: import('./types.js').SendResult;
 
-  if (adapter.provider === 'qq' || adapter.provider === 'weixin') {
-    const channelLabel = adapter.provider === 'weixin' ? 'WeChat' : 'QQ';
-    // QQ / WeChat: plain text permission prompt with copyable /perm commands (no inline buttons)
+  if (adapter.provider === 'weixin') {
+    // WeChat: plain text permission prompt with copyable /perm commands (no inline buttons)
     const plainText = [
       `Permission Required`,
       ``,
@@ -88,7 +94,7 @@ export async function forwardPermissionRequest(
 
     result = await deliver(adapter, plainMessage, { sessionId });
     console.log(
-      `[permission-broker] Sent plain-text permission prompt for ${channelLabel}: ${permissionRequestId}`,
+      `[permission-broker] Sent plain-text permission prompt for WeChat: ${permissionRequestId}`,
     );
   } else {
     const text = [

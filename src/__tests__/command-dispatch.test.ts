@@ -41,6 +41,13 @@ function initTestContext(): JsonFileStore {
   return store;
 }
 
+function readAuditSummaries(): string[] {
+  const auditPath = path.join(DATA_DIR, 'audit.json');
+  if (!fs.existsSync(auditPath)) return [];
+  const parsed = JSON.parse(fs.readFileSync(auditPath, 'utf-8')) as Array<{ summary?: string }>;
+  return parsed.map((entry) => entry.summary || '');
+}
+
 describe('command-dispatch', () => {
   beforeEach(() => {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
@@ -237,6 +244,67 @@ describe('command-dispatch', () => {
     assert.match(sent[0] || '', /common-flow/);
   });
 
+  it('blocks thread switching while the current task is running unless forced', async () => {
+    const store = initTestContext();
+    const sent: string[] = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: `reply-${sent.length}` };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-switch-running' } as const;
+    const initialBinding = router.createBinding(address, 'D:\\workspace\\running-old');
+    const activeTask = { abortController: new AbortController() };
+
+    await handleBridgeCommand(
+      adapter,
+      {
+        address,
+        text: '/thread 0',
+        messageId: 'incoming-switch-running-1',
+      } as any,
+      '/thread 0',
+      {
+        getActiveTask: (sessionId) => sessionId === initialBinding.codepilotSessionId ? activeTask : undefined,
+        diagnoseSessionHealth: async () => null,
+        diagnoseAllActiveSessions: async () => [],
+      },
+    );
+
+    assert.match(sent.at(-1) || '', /当前会话仍在运行/);
+    assert.match(sent.at(-1) || '', /--force/);
+    assert.equal(
+      store.getChannelBinding(address.channelType, address.chatId)?.codepilotSessionId,
+      initialBinding.codepilotSessionId,
+    );
+
+    await handleBridgeCommand(
+      adapter,
+      {
+        address,
+        text: '/thread 0 --force',
+        messageId: 'incoming-switch-running-2',
+      } as any,
+      '/thread 0 --force',
+      {
+        getActiveTask: (sessionId) => sessionId === initialBinding.codepilotSessionId ? activeTask : undefined,
+        diagnoseSessionHealth: async () => null,
+        diagnoseAllActiveSessions: async () => [],
+      },
+    );
+
+    const forcedBinding = store.getChannelBinding(address.channelType, address.chatId);
+    assert.notEqual(forcedBinding?.codepilotSessionId, initialBinding.codepilotSessionId);
+    assert.equal(forcedBinding?.mode, 'ask');
+    assert.match(sent.at(-1) || '', /已切换到临时草稿线程/);
+    assert.ok(readAuditSummaries().some((summary) => (
+      summary.includes('Binding change: action=switch_draft')
+      && summary.includes('reason=forced')
+    )));
+  });
+
   it('removes the current binding on /unbind', async () => {
     const store = initTestContext();
     const sent: string[] = [];
@@ -248,7 +316,7 @@ describe('command-dispatch', () => {
       },
     };
     const address = { channelType: 'feishu', chatId: 'chat-unbind' } as const;
-    const binding = router.createBinding(address, 'D:\\workspace\\unbind');
+    router.createBinding(address, 'D:\\workspace\\unbind');
 
     await handleBridgeCommand(
       adapter,

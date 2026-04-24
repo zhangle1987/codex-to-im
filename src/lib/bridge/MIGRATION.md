@@ -6,7 +6,7 @@
 
 ```typescript
 import { getSetting, insertAuditLog } from '../db';
-import { streamClaude } from '../claude-client';
+import { streamCodex } from '../codex-client';
 import type { FileAttachment } from '@/types';
 
 const setting = getSetting('my_key');
@@ -27,9 +27,9 @@ const setting = store.getSetting('my_key');
 | Before | After |
 |--------|-------|
 | `import { getSetting } from '../db'` | `getBridgeContext().store.getSetting(...)` |
-| `import { streamClaude } from '../claude-client'` | `getBridgeContext().llm.streamChat(...)` |
+| `import { streamCodex } from '../codex-client'` | `getBridgeContext().llm.streamChat(...)` |
 | `import { resolvePendingPermission } from '../permission-registry'` | `getBridgeContext().permissions.resolvePendingPermission(...)` |
-| `import { setBridgeModeActive } from '../telegram-bot'` | `getBridgeContext().lifecycle.onBridgeStart()` |
+| `import { setBridgeModeActive } from '../bridge-daemon'` | `getBridgeContext().lifecycle.onBridgeStart()` |
 | `import type { FileAttachment } from '@/types'` | `import type { FileAttachment } from './types'` |
 
 ## Initializing the Context

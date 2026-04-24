@@ -1,4 +1,6 @@
+import path from 'node:path';
 import type {
+  ChannelBinding,
   InboundMessage,
   OutboundAttachment,
   StreamingPreviewState,
@@ -32,15 +34,14 @@ export interface StreamConfig {
 }
 
 const STREAM_DEFAULTS: Record<string, StreamConfig> = {
-  telegram: { intervalMs: 700, minDeltaChars: 20, maxChars: 3900 },
-  discord: { intervalMs: 1500, minDeltaChars: 40, maxChars: 1900 },
+  default: { intervalMs: 1000, minDeltaChars: 30, maxChars: 4000 },
 };
 const STREAM_STATUS_IDLE_START_MS = 180_000;
 const STREAM_STATUS_HEARTBEAT_MS = 10_000;
 
-function getStreamConfig(channelType = 'telegram'): StreamConfig {
+function getStreamConfig(channelType = 'default'): StreamConfig {
   const { store } = getBridgeContext();
-  const defaults = STREAM_DEFAULTS[channelType] || STREAM_DEFAULTS.telegram;
+  const defaults = STREAM_DEFAULTS[channelType] || STREAM_DEFAULTS.default;
   const prefix = `bridge_${channelType}_stream_`;
   const intervalMs = parseInt(store.getSetting(`${prefix}interval_ms`) || '', 10) || defaults.intervalMs;
   const minDeltaChars = parseInt(store.getSetting(`${prefix}min_delta_chars`) || '', 10) || defaults.minDeltaChars;
@@ -88,29 +89,53 @@ function flushPreview(
 
 function formatRuntimeDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-
-  const totalMinutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  if (totalMinutes < 60) {
-    return seconds > 0 ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
-  }
-
-  const hours = Math.floor(totalMinutes / 60);
+  const totalMinutes = Math.floor(totalSeconds / 60);
   const minutes = totalMinutes % 60;
-  if (minutes === 0 && seconds === 0) return `${hours}h`;
-  if (seconds === 0) return `${hours}h ${minutes}m`;
-  return `${hours}h ${minutes}m ${seconds}s`;
+  const hours = Math.floor(totalMinutes / 60);
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours}小时`);
+  if (minutes > 0) parts.push(`${minutes}分`);
+  if (seconds > 0 || parts.length === 0) parts.push(`${seconds}秒`);
+  return parts.join('');
+}
+
+function pathBaseName(value: string): string {
+  return value.includes('\\') ? path.win32.basename(value) : path.basename(value);
+}
+
+function stripInternalSessionPrefix(value: string): string {
+  return value.replace(/^(Bridge|Desktop):\s*/i, '').trim() || value;
+}
+
+function formatTaskDisplayName(binding: ChannelBinding): string {
+  const { store } = getBridgeContext();
+  const session = store.getSession(binding.codepilotSessionId);
+  if (session?.name?.trim()) return stripInternalSessionPrefix(session.name.trim());
+  const cwd = session?.working_directory || binding.workingDirectory || '';
+  if (cwd) return pathBaseName(cwd) || cwd;
+  return binding.codepilotSessionId.slice(0, 8);
+}
+
+function buildStaleTaskCompletionNotice(
+  address: InboundMessage['address'],
+  binding: ChannelBinding,
+): string | null {
+  const { store } = getBridgeContext();
+  const current = store.getChannelBinding(address.channelType, address.chatId);
+  if (current?.codepilotSessionId === binding.codepilotSessionId) return null;
+  const taskName = formatTaskDisplayName(binding);
+  return `旧会话「${taskName}」任务已结束，但当前聊天已切换到其他会话，回复已跳过。`;
 }
 
 export function formatInteractiveRuntimeStatus(
   elapsedMs: number,
-  silentMs?: number | null,
+  lastResponseAgeMs?: number | null,
   statusNote?: string | null,
 ): string {
   const parts = [elapsedMs < 1000 ? '处理中' : `已运行 ${formatRuntimeDuration(elapsedMs)}`];
-  if (typeof silentMs === 'number' && silentMs >= 0) {
-    parts.push(`最近 ${formatRuntimeDuration(silentMs)} 无新输出`);
+  if (typeof lastResponseAgeMs === 'number' && lastResponseAgeMs >= 0) {
+    parts.push(`上次响应距今 ${formatRuntimeDuration(lastResponseAgeMs)}`);
   }
   const runtimeText = parts.join('，');
   const note = (statusNote || '').trim();
@@ -128,6 +153,7 @@ export interface InteractiveTaskState {
   hasStreamingCards: boolean;
   structuredStreamUiActive: boolean;
   lastActivityAt: number;
+  lastResponseAt?: number | null;
   idleReminderSent: boolean;
   streamFinalized: boolean;
   uiEnded: boolean;
@@ -211,6 +237,7 @@ export async function runInteractiveMessage(
     hasStreamingCards: false,
     structuredStreamUiActive: false,
     lastActivityAt: taskStartedAt,
+    lastResponseAt: null,
     idleReminderSent: false,
     streamFinalized: false,
     uiEnded: false,
@@ -306,13 +333,17 @@ export async function runInteractiveMessage(
     if (!snapshot) return;
     deps.recordInteractiveStreamUiSnapshot?.(binding.codepilotSessionId, snapshot);
   };
-  const pushRunningStatus = (silentMs?: number | null) => {
+  const pushRunningStatus = (lastResponseAgeMs?: number | null) => {
     if (!supportsStructuredStreamUi || streamStatusUpdatesClosed) return;
     pushStreamFeedbackStatus(
       streamFeedbackTarget,
-      formatInteractiveRuntimeStatus(nowMs() - taskStartedAt, silentMs, latestStatusNote),
+      formatInteractiveRuntimeStatus(nowMs() - taskStartedAt, lastResponseAgeMs, latestStatusNote),
     );
     syncStructuredStreamUiSnapshot();
+  };
+  const markSuccessfulResponse = () => {
+    taskState.lastResponseAt = nowMs();
+    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
   };
 
   let streamStatusHeartbeat: unknown = null;
@@ -337,7 +368,7 @@ export async function runInteractiveMessage(
 
   const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
-    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+    markSuccessfulResponse();
     deps.recordInteractiveHealthTool(binding.codepilotSessionId, toolId, toolName, status);
     if (toolName) {
       toolCallTracker.set(toolId, { id: toolId, name: toolName, status });
@@ -354,7 +385,7 @@ export async function runInteractiveMessage(
 
   const onTaskEvent = (tasks: TaskProgressInfo[]) => {
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
-    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+    markSuccessfulResponse();
     latestTasks = tasks;
     if (hasStreamingCards) {
       pushStreamFeedbackTasks(streamFeedbackTarget, latestTasks);
@@ -365,15 +396,19 @@ export async function runInteractiveMessage(
 
   const onStatusNote = (note: string | null) => {
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
-    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
     latestStatusNote = (note || '').trim() || null;
+    if (latestStatusNote) {
+      markSuccessfulResponse();
+    }
     pushRunningStatus(null);
     syncStructuredStreamUiSnapshot();
   };
 
   const onPartialText = (fullText: string) => {
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
-    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+    if (fullText.trim()) {
+      markSuccessfulResponse();
+    }
     deps.recordInteractiveHealthProgress(binding.codepilotSessionId, 'text');
     previewOnPartialText?.(fullText);
     onStreamCardText?.(fullText);
@@ -393,12 +428,15 @@ export async function runInteractiveMessage(
         return;
       }
       const elapsedMs = nowMs() - taskStartedAt;
-      const silentMs = nowMs() - taskState.lastActivityAt;
-      const showSilentDuration = elapsedMs >= streamStatusIdleDetectionStartMs
-        && silentMs >= streamStatusHeartbeatMs
-        ? silentMs
+      const lastResponseAgeMs = taskState.lastResponseAt == null
+        ? null
+        : nowMs() - taskState.lastResponseAt;
+      const showLastResponseAge = elapsedMs >= streamStatusIdleDetectionStartMs
+        && lastResponseAgeMs != null
+        && lastResponseAgeMs >= streamStatusHeartbeatMs
+        ? lastResponseAgeMs
         : null;
-      pushRunningStatus(showSilentDuration);
+      pushRunningStatus(showLastResponseAge);
       syncStructuredStreamUiSnapshot();
     }, streamStatusHeartbeatMs);
   }
@@ -429,7 +467,7 @@ export async function runInteractiveMessage(
           'permission_wait',
           `当前正在等待工具 ${perm.toolName} 的权限确认。`,
         );
-        deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+        markSuccessfulResponse();
         pushRunningStatus(null);
         syncStructuredStreamUiSnapshot();
       },
@@ -452,17 +490,32 @@ export async function runInteractiveMessage(
     }
 
     let cardFinalized = false;
+    const staleTaskNotice = buildStaleTaskCompletionNotice(msg.address, binding);
     if (hasStreamingCards) {
       stopStructuredStreamStatusUpdates();
+      const streamEndStatus = taskAbort.signal.aborted
+        ? 'interrupted'
+        : result.hasError ? 'error' : 'completed';
       cardFinalized = await finalizeStreamFeedback(
         streamFeedbackTarget,
-        result.hasError ? 'error' : 'completed',
-        result.responseText,
+        streamEndStatus,
+        staleTaskNotice || (streamEndStatus === 'interrupted' ? '' : result.responseText),
       );
       taskState.streamFinalized = cardFinalized;
     }
 
-    if (
+    if (staleTaskNotice) {
+      if (!cardFinalized) {
+        await deps.deliverResponse(
+          adapter,
+          msg.address,
+          staleTaskNotice,
+          binding.codepilotSessionId,
+          msg.messageId,
+          [],
+        );
+      }
+    } else if (
       result.responseText || result.outboundAttachments.length > 0
     ) {
       const textToDeliver = cardFinalized ? '' : result.responseText;
@@ -476,7 +529,7 @@ export async function runInteractiveMessage(
           result.outboundAttachments,
         );
       }
-    } else if (result.hasError) {
+    } else if (result.hasError && !taskAbort.signal.aborted) {
       await deps.deliverResponse(
         adapter,
         msg.address,

@@ -15,9 +15,7 @@ import './lib/bridge/adapters/index.js';
 
 import type { LLMProvider } from './lib/bridge/host.js';
 import { loadConfig, configToSettings, CTI_HOME } from './config.js';
-import type { Config } from './config.js';
 import { JsonFileStore } from './store.js';
-import { SDKLLMProvider, resolveClaudeCliPath, preflightCheck } from './llm-provider.js';
 import { PendingPermissions } from './permission-gateway.js';
 import { setupLogger } from './logger.js';
 import { releaseBridgeInstanceLock, tryAcquireBridgeInstanceLock } from './bridge-instance-lock.js';
@@ -26,73 +24,9 @@ const RUNTIME_DIR = path.join(CTI_HOME, 'runtime');
 const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');
 const PID_FILE = path.join(RUNTIME_DIR, 'bridge.pid');
 
-/**
- * Resolve the LLM provider based on the runtime setting.
- * - 'claude' (default): uses Claude Code SDK via SDKLLMProvider
- * - 'codex': uses @openai/codex-sdk via CodexProvider
- * - 'auto': tries Claude first, falls back to Codex
- */
-async function resolveProvider(config: Config, pendingPerms: PendingPermissions): Promise<LLMProvider> {
-  const runtime = config.runtime;
-
-  if (runtime === 'codex') {
-    const { CodexProvider } = await import('./codex-provider.js');
-    return new CodexProvider();
-  }
-
-  if (runtime === 'auto') {
-    const cliPath = resolveClaudeCliPath();
-    if (cliPath) {
-      // Auto mode: preflight the resolved CLI before committing to it.
-      const check = preflightCheck(cliPath);
-      if (check.ok) {
-        console.log(`[codex-to-im] Auto: using Claude CLI at ${cliPath} (${check.version})`);
-        return new SDKLLMProvider(pendingPerms, cliPath, config.autoApprove);
-      }
-      // Preflight failed — fall through to Codex instead of silently using a broken CLI
-      console.warn(
-        `[codex-to-im] Auto: Claude CLI at ${cliPath} failed preflight: ${check.error}\n` +
-        `  Falling back to Codex.`,
-      );
-    } else {
-      console.log('[codex-to-im] Auto: Claude CLI not found, falling back to Codex');
-    }
-    const { CodexProvider } = await import('./codex-provider.js');
-    return new CodexProvider();
-  }
-
-  // Default: claude
-  const cliPath = resolveClaudeCliPath();
-  if (!cliPath) {
-    console.error(
-      '[codex-to-im] FATAL: Cannot find the `claude` CLI executable.\n' +
-      '  Tried: CTI_CLAUDE_CODE_EXECUTABLE env, /usr/local/bin/claude, /opt/homebrew/bin/claude, ~/.npm-global/bin/claude, ~/.local/bin/claude\n' +
-      '  Fix: Install Claude Code CLI (https://docs.anthropic.com/en/docs/claude-code) or set CTI_CLAUDE_CODE_EXECUTABLE=/path/to/claude\n' +
-      '  Or: Set CTI_RUNTIME=codex to use Codex instead',
-    );
-    process.exit(1);
-  }
-
-  // Preflight: verify the CLI can actually run in the daemon environment.
-  // In claude runtime this is fatal — starting with a broken CLI would just
-  // defer the error to the first user message, which is harder to diagnose.
-  const check = preflightCheck(cliPath);
-  if (check.ok) {
-    console.log(`[codex-to-im] CLI preflight OK: ${cliPath} (${check.version})`);
-  } else {
-    console.error(
-      `[codex-to-im] FATAL: Claude CLI preflight check failed.\n` +
-      `  Path: ${cliPath}\n` +
-      `  Error: ${check.error}\n` +
-      `  Fix:\n` +
-      `    1. Install Claude Code CLI >= 2.x: https://docs.anthropic.com/en/docs/claude-code\n` +
-      `    2. Or set CTI_CLAUDE_CODE_EXECUTABLE=/path/to/correct/claude\n` +
-      `    3. Or set CTI_RUNTIME=auto to fall back to Codex`,
-    );
-    process.exit(1);
-  }
-
-  return new SDKLLMProvider(pendingPerms, cliPath, config.autoApprove);
+async function resolveProvider(): Promise<LLMProvider> {
+  const { CodexProvider } = await import('./codex-provider.js');
+  return new CodexProvider();
 }
 
 interface StatusInfo {
@@ -154,7 +88,7 @@ async function main(): Promise<void> {
   const settings = configToSettings(config);
   const store = new JsonFileStore(settings, { dynamicSettings: true });
   const pendingPerms = new PendingPermissions();
-  const llm = await resolveProvider(config, pendingPerms);
+  const llm = await resolveProvider();
   console.log(`[codex-to-im] Runtime: ${config.runtime}`);
 
   const gateway = {

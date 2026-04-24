@@ -17,7 +17,6 @@ describe('bridge-adapter-runtime', () => {
     const locked: string[] = [];
 
     const runtime = createAdapterRuntime(() => state, {
-      getStore: () => ({ getSetting: () => 'true' }),
       notifyAdapterSetChanged: () => {},
       handleMessage: async (_adapter, msg) => {
         handled.push(msg.text);

@@ -49,7 +49,7 @@ describe('maskSecret', () => {
 
 describe('configToSettings', () => {
   const base: Config = {
-    runtime: 'claude',
+    runtime: 'codex',
     channels: [],
     enabledChannels: [],
     defaultMode: 'code',
@@ -58,41 +58,6 @@ describe('configToSettings', () => {
   it('always sets remote_bridge_enabled to true', () => {
     const m = configToSettings(base);
     assert.equal(m.get('remote_bridge_enabled'), 'true');
-  });
-
-  it('sets channel enabled flags based on enabledChannels', () => {
-    const m = configToSettings({ ...base, enabledChannels: ['telegram', 'discord'] });
-    assert.equal(m.get('bridge_telegram_enabled'), 'true');
-    assert.equal(m.get('bridge_discord_enabled'), 'true');
-    assert.equal(m.get('bridge_feishu_enabled'), 'false');
-  });
-
-  it('maps telegram config', () => {
-    const m = configToSettings({
-      ...base,
-      enabledChannels: ['telegram'],
-      tgBotToken: 'bot123:abc',
-      tgAllowedUsers: ['user1', 'user2'],
-      tgChatId: '99999',
-    });
-    assert.equal(m.get('telegram_bot_token'), 'bot123:abc');
-    assert.equal(m.get('telegram_bridge_allowed_users'), 'user1,user2');
-    assert.equal(m.get('telegram_chat_id'), '99999');
-  });
-
-  it('maps discord config', () => {
-    const m = configToSettings({
-      ...base,
-      enabledChannels: ['discord'],
-      discordBotToken: 'discord-token',
-      discordAllowedUsers: ['u1'],
-      discordAllowedChannels: ['c1', 'c2'],
-      discordAllowedGuilds: ['g1'],
-    });
-    assert.equal(m.get('bridge_discord_bot_token'), 'discord-token');
-    assert.equal(m.get('bridge_discord_allowed_users'), 'u1');
-    assert.equal(m.get('bridge_discord_allowed_channels'), 'c1,c2');
-    assert.equal(m.get('bridge_discord_allowed_guilds'), 'g1');
   });
 
   it('maps feishu config', () => {
@@ -125,43 +90,6 @@ describe('configToSettings', () => {
     assert.equal(m.get('bridge_feishu_command_markdown_enabled'), 'true');
   });
 
-  it('sets bridge_qq_enabled based on enabledChannels', () => {
-    const m = configToSettings({ ...base, enabledChannels: ['qq'] });
-    assert.equal(m.get('bridge_qq_enabled'), 'true');
-    assert.equal(m.get('bridge_telegram_enabled'), 'false');
-  });
-
-  it('defaults bridge_qq_enabled to false', () => {
-    const m = configToSettings(base);
-    assert.equal(m.get('bridge_qq_enabled'), 'false');
-  });
-
-  it('maps qq config fields', () => {
-    const m = configToSettings({
-      ...base,
-      enabledChannels: ['qq'],
-      qqAppId: 'qq-app-id',
-      qqAppSecret: 'qq-secret',
-      qqAllowedUsers: ['openid1', 'openid2'],
-    });
-    assert.equal(m.get('bridge_qq_app_id'), 'qq-app-id');
-    assert.equal(m.get('bridge_qq_app_secret'), 'qq-secret');
-    assert.equal(m.get('bridge_qq_allowed_users'), 'openid1,openid2');
-  });
-
-  it('maps qq image settings', () => {
-    const m = configToSettings({
-      ...base,
-      enabledChannels: ['qq'],
-      qqAppId: 'id',
-      qqAppSecret: 'secret',
-      qqImageEnabled: false,
-      qqMaxImageSize: 10,
-    });
-    assert.equal(m.get('bridge_qq_image_enabled'), 'false');
-    assert.equal(m.get('bridge_qq_max_image_size'), '10');
-  });
-
   it('maps weixin settings', () => {
     const m = configToSettings({
       ...base,
@@ -187,17 +115,6 @@ describe('configToSettings', () => {
     assert.equal(m.get('bridge_weixin_cdn_base_url'), 'https://cdn.weixin.test');
     assert.equal(m.get('bridge_weixin_media_enabled'), 'true');
     assert.equal(m.get('bridge_weixin_command_markdown_enabled'), 'false');
-  });
-
-  it('omits qq image settings when not set', () => {
-    const m = configToSettings({
-      ...base,
-      enabledChannels: ['qq'],
-      qqAppId: 'id',
-      qqAppSecret: 'secret',
-    });
-    assert.equal(m.has('bridge_qq_image_enabled'), false);
-    assert.equal(m.has('bridge_qq_max_image_size'), false);
   });
 
   it('maps mode and omits model when not set', () => {
@@ -258,9 +175,36 @@ describe('configToSettings', () => {
 
   it('omits optional fields when not set', () => {
     const m = configToSettings(base);
-    assert.equal(m.has('telegram_bot_token'), false);
-    assert.equal(m.has('bridge_discord_bot_token'), false);
     assert.equal(m.has('bridge_feishu_app_id'), false);
+  });
+
+  it('omits unsupported channel providers from runtime settings', () => {
+    const m = configToSettings({
+      ...base,
+      channels: [
+        {
+          id: 'feishu-default',
+          alias: '飞书',
+          provider: 'feishu',
+          enabled: true,
+          createdAt: '2026-03-28T00:00:00.000Z',
+          updatedAt: '2026-03-28T00:00:00.000Z',
+          config: {},
+        },
+        {
+          id: 'telegram-old',
+          alias: 'Telegram',
+          provider: 'telegram',
+          enabled: true,
+          createdAt: '2026-03-28T00:00:00.000Z',
+          updatedAt: '2026-03-28T00:00:00.000Z',
+          config: {},
+        } as never,
+      ],
+    });
+
+    const channels = JSON.parse(m.get('bridge_channel_instances_json') || '[]') as Array<{ provider: string }>;
+    assert.deepEqual(channels.map((channel) => channel.provider), ['feishu']);
   });
 });
 
@@ -296,15 +240,12 @@ describe('loadConfig/saveConfig round-trip', () => {
 
   it('configToSettings returns correct defaults', () => {
     const m = configToSettings({
-      runtime: 'claude',
+      runtime: 'codex',
       channels: [],
       enabledChannels: [],
       defaultMode: 'code',
     });
-    assert.equal(m.get('bridge_telegram_enabled'), 'false');
-    assert.equal(m.get('bridge_discord_enabled'), 'false');
     assert.equal(m.get('bridge_feishu_enabled'), 'false');
-    assert.equal(m.get('bridge_qq_enabled'), 'false');
     assert.equal(m.get('bridge_weixin_enabled'), 'false');
   });
 
@@ -353,6 +294,44 @@ describe('loadConfig/saveConfig round-trip', () => {
         },
       ],
     );
+  });
+
+  it('filters unsupported providers from config.v2.json on load', () => {
+    fs.mkdirSync(path.dirname(CONFIG_V2_PATH), { recursive: true });
+    fs.writeFileSync(
+      CONFIG_V2_PATH,
+      JSON.stringify({
+        schemaVersion: 2,
+        runtime: {
+          provider: 'codex',
+          defaultMode: 'code',
+        },
+        channels: [
+          {
+            id: 'feishu-default',
+            alias: '飞书',
+            provider: 'feishu',
+            enabled: true,
+            createdAt: '2026-03-28T00:00:00.000Z',
+            updatedAt: '2026-03-28T00:00:00.000Z',
+            config: {},
+          },
+          {
+            id: 'telegram-old',
+            alias: 'Telegram',
+            provider: 'telegram',
+            enabled: true,
+            createdAt: '2026-03-28T00:00:00.000Z',
+            updatedAt: '2026-03-28T00:00:00.000Z',
+            config: {},
+          },
+        ],
+      }, null, 2),
+    );
+
+    const loaded = loadConfig();
+    assert.deepEqual(loaded.channels?.map((channel) => channel.provider), ['feishu']);
+    assert.deepEqual(loaded.enabledChannels, ['feishu']);
   });
 
   it('preserves custom v2 channel instances when saving runtime settings', () => {

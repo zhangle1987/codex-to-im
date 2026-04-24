@@ -9,7 +9,7 @@ import * as path from 'path';
 
 // ── Constants ────────────────────────────────────────────────────
 
-const MAX_INPUT_LENGTH = 32_000; // Claude's effective context limit
+const MAX_INPUT_LENGTH = 32_000;
 const MAX_PATH_LENGTH = 1024;
 const SESSION_ID_PATTERN = /^[0-9a-f-]{32,64}$/i;
 const VALID_MODES = ['plan', 'code', 'ask'] as const;

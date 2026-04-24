@@ -7,7 +7,7 @@ import { BaseChannelAdapter } from '../lib/bridge/channel-adapter.js';
 import type { ChannelType, InboundMessage, OutboundMessage, SendResult } from '../lib/bridge/types.js';
 
 class DummyAdapter extends BaseChannelAdapter {
-  readonly channelType: ChannelType = 'telegram';
+  readonly channelType: ChannelType = 'feishu-default';
   readonly provider = 'dummy';
   private running = false;
 
@@ -52,13 +52,13 @@ describe('BaseChannelAdapter queue helpers', () => {
     await adapter.start();
 
     adapter.push({
-      address: { channelType: 'telegram', chatId: 'chat-1' },
+      address: { channelType: 'feishu-default', chatId: 'chat-1' },
       messageId: 'msg-1',
       text: 'first',
       timestamp: Date.now(),
     });
     adapter.push({
-      address: { channelType: 'telegram', chatId: 'chat-1' },
+      address: { channelType: 'feishu-default', chatId: 'chat-1' },
       messageId: 'msg-2',
       text: 'second',
       timestamp: Date.now() + 1,

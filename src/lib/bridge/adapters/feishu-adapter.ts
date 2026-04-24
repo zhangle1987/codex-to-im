@@ -3,7 +3,7 @@
  *
  * Uses the official @larksuiteoapi/node-sdk WSClient for real-time event
  * subscription and REST Client for message sending / resource downloading.
- * Routes messages through an internal async queue (same pattern as Telegram).
+ * Routes messages through an internal async queue consumed by the bridge runtime.
  *
  * Rendering strategy (aligned with Openclaw):
  * - Code blocks / tables → interactive card (schema 2.0 markdown)
@@ -93,7 +93,7 @@ interface FeishuCardState {
 }
 
 /** Streaming card throttle interval (ms). */
-const CARD_THROTTLE_MS = 200;
+const CARD_THROTTLE_MS = 1000;
 const CARD_REQUEST_TIMEOUT_MS = 15_000;
 const INITIAL_STREAMING_STATUS = '处理中';
 const EMPTY_STREAMING_TASKS = '';
@@ -1029,7 +1029,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       text = htmlToFeishuMarkdown(text);
     }
 
-    // Preprocess markdown for Claude responses
+    // Preprocess markdown before converting it to Feishu post content.
     if (message.parseMode === 'Markdown') {
       text = preprocessFeishuMarkdown(text);
     }

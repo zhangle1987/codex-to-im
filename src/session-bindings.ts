@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import type { BridgeSession, BridgeStore } from './lib/bridge/host.js';
 import type { ChannelBinding } from './lib/bridge/types.js';
+import { recordBindingChange } from './lib/bridge/binding-audit.js';
 import { findChannelInstance, loadConfig, type ChannelProvider } from './config.js';
 import {
   getDesktopSessionByThreadId,
@@ -286,6 +287,7 @@ export function updateBindingTarget(
   if (!binding) {
     throw new Error('Binding not found.');
   }
+  const fromBinding = { ...binding };
 
   if (targetKey.startsWith('desktop:')) {
     const threadId = targetKey.slice('desktop:'.length);
@@ -313,6 +315,21 @@ export function updateBindingTarget(
     throw new Error('Unsupported target.');
   }
 
+  const toBinding = store.getChannelBinding(binding.channelType, binding.chatId);
+  recordBindingChange(store, {
+    action: 'web_switch',
+    address: {
+      channelType: binding.channelType,
+      channelProvider: binding.channelProvider,
+      channelAlias: binding.channelAlias,
+      chatId: binding.chatId,
+    },
+    fromBinding,
+    toBinding,
+    source: 'web_ui',
+    reason: `target=${targetKey}`,
+  });
+
   const updated = listBindingSummaries(store).find((item) => item.id === bindingId);
   if (!updated) {
     throw new Error('Updated binding not found.');
@@ -328,7 +345,20 @@ export function removeBinding(
   if (!binding) {
     throw new Error('Binding not found.');
   }
+  const fromBinding = { ...binding };
   store.deleteChannelBinding(bindingId);
+  recordBindingChange(store, {
+    action: 'web_unbind',
+    address: {
+      channelType: binding.channelType,
+      channelProvider: binding.channelProvider,
+      channelAlias: binding.channelAlias,
+      chatId: binding.chatId,
+    },
+    fromBinding,
+    toBinding: null,
+    source: 'web_ui',
+  });
 }
 
 export function getChannelBindingSummaries(

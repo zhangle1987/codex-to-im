@@ -47,6 +47,14 @@ function parseSSEChunks(chunks: string[]): Array<{ type: string; data: string }>
     .map(line => JSON.parse(line.slice(6)));
 }
 
+function handleCompletedItem(
+  provider: unknown,
+  controller: ReadableStreamDefaultController<string>,
+  item: Record<string, unknown>,
+): void {
+  (provider as any).handleItemEvent(controller, item, 'completed', 'test-session', new Set());
+}
+
 describe('CodexProvider', () => {
   it('emits error when SDK init fails', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
@@ -84,7 +92,7 @@ describe('CodexProvider', () => {
       enqueue: (chunk: string) => chunks.push(chunk),
     } as unknown as ReadableStreamDefaultController<string>;
 
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'agent_message',
       id: 'msg-1',
       text: 'Hello from Codex!',
@@ -106,7 +114,7 @@ describe('CodexProvider', () => {
       enqueue: (chunk: string) => chunks.push(chunk),
     } as unknown as ReadableStreamDefaultController<string>;
 
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'command_execution',
       id: 'cmd-1',
       command: 'ls -la',
@@ -137,7 +145,7 @@ describe('CodexProvider', () => {
       enqueue: (chunk: string) => chunks.push(chunk),
     } as unknown as ReadableStreamDefaultController<string>;
 
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'command_execution',
       id: 'cmd-2',
       command: 'false',
@@ -160,7 +168,7 @@ describe('CodexProvider', () => {
       enqueue: (chunk: string) => chunks.push(chunk),
     } as unknown as ReadableStreamDefaultController<string>;
 
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'file_change',
       id: 'fc-1',
       changes: [
@@ -187,7 +195,7 @@ describe('CodexProvider', () => {
       enqueue: (chunk: string) => chunks.push(chunk),
     } as unknown as ReadableStreamDefaultController<string>;
 
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'mcp_tool_call',
       id: 'mcp-1',
       server: 'myserver',
@@ -213,7 +221,7 @@ describe('CodexProvider', () => {
       enqueue: (chunk: string) => chunks.push(chunk),
     } as unknown as ReadableStreamDefaultController<string>;
 
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'mcp_tool_call',
       id: 'mcp-2',
       server: 'myserver',
@@ -237,7 +245,7 @@ describe('CodexProvider', () => {
       enqueue: (chunk: string) => chunks.push(chunk),
     } as unknown as ReadableStreamDefaultController<string>;
 
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'mcp_tool_call',
       id: 'mcp-3',
       server: 'myserver',
@@ -268,7 +276,7 @@ describe('CodexProvider', () => {
     } as unknown as ReadableStreamDefaultController<string>;
 
     (provider as any).threadIds.set('test-session', 'sdk-thread-1');
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'todo_list',
       id: 'todo-1',
       items: [
@@ -339,7 +347,7 @@ describe('CodexProvider', () => {
       enqueue: (chunk: string) => chunks.push(chunk),
     } as unknown as ReadableStreamDefaultController<string>;
 
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'reasoning',
       id: 'reason-1',
       text: '先检查 bridge manager 的状态流转',
@@ -363,7 +371,7 @@ describe('CodexProvider', () => {
       enqueue: (chunk: string) => chunks.push(chunk),
     } as unknown as ReadableStreamDefaultController<string>;
 
-    (provider as any).handleCompletedItem(mockController, {
+    handleCompletedItem(provider, mockController, {
       type: 'agent_message',
       id: 'msg-2',
       text: '',
@@ -407,14 +415,14 @@ describe('CodexProvider', () => {
     const stream = provider.streamChat({
       prompt: 'hello',
       sessionId: 'model-default-session',
-      sdkSessionId: 'old-claude-session-id',
-      model: 'claude-sonnet-4-20250514',
+      sdkSessionId: 'old-sdk-session-id',
+      model: 'legacy-model-name',
     });
 
     await collectStream(stream);
 
     assert.equal(resumeCalls, 1, 'Should attempt resume for the persisted thread id');
-    assert.equal(resumedThreadId, 'old-claude-session-id');
+    assert.equal(resumedThreadId, 'old-sdk-session-id');
     assert.equal(startCalls, 0, 'Should not eagerly start a fresh thread when resume is available');
     assert.ok(capturedResumeOptions, 'resumeThread options should be captured');
     assert.ok(!Object.prototype.hasOwnProperty.call(capturedResumeOptions!, 'model'), 'Model should not be forwarded by default');
@@ -426,12 +434,29 @@ describe('CodexProvider', () => {
     const provider = new CodexProvider(new PendingPermissions());
 
     let capturedTurnOptions: Record<string, unknown> | undefined;
+    let resolveRunStarted: (() => void) | undefined;
+    const runStarted = new Promise<void>((resolve) => {
+      resolveRunStarted = resolve;
+    });
     const mockThread = {
       runStreamed: (_input: unknown, turnOptions?: Record<string, unknown>) => {
         capturedTurnOptions = turnOptions;
+        resolveRunStarted?.();
         return {
           events: (async function* () {
-            yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
+            await new Promise((_, reject) => {
+              const signal = turnOptions?.signal as AbortSignal | undefined;
+              const abort = () => {
+                const error = new Error('user aborted');
+                error.name = 'AbortError';
+                reject(error);
+              };
+              if (signal?.aborted) {
+                abort();
+                return;
+              }
+              signal?.addEventListener('abort', abort, { once: true });
+            });
           })(),
         };
       },
@@ -449,22 +474,42 @@ describe('CodexProvider', () => {
       abortController,
     });
 
-    await collectStream(stream);
+    await runStarted;
+    assert.ok(capturedTurnOptions?.signal instanceof AbortSignal);
+    assert.equal((capturedTurnOptions?.signal as AbortSignal).aborted, false);
 
-    assert.equal(capturedTurnOptions?.signal, abortController.signal);
+    abortController.abort();
+    await collectStream(stream);
+    assert.equal((capturedTurnOptions?.signal as AbortSignal).aborted, true);
   });
 
   it('treats turn.completed as terminal even if the SDK event iterator never closes', async () => {
+    const previousTimeout = process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS;
+    process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS = '20';
+
+    try {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
     const provider = new CodexProvider(new PendingPermissions());
 
-    const stalledAfterComplete = new Promise<never>(() => {});
+    let capturedSignal: AbortSignal | undefined;
     const mockThread = {
-      runStreamed: () => ({
+      runStreamed: (_input: unknown, turnOptions?: Record<string, unknown>) => ({
         events: (async function* () {
+          capturedSignal = turnOptions?.signal as AbortSignal | undefined;
           yield { type: 'turn.completed', usage: { input_tokens: 3, output_tokens: 5, cached_input_tokens: 1 } };
-          await stalledAfterComplete;
+          await new Promise((_, reject) => {
+            const abort = () => {
+              const error = new Error('terminal drain timeout');
+              error.name = 'AbortError';
+              reject(error);
+            };
+            if (capturedSignal?.aborted) {
+              abort();
+              return;
+            }
+            capturedSignal?.addEventListener('abort', abort, { once: true });
+          });
         })(),
       }),
     };
@@ -481,7 +526,7 @@ describe('CodexProvider', () => {
 
     const chunks = await Promise.race([
       collectStream(stream),
-      new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error('stream did not close after turn.completed')), 250)),
+      new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error('stream did not close after turn.completed')), 500)),
     ]);
     const events = parseSSEChunks(chunks);
     const resultEvent = events.find(e => e.type === 'result');
@@ -493,9 +538,17 @@ describe('CodexProvider', () => {
       output_tokens: 5,
       cache_read_input_tokens: 1,
     });
+    assert.equal(capturedSignal?.aborted, true);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS;
+      } else {
+        process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS = previousTimeout;
+      }
+    }
   });
 
-  it('reuses the in-memory Codex thread even when the stored model is Claude-like', async () => {
+  it('reuses the in-memory Codex thread even when the stored model is legacy-looking', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
     const provider = new CodexProvider(new PendingPermissions());
@@ -529,8 +582,8 @@ describe('CodexProvider', () => {
     const stream = provider.streamChat({
       prompt: 'continue previous thread',
       sessionId: 'sticky-codex-session',
-      sdkSessionId: 'old-claude-session-id',
-      model: 'claude-sonnet-4-20250514',
+      sdkSessionId: 'old-sdk-session-id',
+      model: 'legacy-model-name',
     });
 
     await collectStream(stream);
@@ -1010,6 +1063,71 @@ describe('CodexProvider error events', () => {
     assert.equal((provider as any).threadIds.get('err-session-reset'), 'fresh-thread');
   });
 
+  it('drains the SDK stream after a terminal event and suppresses the internal abort timeout', async () => {
+    const previousTimeout = process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS;
+    process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS = '20';
+
+    try {
+      const { CodexProvider } = await import('../codex-provider.js');
+      const { PendingPermissions } = await import('../permission-gateway.js');
+      const provider = new CodexProvider(new PendingPermissions());
+
+      let capturedSignal: AbortSignal | undefined;
+      const mockThread = {
+        runStreamed: (_input: unknown, turnOptions?: Record<string, unknown>) => {
+          capturedSignal = turnOptions?.signal as AbortSignal | undefined;
+          return {
+            events: (async function* () {
+              yield { type: 'thread.started', thread_id: 'drain-thread' };
+              yield {
+                type: 'turn.completed',
+                usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 },
+              };
+              await new Promise((_, reject) => {
+                const abort = () => {
+                  const error = new Error('drain timeout');
+                  error.name = 'AbortError';
+                  reject(error);
+                };
+                if (capturedSignal?.aborted) {
+                  abort();
+                  return;
+                }
+                capturedSignal?.addEventListener('abort', abort, { once: true });
+              });
+            })(),
+          };
+        },
+      };
+
+      (provider as any).sdk = { Codex: class { constructor() {} } };
+      (provider as any).codex = {
+        startThread: () => mockThread,
+      };
+
+      const stream = provider.streamChat({
+        prompt: 'test',
+        sessionId: 'terminal-drain-session',
+      });
+
+      const chunks = await collectStream(stream);
+      const events = parseSSEChunks(chunks);
+      const resultEvent = events.find(e => e.type === 'result');
+      const errorEvent = events.find(e => e.type === 'error');
+
+      assert.ok(resultEvent, 'terminal turn should still produce a result');
+      assert.equal(errorEvent, undefined, 'internal drain abort must not leak as a user-visible error');
+      assert.equal((provider as any).threadIds.get('terminal-drain-session'), 'drain-thread');
+      assert.equal(capturedSignal?.aborted, true, 'provider should abort the lingering stream after the drain timeout');
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS;
+      } else {
+        process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS = previousTimeout;
+      }
+    }
+  });
+
   it('reads message field from error event', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
@@ -1072,3 +1190,4 @@ describe('CodexProvider error events', () => {
     assert.equal(errorEvent!.data, 'Turn failed');
   });
 });
+

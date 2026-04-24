@@ -158,7 +158,7 @@ function getPendingPermissionLinksForCurrentSession(
 
 /**
  * Check if a message looks like a numeric permission shortcut (1/2/3) for
- * feishu/qq channels WITH at least one pending permission in that chat.
+ * Feishu/Weixin channels WITH at least one pending permission in that chat.
  *
  * This is used by the adapter loop to route these messages to the inline
  * (non-session-locked) path, avoiding deadlock: the session is blocked
@@ -166,7 +166,7 @@ function getPendingPermissionLinksForCurrentSession(
  * session lock would deadlock.
  */
 function isNumericPermissionShortcut(channelType: string, rawText: string, chatId: string): boolean {
-  if (channelType !== 'feishu' && channelType !== 'qq' && channelType !== 'weixin') return false;
+  if (channelType !== 'feishu' && channelType !== 'weixin') return false;
   const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
   if (!/^[123]$/.test(normalized)) return false;
   const { store } = getBridgeContext();
@@ -442,7 +442,7 @@ function pushMirrorStreamingStatus(
   turnState: DesktopMirrorTurnState,
   options: {
     nowMs?: number;
-    silentMs?: number | null;
+    lastResponseAgeMs?: number | null;
     minIntervalMs?: number;
   } = {},
 ): void {
@@ -461,7 +461,7 @@ function pushMirrorStreamingStatus(
 
   const statusText = formatInteractiveRuntimeStatus(
     Math.max(0, nowMs - startedAtMs),
-    options.silentMs,
+    options.lastResponseAgeMs,
     turnState.statusNote,
   );
   if (turnState.lastStatusText === statusText) return;
@@ -483,18 +483,22 @@ function refreshMirrorStreamingStatus(
   if (!pendingTurn?.streamStarted) return;
 
   const startedAtMs = Date.parse(pendingTurn.startedAt);
-  const lastActivityMs = Date.parse(pendingTurn.lastActivityAt);
-  if (!Number.isFinite(startedAtMs) || !Number.isFinite(lastActivityMs)) return;
+  if (!Number.isFinite(startedAtMs)) return;
 
   const elapsedMs = nowMs - startedAtMs;
   if (elapsedMs < config.idleStartMs) return;
 
-  const silentMs = nowMs - lastActivityMs;
-  if (silentMs < config.heartbeatMs) return;
+  const lastResponseAtMs = pendingTurn.lastResponseAt
+    ? Date.parse(pendingTurn.lastResponseAt)
+    : NaN;
+  const lastResponseAgeMs = Number.isFinite(lastResponseAtMs)
+    ? nowMs - lastResponseAtMs
+    : null;
+  if (lastResponseAgeMs != null && lastResponseAgeMs < config.heartbeatMs) return;
 
   pushMirrorStreamingStatus(subscription, pendingTurn, {
     nowMs,
-    silentMs,
+    lastResponseAgeMs,
     minIntervalMs: config.heartbeatMs,
   });
 }
@@ -715,7 +719,6 @@ function clearMirrorSubscriptions(): void {
 }
 
 const ADAPTER_RUNTIME = createAdapterRuntime(getState, {
-  getStore: () => getBridgeContext().store,
   notifyAdapterSetChanged: (channelTypes) => {
     const { lifecycle } = getBridgeContext();
     lifecycle.onBridgeAdaptersChanged?.(channelTypes);
@@ -970,7 +973,7 @@ async function handleMessage(
     return;
   }
 
-  // ── Numeric shortcut for permission replies (feishu/qq/weixin only) ──
+  // ── Numeric shortcut for permission replies (feishu/weixin only) ──
   // On mobile, typing `/perm allow <uuid>` is painful.
   // If the user sends "1", "2", or "3" and there is exactly one pending
   // permission for this chat, map it: 1→allow, 2→allow_session, 3→deny.
@@ -980,7 +983,6 @@ async function handleMessage(
   // variants. NFKC normalization folds them all to ASCII 1/2/3.
   if (
           adapter.provider === 'feishu'
-          || adapter.provider === 'qq'
           || adapter.provider === 'weixin'
   ) {
     // eslint-disable-next-line no-control-regex

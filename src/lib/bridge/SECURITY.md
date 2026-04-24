@@ -15,9 +15,8 @@ The bridge exposes an LLM to messages from IM platforms. Key threats:
 ### Authentication & Authorization
 
 Each adapter implements `isAuthorized(userId, chatId)`:
-- **Telegram**: `telegram_bridge_allowed_users` CSV whitelist
-- **Discord**: `bridge_discord_allowed_users`, `_allowed_channels`, `_allowed_guilds` with group policy
-- **Feishu**: `bridge_feishu_allowed_users` + group policy + mention requirement
+- **Feishu**: configured allowed-user list plus group policy and mention checks
+- **Weixin**: linked account/session validation before message handling
 
 Unauthorized messages are silently dropped (no response leak).
 

@@ -1,4 +1,4 @@
-import type { ChannelInstance, ChannelProvider } from '../../config.js';
+import { isSupportedChannelProvider, type ChannelInstance, type ChannelProvider } from '../../config.js';
 import { getBridgeContext } from './context.js';
 import { markdownToPlainText } from './markdown/plain.js';
 import { formatBindingChatLabel as formatBindingChatLabelBase } from './command-helpers.js';
@@ -10,7 +10,12 @@ export function listConfiguredChannelInstances(): ChannelInstance[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed as ChannelInstance[] : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((channel): channel is ChannelInstance => (
+      channel
+      && typeof channel === 'object'
+      && isSupportedChannelProvider((channel as { provider?: unknown }).provider)
+    ));
   } catch {
     return [];
   }

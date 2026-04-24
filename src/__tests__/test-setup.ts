@@ -4,7 +4,21 @@ import path from 'node:path';
 
 let createdTempHome: string | null = null;
 
-if (!process.env.CTI_HOME) {
+function isManagedTestHome(value: string | undefined): boolean {
+  if (!value) return false;
+  const resolved = path.resolve(value);
+  const tmpRoot = path.resolve(os.tmpdir());
+  return resolved.startsWith(tmpRoot)
+    && path.basename(resolved).startsWith('codex-to-im-test-');
+}
+
+if (
+  !process.env.CTI_HOME
+  || (
+    process.env.CTI_TEST_ALLOW_EXTERNAL_HOME !== '1'
+    && !isManagedTestHome(process.env.CTI_HOME)
+  )
+) {
   createdTempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-to-im-test-'));
   process.env.CTI_HOME = createdTempHome;
 }

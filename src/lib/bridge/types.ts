@@ -1,8 +1,8 @@
 /**
  * Bridge system types — shared across all bridge modules.
  *
- * The bridge connects external IM channels (Telegram, Discord, Slack)
- * to CodePilot chat sessions, allowing users to interact with Claude
+ * The bridge connects external IM channels (Feishu/Lark, Weixin)
+ * to local chat sessions, allowing users to interact with the configured LLM
  * from their preferred messaging platform.
  */
 
@@ -14,7 +14,7 @@ export type { FileAttachment } from './host.js';
 /**
  * Channel type identifier.
  * Extensible — any string is valid so new adapters can register without
- * modifying this definition. Well-known values: 'telegram', 'discord', 'slack'.
+ * modifying this definition. Well-known values: 'feishu', 'weixin'.
  */
 export type ChannelType = string;
 
@@ -62,7 +62,7 @@ export interface InboundMessage {
 export interface OutboundMessage {
   /** Target address */
   address: ChannelAddress;
-  /** Message text (may contain HTML for Telegram) */
+  /** Message text, optionally using the channel's selected parse mode. */
   text: string;
   /** Parse mode for the text */
   parseMode?: 'HTML' | 'Markdown' | 'plain';
@@ -206,10 +206,6 @@ export interface TaskProgressInfo {
 
 /** Platform-specific message length limits */
 export const PLATFORM_LIMITS: Record<string, number> = {
-  telegram: 4096,
-  discord: 2000,
-  slack: 40000,
   feishu: 30000,
-  qq: 2000,
   weixin: 4000,
 };

@@ -1,4 +1,4 @@
-import type { ChannelInstance } from '../../config.js';
+import { isSupportedChannelProvider, type ChannelInstance } from '../../config.js';
 import type { AdapterRuntimeInstance } from './channel-adapter.js';
 
 export function stableFingerprintValue(value: unknown): unknown {
@@ -27,11 +27,9 @@ export function buildAdapterConfigFingerprint(instance: AdapterRuntimeInstance):
 
 export function listEnabledAdapterInstances(
   configuredChannels: ChannelInstance[],
-  registeredProviders: Iterable<string>,
-  isLegacyProviderEnabled: (provider: string) => boolean,
 ): AdapterRuntimeInstance[] {
-  const configured = configuredChannels
-    .filter((channel) => channel.enabled)
+  return configuredChannels
+    .filter((channel) => channel.enabled && isSupportedChannelProvider(channel.provider))
     .map<AdapterRuntimeInstance>((channel) => ({
       id: channel.id,
       provider: channel.provider,
@@ -39,22 +37,6 @@ export function listEnabledAdapterInstances(
       enabled: channel.enabled,
       config: channel.config,
     }));
-  const configuredProviders = new Set(configured.map((channel) => channel.provider));
-
-  for (const provider of registeredProviders) {
-    if (provider === 'feishu' || provider === 'weixin') continue;
-    if (configuredProviders.has(provider)) continue;
-    if (!isLegacyProviderEnabled(provider)) continue;
-    configured.push({
-      id: provider,
-      provider,
-      alias: provider,
-      enabled: true,
-      config: {},
-    });
-  }
-
-  return configured;
 }
 
 export interface AdapterStartPlanItem {

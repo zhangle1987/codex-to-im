@@ -13,9 +13,14 @@ export type CodexSandboxMode = RuntimeSandboxMode;
 export type CodexReasoningEffort = RuntimeReasoningEffort;
 export type ChannelProvider = 'feishu' | 'weixin';
 export type FeishuSite = 'feishu' | 'lark';
+export type RuntimeProvider = 'codex';
+
+export function isSupportedChannelProvider(value: unknown): value is ChannelProvider {
+  return value === 'feishu' || value === 'weixin';
+}
 
 export interface RuntimeConfigV2 {
-  provider: 'claude' | 'codex' | 'auto';
+  provider: RuntimeProvider;
   defaultWorkspaceRoot?: string;
   defaultModel?: string;
   defaultMode: string;
@@ -27,7 +32,6 @@ export interface RuntimeConfigV2 {
   codexReasoningEffort?: CodexReasoningEffort;
   uiAllowLan?: boolean;
   uiAccessToken?: string;
-  autoApprove?: boolean;
 }
 
 export interface FeishuChannelConfig {
@@ -84,22 +88,9 @@ export interface Config {
   codexReasoningEffort?: CodexReasoningEffort;
   uiAllowLan?: boolean;
   uiAccessToken?: string;
-  autoApprove?: boolean;
   schemaVersion?: number;
   channels?: ChannelInstance[];
   enabledChannels: string[];
-  tgBotToken?: string;
-  tgChatId?: string;
-  tgAllowedUsers?: string[];
-  discordBotToken?: string;
-  discordAllowedUsers?: string[];
-  discordAllowedChannels?: string[];
-  discordAllowedGuilds?: string[];
-  qqAppId?: string;
-  qqAppSecret?: string;
-  qqAllowedUsers?: string[];
-  qqImageEnabled?: boolean;
-  qqMaxImageSize?: number;
 }
 
 const DEFAULT_CTI_HOME = path.join(os.homedir(), ".codex-to-im");
@@ -190,6 +181,8 @@ function readConfigV2File(): ConfigV2File | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(CONFIG_V2_PATH, 'utf-8')) as ConfigV2File;
     if (parsed && parsed.schemaVersion === 2 && parsed.runtime && Array.isArray(parsed.channels)) {
+      parsed.runtime.provider = normalizeRuntimeProvider(parsed.runtime.provider);
+      parsed.channels = normalizeChannelInstances(parsed.channels);
       return parsed;
     }
     return null;
@@ -213,9 +206,42 @@ function buildDefaultChannelId(provider: ChannelProvider): string {
   return `${provider}-default`;
 }
 
+function normalizeRuntimeProvider(_value: unknown): RuntimeProvider {
+  return 'codex';
+}
+
+function normalizeChannelInstances(value: unknown): ChannelInstance[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((entry): ChannelInstance[] => {
+    if (!entry || typeof entry !== 'object') return [];
+    const record = entry as Record<string, unknown>;
+    if (!isSupportedChannelProvider(record.provider)) return [];
+
+    const provider = record.provider;
+    const config = record.config && typeof record.config === 'object'
+      ? record.config as ChannelInstance['config']
+      : {};
+    const timestamp = nowIso();
+    return [{
+      id: normalizeChannelId(
+        typeof record.id === 'string' && record.id.trim()
+          ? record.id
+          : buildDefaultChannelId(provider),
+      ),
+      alias: typeof record.alias === 'string' && record.alias.trim()
+        ? record.alias.trim()
+        : defaultAliasForProvider(provider),
+      provider,
+      enabled: record.enabled === true,
+      createdAt: typeof record.createdAt === 'string' ? record.createdAt : timestamp,
+      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : timestamp,
+      config,
+    }];
+  });
+}
+
 function migrateLegacyEnvToV2(env: Map<string, string>): ConfigV2File {
-  const rawRuntime = env.get("CTI_RUNTIME") || "codex";
-  const runtime = (["claude", "codex", "auto"].includes(rawRuntime) ? rawRuntime : "codex") as RuntimeConfigV2["provider"];
   const enabledChannels = splitCsv(env.get("CTI_ENABLED_CHANNELS")) ?? ["feishu"];
   const timestamp = nowIso();
   const channels: ChannelInstance[] = [];
@@ -279,7 +305,7 @@ function migrateLegacyEnvToV2(env: Map<string, string>): ConfigV2File {
   return {
     schemaVersion: 2,
     runtime: {
-      provider: runtime,
+      provider: 'codex',
       defaultWorkspaceRoot: expandHomePath(env.get("CTI_DEFAULT_WORKSPACE_ROOT")) || undefined,
       defaultModel: env.get("CTI_DEFAULT_MODEL") || undefined,
       defaultMode: env.get("CTI_DEFAULT_MODE") || "code",
@@ -295,7 +321,6 @@ function migrateLegacyEnvToV2(env: Map<string, string>): ConfigV2File {
       codexReasoningEffort: parseReasoningEffort(env.get("CTI_CODEX_REASONING_EFFORT")) ?? 'medium',
       uiAllowLan: env.get("CTI_UI_ALLOW_LAN") === "true",
       uiAccessToken: env.get("CTI_UI_ACCESS_TOKEN") || undefined,
-      autoApprove: env.get("CTI_AUTO_APPROVE") === "true",
     },
     channels,
   };
@@ -329,7 +354,6 @@ function expandConfig(v2: ConfigV2File): Config {
     codexReasoningEffort: v2.runtime.codexReasoningEffort ?? 'medium',
     uiAllowLan: v2.runtime.uiAllowLan === true,
     uiAccessToken: v2.runtime.uiAccessToken || undefined,
-    autoApprove: v2.runtime.autoApprove === true,
   };
 }
 
@@ -338,6 +362,7 @@ function buildV2FileFromExpandedConfig(config: Config, current?: ConfigV2File | 
   let channels = hasExplicitChannels
     ? [...(config.channels || [])]
     : [...(current?.channels || [])];
+  channels = normalizeChannelInstances(channels);
 
   return {
     schemaVersion: 2,
@@ -354,7 +379,6 @@ function buildV2FileFromExpandedConfig(config: Config, current?: ConfigV2File | 
       codexReasoningEffort: config.codexReasoningEffort,
       uiAllowLan: config.uiAllowLan,
       uiAccessToken: config.uiAccessToken,
-      autoApprove: config.autoApprove,
     },
     channels: channels.map((channel) => ({
       ...channel,
@@ -388,7 +412,6 @@ export function loadConfig(): Config {
       codexSandboxMode: 'workspace-write',
       codexReasoningEffort: 'medium',
       uiAllowLan: false,
-      autoApprove: false,
     },
     channels: [],
   };
@@ -460,7 +483,6 @@ export function saveConfig(config: Config): void {
     }
   }
 
-  out += formatEnvLine("CTI_AUTO_APPROVE", String(next.runtime.autoApprove === true));
   ensureConfigDir();
   const tmpPath = CONFIG_PATH + ".tmp";
   fs.writeFileSync(tmpPath, out, { mode: 0o600 });
@@ -482,13 +504,14 @@ export function findChannelInstance(channelId: string, config?: Config): Channel
 
 export function configToSettings(config: Config): Map<string, string> {
   const m = new Map<string, string>();
+  const channels = normalizeChannelInstances(config.channels || []);
   const current: ConfigV2File = {
     schemaVersion: 2,
     runtime: {
       provider: config.runtime,
       defaultMode: config.defaultMode,
     },
-    channels: config.channels || [],
+    channels,
   };
   const feishu = getChannelByProvider(current, 'feishu');
   const weixin = getChannelByProvider(current, 'weixin');
@@ -537,26 +560,8 @@ export function configToSettings(config: Config): Map<string, string> {
   );
   m.set(
     "bridge_channel_instances_json",
-    JSON.stringify(config.channels || []),
+    JSON.stringify(channels),
   );
-
-  // Export flat settings for the remaining single-instance bridge consumers.
-  m.set(
-    "bridge_telegram_enabled",
-    config.enabledChannels.includes("telegram") ? "true" : "false",
-  );
-  if (config.tgBotToken) m.set("telegram_bot_token", config.tgBotToken);
-  if (config.tgAllowedUsers) m.set("telegram_bridge_allowed_users", config.tgAllowedUsers.join(","));
-  if (config.tgChatId) m.set("telegram_chat_id", config.tgChatId);
-
-  m.set(
-    "bridge_discord_enabled",
-    config.enabledChannels.includes("discord") ? "true" : "false",
-  );
-  if (config.discordBotToken) m.set("bridge_discord_bot_token", config.discordBotToken);
-  if (config.discordAllowedUsers) m.set("bridge_discord_allowed_users", config.discordAllowedUsers.join(","));
-  if (config.discordAllowedChannels) m.set("bridge_discord_allowed_channels", config.discordAllowedChannels.join(","));
-  if (config.discordAllowedGuilds) m.set("bridge_discord_allowed_guilds", config.discordAllowedGuilds.join(","));
 
   m.set(
     "bridge_feishu_enabled",
@@ -574,20 +579,6 @@ export function configToSettings(config: Config): Map<string, string> {
     "bridge_feishu_command_markdown_enabled",
     feishuConfig?.feedbackMarkdownEnabled === false ? "false" : "true",
   );
-
-  m.set(
-    "bridge_qq_enabled",
-    config.enabledChannels.includes("qq") ? "true" : "false",
-  );
-  if (config.qqAppId) m.set("bridge_qq_app_id", config.qqAppId);
-  if (config.qqAppSecret) m.set("bridge_qq_app_secret", config.qqAppSecret);
-  if (config.qqAllowedUsers) m.set("bridge_qq_allowed_users", config.qqAllowedUsers.join(","));
-  if (config.qqImageEnabled !== undefined) {
-    m.set("bridge_qq_image_enabled", String(config.qqImageEnabled));
-  }
-  if (config.qqMaxImageSize !== undefined) {
-    m.set("bridge_qq_max_image_size", String(config.qqMaxImageSize));
-  }
 
   m.set(
     "bridge_weixin_enabled",

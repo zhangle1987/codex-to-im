@@ -6,9 +6,8 @@
 bridge-manager.ts (orchestrator)
 ├── channel-adapter.ts (abstract base + registry)
 │   └── adapters/
-│       ├── telegram-adapter.ts
-│       ├── discord-adapter.ts
-│       └── feishu-adapter.ts
+│       ├── feishu-adapter.ts
+│       └── weixin-adapter.ts
 ├── channel-router.ts (address → session binding)
 ├── conversation-engine.ts (LLM stream processing)
 ├── permission-broker.ts (tool approval forwarding)
@@ -16,8 +15,6 @@ bridge-manager.ts (orchestrator)
 ├── markdown/
 │   ├── ir.ts (intermediate representation)
 │   ├── render.ts (generic renderer)
-│   ├── telegram.ts (Markdown → HTML chunks)
-│   ├── discord.ts (native Discord markdown)
 │   └── feishu.ts (Feishu cards/posts)
 ├── security/
 │   ├── validators.ts (input validation)
@@ -64,7 +61,7 @@ All host dependencies are abstracted through interfaces in `host.ts` and accesse
 ### Outbound (LLM → IM)
 
 1. **Bridge Manager** receives response text, dispatches to `feedback-delivery.ts:deliverResponse()`
-2. Platform-specific rendering: Telegram (HTML chunks), Discord (native markdown), Feishu (cards)
+2. Platform-specific rendering: Feishu Markdown/cards or plain text fallback
 3. **Delivery Layer** handles chunking, rate limiting, retry, dedup, audit logging
 4. **Adapter** sends via platform API
 
@@ -83,11 +80,11 @@ All host dependencies are abstracted through interfaces in `host.ts` and accesse
 ### globalThis Singletons
 Bridge Manager state lives on `globalThis` to survive Next.js HMR. The DI context also uses `globalThis`.
 
-### Deferred Offset Acknowledgement
-Telegram adapter separates `fetchOffset` (API watermark) from `committedOffset` (DB). Offset only advances after `handleMessage()` completes, preventing message loss on crash.
+### Deferred Message Acknowledgement
+Adapters can defer offset/session acknowledgement until `handleMessage()` completes, preventing message loss on crash.
 
-### Streaming Preview Throttling
-Preview drafts use configurable interval (700ms Telegram, 1500ms Discord) + minimum delta chars. Trailing-edge timer ensures the latest text is always sent. On permanent API failure, preview degrades gracefully (stops sending, doesn't retry).
+### Streaming UI Updates
+Feishu uses structured streaming cards for text, tool progress, task progress, and runtime status. Other channels fall back to normal delivery unless they implement the optional streaming hooks.
 
 ### Session Lock Chains
 `processWithSessionLock()` uses Promise chaining — not mutual exclusion — so different sessions process concurrently while same-session messages serialize. Lock cleanup happens in `.finally()`.

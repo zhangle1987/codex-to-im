@@ -1,14 +1,14 @@
 # Codex-to-IM Bridge
 
-A host-agnostic bridge that connects IM platforms (Telegram, Discord, Feishu/Lark) to Codex-compatible runtimes, enabling AI-powered conversations through messaging apps.
+A host-agnostic bridge that connects IM platforms (Feishu/Lark and Weixin) to Codex-compatible runtimes, enabling AI-powered conversations through messaging apps.
 
 ## Features
 
-- **Multi-platform**: Telegram (long polling), Discord (Gateway), Feishu/Lark (WSClient)
-- **Streaming previews**: Real-time response drafts via message editing
+- **Multi-platform**: Feishu/Lark bot instances and Weixin linked accounts
+- **Streaming UI**: Feishu structured cards for response text, tools, tasks, and runtime status
 - **Permission management**: Interactive inline buttons for tool approvals
 - **Session binding**: Each IM chat maps to a persistent conversation session
-- **Markdown rendering**: Platform-native formatting (HTML for Telegram, Discord Markdown, Feishu cards)
+- **Markdown rendering**: Feishu Markdown/cards with plain text fallback for other channels
 - **Security**: Input validation, rate limiting, authorization, audit logging
 - **Reliable delivery**: Auto-chunking, retry with backoff, HTML fallback, dedup
 
@@ -16,7 +16,7 @@ A host-agnostic bridge that connects IM platforms (Telegram, Discord, Feishu/Lar
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  IM Platform (Telegram / Discord / Feishu)                   │
+│  IM Platform (Feishu / Weixin)                               │
 └──────────────┬───────────────────────────────────────────────┘
                │ InboundMessage
 ┌──────────────▼───────────────────────────────────────────────┐
@@ -69,7 +69,7 @@ await bridgeManager.start();
 
 ```typescript
 const status = bridgeManager.getStatus();
-// { running: true, adapters: [{ channelType: 'telegram', running: true, ... }] }
+// { running: true, adapters: [{ channelType: 'feishu-default', running: true, ... }] }
 ```
 
 ## Host Interfaces
@@ -101,16 +101,15 @@ All settings are read via `BridgeStore.getSetting(key)`. Key settings:
 
 - `remote_bridge_enabled` — master switch
 - `bridge_auto_start` — auto-start on app launch
-- `bridge_{adapter}_enabled` — per-adapter toggle
-- `bridge_{adapter}_bot_token` — bot credentials
-- `bridge_{adapter}_allowed_users` — CSV of authorized user IDs
-- `bridge_{adapter}_stream_enabled` — streaming preview toggle
+- `bridge_channel_instances_json` — configured Feishu/Weixin channel instances
+- `bridge_feishu_*` — default Feishu compatibility settings
+- `bridge_weixin_*` — default Weixin compatibility settings
 
 ## Security
 
 - Input validation: path traversal, command injection, null byte detection
 - Rate limiting: 20 messages/minute per chat (token bucket)
-- Authorization: per-adapter allowed users/channels/guilds
+- Authorization: per-channel allowed users or linked-account ownership checks
 - Audit logging: all inbound/outbound messages logged
 - Permission dedup: atomic claim-and-resolve prevents double-clicks
 

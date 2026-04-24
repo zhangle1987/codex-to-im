@@ -141,11 +141,16 @@ describe('interactive-message-runner', () => {
 
   it('formats the persistent runtime status text', () => {
     assert.equal(formatInteractiveRuntimeStatus(0), '处理中');
-    assert.equal(formatInteractiveRuntimeStatus(65_000), '已运行 1m 5s');
-    assert.equal(formatInteractiveRuntimeStatus(3_661_000, 10_000), '已运行 1h 1m 1s，最近 10s 无新输出');
+    assert.equal(formatInteractiveRuntimeStatus(65_000), '已运行 1分5秒');
+    assert.equal(formatInteractiveRuntimeStatus(3_661_000, 10_000), '已运行 1小时1分1秒，上次响应距今 10秒');
+    assert.equal(formatInteractiveRuntimeStatus(1_000, 70_000), '已运行 1秒，上次响应距今 1分10秒');
+    assert.equal(formatInteractiveRuntimeStatus(1_000, 3_600_000), '已运行 1秒，上次响应距今 1小时');
+    assert.equal(formatInteractiveRuntimeStatus(1_000, 3_610_000), '已运行 1秒，上次响应距今 1小时10秒');
+    assert.equal(formatInteractiveRuntimeStatus(1_000, 3_720_000), '已运行 1秒，上次响应距今 1小时2分');
+    assert.equal(formatInteractiveRuntimeStatus(1_000, 3_730_000), '已运行 1秒，上次响应距今 1小时2分10秒');
   });
 
-  it('keeps runtime visible and adds silence duration after 10 seconds of no output', async () => {
+  it('keeps runtime visible and adds last response age after 10 seconds without a response', async () => {
     const adapter = new FakeFeishuStreamingAdapter();
     const address = {
       channelType: 'feishu-default',
@@ -208,10 +213,10 @@ describe('interactive-message-runner', () => {
           assert.equal(adapter.streamedStatuses.at(-1), '处理中');
 
           clock.advance(5_000);
-          assert.equal(adapter.streamedStatuses.at(-1), '已运行 10s，最近 10s 无新输出');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 10秒，上次响应距今 10秒');
 
           onPartialText?.('第一段输出\n第二段输出');
-          assert.equal(adapter.streamedStatuses.at(-1), '已运行 10s');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 10秒');
 
           return {
             responseText: '最终回复',
@@ -297,10 +302,10 @@ describe('interactive-message-runner', () => {
           assert.equal(adapter.streamedStatuses.at(-1), '处理中');
 
           clock.advance(30_000);
-          assert.equal(adapter.streamedStatuses.at(-1), '已运行 30s');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 30秒');
 
           clock.advance(150_000);
-          assert.equal(adapter.streamedStatuses.at(-1), '已运行 3m，最近 3m 无新输出');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 3分，上次响应距今 3分');
 
           return {
             responseText: '最终回复',
@@ -401,6 +406,167 @@ describe('interactive-message-runner', () => {
     assert.deepEqual(deliveredTexts, []);
     assert.equal(adapter.streamEnds.length, 1);
     assert.deepEqual(adapter.streamEnds[0], { status: 'completed', text: '最终回复' });
+  });
+
+  it('finalizes a stopped structured stream as interrupted without sending an error reply', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-stop',
+      userId: 'user-stop',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\stop');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const deliveredTexts: string[] = [];
+
+    adapter.onStreamEnd = async (
+      _chatId: string,
+      status: 'completed' | 'interrupted' | 'error',
+      responseText: string,
+    ): Promise<boolean> => {
+      adapter.streamEnds.push({ status, text: responseText });
+      return true;
+    };
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-stop-1',
+        address,
+        text: 'hello',
+        timestamp: Date.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = Date.now();
+          task.idleReminderSent = false;
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-stop'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse(_adapter, _address, responseText) {
+          deliveredTexts.push(responseText);
+        },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (binding) => {
+          const task = taskStateMap.get(binding.codepilotSessionId);
+          task?.abortController.abort();
+          return {
+            responseText: '',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: true,
+            errorMessage: 'Task stopped by user',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+      },
+    );
+
+    assert.deepEqual(adapter.streamEnds, [{ status: 'interrupted', text: '' }]);
+    assert.deepEqual(deliveredTexts, []);
+  });
+
+  it('sends a stale task notice instead of the old reply when the chat binding has switched', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      channelAlias: '飞书',
+      chatId: 'chat-stale-task',
+      userId: 'user-stale-task',
+      displayName: '旧任务',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\old-task');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const deliveredTexts: string[] = [];
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-stale-1',
+        address,
+        text: 'hello',
+        timestamp: Date.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = Date.now();
+          task.idleReminderSent = false;
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-stale'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse(_adapter, _address, responseText) {
+          deliveredTexts.push(responseText);
+        },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
+          onPartialText?.('旧会话流式内容');
+          router.createBinding(address, 'D:\\workspace\\new-task');
+          return {
+            responseText: '旧会话最终回复',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: false,
+            errorMessage: '',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+      },
+    );
+
+    assert.equal(deliveredTexts.length, 1);
+    assert.match(deliveredTexts[0] || '', /旧会话「旧任务」任务已结束/);
+    assert.match(deliveredTexts[0] || '', /当前聊天已切换到其他会话，回复已跳过/);
+    assert.doesNotMatch(deliveredTexts[0] || '', /旧会话最终回复/);
+    assert.equal(adapter.streamEnds[0]?.status, 'completed');
+    assert.match(adapter.streamEnds[0]?.text || '', /旧会话「旧任务」任务已结束/);
   });
 
   it('stops the runtime heartbeat before stream finalization begins', async () => {

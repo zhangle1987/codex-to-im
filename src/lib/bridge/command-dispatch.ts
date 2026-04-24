@@ -28,7 +28,8 @@ import * as broker from './permission-broker.js';
 import * as router from './channel-router.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 import type { BridgeSession } from './host.js';
-import type { InboundMessage } from './types.js';
+import type { ChannelBinding, InboundMessage } from './types.js';
+import { recordBindingChange, type BindingChangeAction } from './binding-audit.js';
 import { isDangerousInput, validateMode, validateSessionId } from './security/validators.js';
 import {
   ensureWorkingDirectoryExists,
@@ -53,6 +54,64 @@ import { readDesktopSessionMessages } from '../../desktop-sessions.js';
 
 const MODE_OPTIONS_TEXT = '可选：`code`（直接执行，默认） `plan`（先分析再行动） `ask`（轻对话 / 草稿）';
 const REASONING_OPTIONS_TEXT = '可选：`1=minimal` `2=low` `3=medium` `4=high` `5=xhigh`';
+
+function parseForceFlag(args: string): { args: string; force: boolean } {
+  const forcePattern = /(^|\s)--force(?=\s|$)/;
+  const force = forcePattern.test(args);
+  const cleaned = args.replace(/(^|\s)--force(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim();
+  return { args: cleaned, force };
+}
+
+function buildActiveTaskSwitchBlockedResponse(
+  store: ReturnType<typeof getBridgeContext>['store'],
+  binding: ChannelBinding,
+  markdown: boolean,
+): string {
+  const session = store.getSession(binding.codepilotSessionId);
+  return buildCommandFields(
+    '当前会话仍在运行',
+    [
+      ['标题', getSessionDisplayName(session, binding.workingDirectory)],
+      ['Session', binding.codepilotSessionId],
+    ],
+    [
+      '为避免旧任务完成后把回复发到已经切走的聊天，当前不直接切换绑定。',
+      '请先发送 `/stop` 停止当前任务；如果确认要强制切换，请在原命令末尾加 `--force`。',
+    ],
+    markdown,
+  );
+}
+
+function guardBindingChangeWhileRunning(
+  store: ReturnType<typeof getBridgeContext>['store'],
+  binding: ChannelBinding | null,
+  force: boolean,
+  deps: BridgeCommandDispatchDeps,
+  markdown: boolean,
+): string | null {
+  if (!binding || force) return null;
+  return deps.getActiveTask(binding.codepilotSessionId)
+    ? buildActiveTaskSwitchBlockedResponse(store, binding, markdown)
+    : null;
+}
+
+function auditCommandBindingChange(
+  action: BindingChangeAction,
+  msg: InboundMessage,
+  fromBinding: ChannelBinding | null | undefined,
+  toBinding: ChannelBinding | null | undefined,
+  reason?: string,
+): void {
+  recordBindingChange(getBridgeContext().store, {
+    action,
+    address: msg.address,
+    fromBinding,
+    toBinding,
+    messageId: msg.messageId,
+    source: 'im_command',
+    reason,
+  });
+}
 
 export interface BridgeCommandDispatchDeps {
   getActiveTask(sessionId: string): { abortController: AbortController } | undefined;
@@ -110,10 +169,22 @@ export async function handleBridgeCommand(
       break;
 
     case '/new': {
+      const parsedArgs = parseForceFlag(args);
+      const blocked = guardBindingChangeWhileRunning(
+        store,
+        currentBinding,
+        parsedArgs.force,
+        deps,
+        responseParseMode === 'Markdown',
+      );
+      if (blocked) {
+        response = blocked;
+        break;
+      }
       const currentSession = currentBinding
         ? store.getSession(currentBinding.codepilotSessionId)
         : null;
-      const resolved = resolveNewSessionWorkingDirectory(args, currentBinding, currentSession);
+      const resolved = resolveNewSessionWorkingDirectory(parsedArgs.args, currentBinding, currentSession);
       if (!resolved.ok) {
         response = resolved.message;
         break;
@@ -123,6 +194,13 @@ export async function handleBridgeCommand(
       ensureWorkingDirectoryExists(workDir);
       const binding = router.createBinding(msg.address, workDir);
       const session = store.getSession(binding.codepilotSessionId);
+      auditCommandBindingChange(
+        'new_session',
+        msg,
+        currentBinding,
+        binding,
+        parsedArgs.force ? 'forced' : undefined,
+      );
       response = buildCommandFields(
         '已新建会话',
         [
@@ -131,7 +209,7 @@ export async function handleBridgeCommand(
           ['模式', binding.mode],
         ],
         [
-          args.trim() ? '接下来直接发送文本即可继续。' : '已在当前工作目录下新建一个线程。接下来直接发送文本即可继续。',
+          parsedArgs.args.trim() ? '接下来直接发送文本即可继续。' : '已在当前工作目录下新建一个线程。接下来直接发送文本即可继续。',
           '如果当前聊天里已有旧任务在运行，它不会被终止，仍会在后台继续执行并可能稍后回消息。',
           '这是 IM 侧线程，当前只保证在 IM 中可继续；不会自动出现在 Codex Desktop 会话列表中。',
         ],
@@ -141,8 +219,21 @@ export async function handleBridgeCommand(
     }
 
     case '/thread': {
-      if (args === '0' || args === '0 reset') {
-        const draftSession = args === '0 reset'
+      const parsedArgs = parseForceFlag(args);
+      const threadArgs = parsedArgs.args;
+      if (threadArgs === '0' || threadArgs === '0 reset') {
+        const blocked = guardBindingChangeWhileRunning(
+          store,
+          currentBinding,
+          parsedArgs.force,
+          deps,
+          responseParseMode === 'Markdown',
+        );
+        if (blocked) {
+          response = blocked;
+          break;
+        }
+        const draftSession = threadArgs === '0 reset'
           ? resetDraftSession(msg.address)
           : getOrCreateDraftSession(store, msg.address);
         const binding = router.bindToSession(msg.address, draftSession.id);
@@ -155,8 +246,19 @@ export async function handleBridgeCommand(
           workingDirectory: draftSession.working_directory,
           model: draftSession.model || binding.model,
         });
+        const updatedBinding = store.getChannelBinding(msg.address.channelType, msg.address.chatId) || binding;
+        auditCommandBindingChange(
+          'switch_draft',
+          msg,
+          currentBinding,
+          updatedBinding,
+          [
+            threadArgs === '0 reset' ? 'reset' : null,
+            parsedArgs.force ? 'forced' : null,
+          ].filter(Boolean).join(', ') || undefined,
+        );
         response = buildCommandFields(
-          args === '0 reset' ? '已重置临时草稿线程' : '已切换到临时草稿线程',
+          threadArgs === '0 reset' ? '已重置临时草稿线程' : '已切换到临时草稿线程',
           [
             ['标题', getSessionDisplayName(draftSession, draftSession.working_directory)],
             ['目录', formatCommandPath(draftSession.working_directory)],
@@ -169,11 +271,11 @@ export async function handleBridgeCommand(
         break;
       }
 
-      if (!args) {
+      if (!threadArgs) {
         response = `用法：/thread <序号>，或 /thread 0 进入临时草稿线程；发送 /t all 查看最多 ${MAX_DESKTOP_THREAD_LIST_LIMIT} 条，或 /t n 100 查看最近 100 条桌面会话`;
         break;
       }
-      if (args === 'all') {
+      if (threadArgs === 'all') {
         const desktopSessions = getDisplayedDesktopThreads(MAX_DESKTOP_THREAD_LIST_LIMIT);
         if (!desktopSessions) {
           response = '读取桌面会话列表失败，请稍后重试。';
@@ -191,22 +293,34 @@ export async function handleBridgeCommand(
         break;
       }
 
+      const blocked = guardBindingChangeWhileRunning(
+        store,
+        currentBinding,
+        parsedArgs.force,
+        deps,
+        responseParseMode === 'Markdown',
+      );
+      if (blocked) {
+        response = blocked;
+        break;
+      }
+
       const displayedThreads = getDisplayedDesktopThreads(MAX_DESKTOP_THREAD_LIST_LIMIT);
       if (!displayedThreads) {
         response = '读取桌面会话列表失败，请稍后重试。';
         break;
       }
-      const threadPick = resolveByIndexOrPrefix(args, displayedThreads, (session) => session.threadId);
+      const threadPick = resolveByIndexOrPrefix(threadArgs, displayedThreads, (session) => session.threadId);
       if (threadPick.ambiguous) {
         response = '匹配到多个桌面会话，请先发送 `/t` 查看列表，再用 `/t 1` 这种序号切换。';
         break;
       }
       if (!threadPick.match) {
-        if (validateSessionId(args)) {
-          const desktop = getDesktopSessionByThreadIdSafe(args, 'thread switch');
+        if (validateSessionId(threadArgs)) {
+          const desktop = getDesktopSessionByThreadIdSafe(threadArgs, 'thread switch');
           let binding: ReturnType<typeof router.bindToSdkSession>;
           try {
-            binding = router.bindToSdkSession(msg.address, args, desktop ? {
+            binding = router.bindToSdkSession(msg.address, threadArgs, desktop ? {
               workingDirectory: desktop.cwd,
               displayName: desktop.title,
             } : undefined);
@@ -214,6 +328,13 @@ export async function handleBridgeCommand(
             response = toUserVisibleBindingError(error, '切换桌面会话失败。');
             break;
           }
+          auditCommandBindingChange(
+            'switch_desktop',
+            msg,
+            currentBinding,
+            binding,
+            parsedArgs.force ? 'forced' : undefined,
+          );
           const session = store.getSession(binding.codepilotSessionId);
           response = buildCommandFields(
             '已切换到桌面会话',
@@ -245,6 +366,13 @@ export async function handleBridgeCommand(
         response = toUserVisibleBindingError(error, '切换桌面会话失败。');
         break;
       }
+      auditCommandBindingChange(
+        'switch_desktop',
+        msg,
+        currentBinding,
+        binding,
+        parsedArgs.force ? 'forced' : undefined,
+      );
       response = buildCommandFields(
         '已切换到桌面会话',
         [
@@ -603,7 +731,26 @@ export async function handleBridgeCommand(
         response = '当前聊天还没有绑定任何会话。';
         break;
       }
+      const parsedArgs = parseForceFlag(args);
+      const blocked = guardBindingChangeWhileRunning(
+        store,
+        currentBinding,
+        parsedArgs.force,
+        deps,
+        responseParseMode === 'Markdown',
+      );
+      if (blocked) {
+        response = blocked;
+        break;
+      }
       store.deleteChannelBinding(currentBinding.id);
+      auditCommandBindingChange(
+        'unbind',
+        msg,
+        currentBinding,
+        null,
+        parsedArgs.force ? 'forced' : undefined,
+      );
       response = buildCommandFields(
         '已解绑当前聊天',
         [

@@ -1,5 +1,4 @@
-import type { BridgeStore } from './host.js';
-import { createAdapter, getRegisteredTypes, type BaseChannelAdapter } from './channel-adapter.js';
+import { createAdapter, type BaseChannelAdapter } from './channel-adapter.js';
 import type { InboundMessage } from './types.js';
 import { listConfiguredChannelInstances } from './bridge-channel-runtime.js';
 import {
@@ -22,7 +21,6 @@ export interface BridgeAdapterRuntimeState {
 }
 
 export interface CreateAdapterRuntimeDeps {
-  getStore(): Pick<BridgeStore, 'getSetting'>;
   notifyAdapterSetChanged(channelTypes: string[]): void;
   handleMessage(adapter: BaseChannelAdapter, msg: InboundMessage): Promise<void>;
   processWithSessionLock(sessionId: string, fn: () => Promise<void>): Promise<void>;
@@ -71,12 +69,9 @@ export function createAdapterRuntime(
 
   async function syncConfiguredAdapters(options: { startLoops: boolean }): Promise<void> {
     const state = getState();
-    const store = deps.getStore();
     let changed = false;
     const desiredInstances = listEnabledAdapterInstances(
       listConfiguredChannelInstances(),
-      getRegisteredTypes(),
-      (provider) => store.getSetting(`bridge_${provider}_enabled`) === 'true',
     );
     const plan = buildAdapterSyncPlan({
       currentAdapterIds: state.adapters.keys(),

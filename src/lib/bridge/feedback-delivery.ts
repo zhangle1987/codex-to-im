@@ -4,16 +4,13 @@ import type {
   OutboundAttachment,
   SendResult,
 } from './types.js';
-import { deliver, deliverRendered } from './delivery-layer.js';
+import { deliver } from './delivery-layer.js';
 import { getFeedbackParseMode, renderFeedbackText } from './bridge-channel-runtime.js';
-import { markdownToDiscordChunks } from './markdown/discord.js';
-import { markdownToTelegramChunks } from './markdown/telegram.js';
 import { supportsOutboundArtifacts } from './outbound-artifacts.js';
 
 /**
  * Render bridge-generated text through the channel's preferred parse mode.
- * Telegram/Discord/Feishu keep their channel-specific markdown path here so
- * notices, command responses, and model replies stay aligned.
+ * Feishu keeps Markdown so notices, command responses, and model replies stay aligned.
  */
 export async function deliverTextResponse(
   adapter: BaseChannelAdapter,
@@ -27,26 +24,6 @@ export async function deliverTextResponse(
   const parseMode = getFeedbackParseMode(adapter.channelType);
   const renderedText = renderFeedbackText(responseText, parseMode);
 
-  if (parseMode === 'Markdown' && adapter.channelType === 'telegram') {
-    const chunks = markdownToTelegramChunks(responseText, 4096);
-    if (chunks.length > 0) {
-      return deliverRendered(adapter, address, chunks, { sessionId, replyToMessageId });
-    }
-    return { ok: true };
-  }
-  if (parseMode === 'Markdown' && adapter.channelType === 'discord') {
-    const chunks = markdownToDiscordChunks(responseText, 2000);
-    for (let i = 0; i < chunks.length; i += 1) {
-      const result = await deliver(adapter, {
-        address,
-        text: chunks[i].text,
-        parseMode: 'Markdown',
-        replyToMessageId,
-      }, { sessionId });
-      if (!result.ok) return result;
-    }
-    return { ok: true };
-  }
   if (parseMode === 'Markdown' && adapter.provider === 'feishu') {
     return deliver(adapter, {
       address,

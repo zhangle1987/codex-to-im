@@ -8,7 +8,7 @@
 
 1. Run the local doctor script or inspect the workbench logs to identify the issue
 2. Check that Node.js >= 20 is installed: `node --version`
-3. Check that Claude Code CLI is available: `claude --version`
+3. Check that Codex CLI is available: `codex --version`
 4. Verify config exists: `ls -la ~/.codex-to-im/config.env`
 5. Check logs for startup errors in `~/.codex-to-im/logs/`
 
@@ -23,12 +23,11 @@
 
 **Steps**:
 
-1. Verify the bot token is valid with the local workbench test tools or doctor script
+1. Verify the channel credentials with the local workbench test tools or doctor script
 2. Check allowed user IDs in config -- if set, only listed users can interact
-3. For Telegram: ensure you've sent `/start` to the bot first
-4. For Discord: verify the bot has been invited to the server with message read permissions
-5. For Feishu: confirm the app has been approved and event subscriptions are configured
-6. Check recent logs for incoming message events under `~/.codex-to-im/logs/`
+3. For Feishu: confirm the app has been approved and event subscriptions are configured
+4. For Weixin: confirm the linked account is logged in and assigned to the channel instance
+5. Check recent logs for incoming message events under `~/.codex-to-im/logs/`
 
 ## Feishu streaming cards not working
 
@@ -52,12 +51,12 @@
 
 ## Permission timeout
 
-**Symptoms**: Claude Code session starts but times out waiting for tool approval.
+**Symptoms**: Codex session starts but times out waiting for tool approval.
 
 **Steps**:
 
-1. The bridge runs Claude Code in non-interactive mode; ensure your Claude Code configuration allows the necessary tools
-2. Consider using `--allowedTools` in your configuration to pre-approve common tools
+1. The bridge runs Codex through the SDK/CLI; ensure the configured sandbox and approval policy match the requested task
+2. Use the IM permission prompt to approve the requested tool, or adjust Codex approval settings if you expect unattended execution
 3. Check network connectivity if the timeout occurs during API calls
 
 ## High memory usage
@@ -71,7 +70,7 @@
    ```
    Stop the bridge, then start it again from the local workbench
    ```
-3. If the issue persists, check how many concurrent sessions are active -- each Claude Code session consumes memory
+3. If the issue persists, check how many concurrent sessions are active -- each Codex session consumes memory
 4. Review logs for error loops that may cause memory leaks
 
 ## Stale PID file

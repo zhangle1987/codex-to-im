@@ -1,5 +1,5 @@
 /**
- * Conversation Engine — processes inbound IM messages through Claude.
+ * Conversation Engine — processes inbound IM messages through the configured LLM provider.
  *
  * Takes a ChannelBinding + inbound message, calls the LLM provider,
  * consumes the SSE stream server-side, saves messages to DB,
@@ -125,7 +125,7 @@ export function buildConversationPromptText(text: string, files: PersistedAttach
 }
 
 /**
- * Process an inbound message: send to Claude, consume the response stream,
+ * Process an inbound message: send to the LLM provider, consume the response stream,
  * save to DB, and return the result.
  */
 export async function processMessage(

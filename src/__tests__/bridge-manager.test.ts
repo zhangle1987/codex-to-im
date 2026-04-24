@@ -882,7 +882,7 @@ describe('bridge-manager status formatting', () => {
     }
   });
 
-  it('refreshes mirror stream status with runtime and idle time during long-running turns', () => {
+  it('refreshes mirror stream status with runtime and last response age during long-running turns', () => {
     _testOnly.resetStateForTests();
     const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
     const statusEvents: string[] = [];
@@ -903,6 +903,7 @@ describe('bridge-manager status formatting', () => {
         streamKey: 'mirror:session-1:turn-1',
         startedAt: '2026-03-25T08:00:00.000Z',
         lastActivityAt: '2026-03-25T08:04:40.000Z',
+        lastResponseAt: '2026-03-25T08:04:40.000Z',
         lastStatusText: null,
         lastStatusAt: 0,
         userText: 'desktop prompt',
@@ -925,7 +926,7 @@ describe('bridge-manager status formatting', () => {
     );
 
     assert.deepEqual(statusEvents, [
-      'status:mirror:session-1:turn-1:已运行 5m，最近 20s 无新输出',
+      'status:mirror:session-1:turn-1:已运行 5分，上次响应距今 20秒',
     ]);
   });
 
@@ -1711,7 +1712,7 @@ describe('bridge-manager mirror subscription recovery', () => {
 describe('bridge-manager invalid adapter logging', () => {
   beforeEach(() => {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
-    registerAdapterFactory('invalid-test', (instance) => new InvalidConfigAdapter(instance as any));
+    registerAdapterFactory('feishu', (instance) => new InvalidConfigAdapter(instance as any));
     _testOnly.resetStateForTests();
   });
 
@@ -1719,9 +1720,9 @@ describe('bridge-manager invalid adapter logging', () => {
     const settings = makeSettings();
     settings.set('bridge_channel_instances_json', JSON.stringify([
       {
-        id: 'invalid-test-main',
-        provider: 'invalid-test',
-        alias: 'Invalid Test',
+        id: 'feishu-invalid-main',
+        provider: 'feishu',
+        alias: 'Invalid Feishu',
         enabled: true,
         config: {},
       },
@@ -1749,7 +1750,7 @@ describe('bridge-manager invalid adapter logging', () => {
       console.warn = originalWarn;
     }
 
-    const matching = warnings.filter((line) => line.includes('invalid-test-main adapter not valid'));
+    const matching = warnings.filter((line) => line.includes('feishu-invalid-main adapter not valid'));
     assert.equal(matching.length, 1);
   });
 
@@ -1790,13 +1791,13 @@ describe('bridge-manager invalid adapter logging', () => {
 
   it('does not retain adapters that fail during start', async () => {
     ThrowStartAdapter.stopCalls = [];
-    registerAdapterFactory('throw-start-test', (instance) => new ThrowStartAdapter(instance as any));
+    registerAdapterFactory('feishu', (instance) => new ThrowStartAdapter(instance as any));
 
     const settings = makeSettings();
     settings.set('bridge_channel_instances_json', JSON.stringify([
       {
-        id: 'throw-start-main',
-        provider: 'throw-start-test',
+        id: 'feishu-throw-start-main',
+        provider: 'feishu',
         alias: 'Throw Start',
         enabled: true,
         config: {},
@@ -1815,9 +1816,9 @@ describe('bridge-manager invalid adapter logging', () => {
     const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
     await _testOnly.syncConfiguredAdapters({ startLoops: false });
 
-    assert.equal(state.adapters.has('throw-start-main'), false);
-    assert.equal(state.adapterMeta.has('throw-start-main'), false);
-    assert.deepEqual(ThrowStartAdapter.stopCalls, ['throw-start-main']);
+    assert.equal(state.adapters.has('feishu-throw-start-main'), false);
+    assert.equal(state.adapterMeta.has('feishu-throw-start-main'), false);
+    assert.deepEqual(ThrowStartAdapter.stopCalls, ['feishu-throw-start-main']);
   });
 });
 
@@ -1890,7 +1891,7 @@ describe('bridge-manager new session handling', () => {
     _testOnly.resetStateForTests();
   });
 
-  it('keeps the current task running when /new creates another IM session', async () => {
+  it('keeps the current task running when /new --force creates another IM session', async () => {
     const sent: string[] = [];
     const adapter: any = {
       channelType: 'feishu',
@@ -1926,7 +1927,7 @@ describe('bridge-manager new session handling', () => {
     await _testOnly.handleMessage(adapter, {
       messageId: 'incoming-new',
       address,
-      text: `/new ${newWorkDir}`,
+      text: `/new ${newWorkDir} --force`,
       timestamp: Date.now(),
     });
 

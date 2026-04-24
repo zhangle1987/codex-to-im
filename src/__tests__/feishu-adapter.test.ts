@@ -107,12 +107,12 @@ describe('feishu-adapter structured streaming regions', () => {
     };
 
     await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
-    adapter.onStreamStatus('chat-1', '已运行 10s，最近 10s 无新输出', 'stream-1');
+    adapter.onStreamStatus('chat-1', '已运行 10秒，上次响应距今 10秒', 'stream-1');
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     assert.ok(elementUpdates.some((update) =>
       update.path?.element_id === 'streaming_status'
-      && update.data?.content === '已运行 10s，最近 10s 无新输出'));
+      && update.data?.content === '已运行 10秒，上次响应距今 10秒'));
     assert.ok(elementUpdates.every((update) =>
       update.path?.element_id !== 'streaming_content'
       && update.path?.element_id !== 'streaming_tools'));
@@ -265,7 +265,7 @@ describe('feishu-adapter structured streaming regions', () => {
     await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
     const state = (adapter as any).activeCards.get('stream-1');
     state.toolCalls = [{ id: 'tool-1', name: 'shell_command', status: 'running' }];
-    state.pendingStatusText = '已运行 10s，最近 10s 无新输出';
+    state.pendingStatusText = '已运行 10秒，上次响应距今 10秒';
 
     await (adapter as any).flushCardUpdate('stream-1');
 
@@ -274,7 +274,7 @@ describe('feishu-adapter structured streaming regions', () => {
       ['streaming_tools', 'streaming_status'],
     );
     assert.equal(state.renderedToolsText, '');
-    assert.equal(state.renderedStatusText, '已运行 10s，最近 10s 无新输出');
+    assert.equal(state.renderedStatusText, '已运行 10秒，上次响应距今 10秒');
   });
 
   it('releases the flush queue after a timed-out update so later refreshes can continue', async () => {
@@ -326,14 +326,14 @@ describe('feishu-adapter structured streaming regions', () => {
     adapter.onStreamText('chat-1', '第一段输出', 'stream-1');
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    adapter.onStreamStatus('chat-1', '已运行 20s', 'stream-1');
+    adapter.onStreamStatus('chat-1', '已运行 0分20秒', 'stream-1');
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     const state = (adapter as any).activeCards.get('stream-1');
     assert.equal(Boolean(state.flushInFlight), false);
     assert.ok(elementUpdates.some((update) =>
       update.path?.element_id === 'streaming_status'
-      && update.data?.content === '已运行 20s'));
+      && update.data?.content === '已运行 0分20秒'));
     assert.equal(state.lastFlushError, null);
     assert.equal(state.consecutiveFlushFailures, 0);
 

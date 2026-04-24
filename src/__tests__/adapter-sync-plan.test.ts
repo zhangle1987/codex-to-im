@@ -9,7 +9,7 @@ import {
 } from '../lib/bridge/adapter-sync-plan.js';
 
 describe('adapter-sync-plan listEnabledAdapterInstances', () => {
-  it('merges enabled configured instances with enabled legacy providers', () => {
+  it('returns enabled configured instances', () => {
     const instances = listEnabledAdapterInstances(
       [
         {
@@ -30,9 +30,25 @@ describe('adapter-sync-plan listEnabledAdapterInstances', () => {
           enabled: true,
           config: { accountId: 'wx-1' },
         },
+        {
+          id: 'feishu-disabled',
+          provider: 'feishu',
+          alias: '禁用飞书',
+          createdAt: '2026-04-13T00:00:00.000Z',
+          updatedAt: '2026-04-13T00:00:00.000Z',
+          enabled: false,
+          config: { appId: 'disabled' },
+        },
+        {
+          id: 'telegram-old',
+          provider: 'telegram',
+          alias: 'Telegram',
+          createdAt: '2026-04-13T00:00:00.000Z',
+          updatedAt: '2026-04-13T00:00:00.000Z',
+          enabled: true,
+          config: {},
+        } as never,
       ],
-      ['feishu', 'weixin', 'telegram', 'discord', 'qq'],
-      (provider) => provider === 'discord' || provider === 'qq' || provider === 'weixin',
     );
 
     assert.deepEqual(instances, [
@@ -50,20 +66,6 @@ describe('adapter-sync-plan listEnabledAdapterInstances', () => {
         enabled: true,
         config: { accountId: 'wx-1' },
       },
-      {
-        id: 'discord',
-        provider: 'discord',
-        alias: 'discord',
-        enabled: true,
-        config: {},
-      },
-      {
-        id: 'qq',
-        provider: 'qq',
-        alias: 'qq',
-        enabled: true,
-        config: {},
-      },
     ]);
   });
 });
@@ -72,22 +74,22 @@ describe('adapter-sync-plan buildAdapterSyncPlan', () => {
   it('computes stop, cleanup, and restart actions from desired instances', () => {
     const same = {
       id: 'same',
-      provider: 'discord',
-      alias: 'Discord',
+      provider: 'feishu',
+      alias: 'Feishu',
       enabled: true,
       config: { appId: 'same' },
     };
     const restart = {
       id: 'restart',
-      provider: 'telegram',
-      alias: 'Telegram',
+      provider: 'feishu',
+      alias: 'Feishu Restart',
       enabled: true,
       config: { appId: 'new' },
     };
     const created = {
       id: 'created',
-      provider: 'qq',
-      alias: 'QQ',
+      provider: 'weixin',
+      alias: 'Weixin',
       enabled: true,
       config: {},
     };

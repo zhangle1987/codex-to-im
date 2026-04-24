@@ -59,7 +59,7 @@ describe('JsonFileStore', () => {
   it('upsertChannelBinding creates and updates', () => {
     const store = new JsonFileStore(makeSettings());
     const b1 = store.upsertChannelBinding({
-      channelType: 'telegram',
+      channelType: 'feishu-default',
       chatId: '123',
       chatUserId: 'user-1',
       chatDisplayName: 'Alice',
@@ -69,14 +69,14 @@ describe('JsonFileStore', () => {
       mode: 'code',
     });
     assert.ok(b1.id);
-    assert.equal(b1.channelType, 'telegram');
+    assert.equal(b1.channelType, 'feishu-default');
     assert.equal(b1.chatId, '123');
     assert.equal(b1.chatUserId, 'user-1');
     assert.equal(b1.chatDisplayName, 'Alice');
 
     // Upsert same channel+chat should update
     const b2 = store.upsertChannelBinding({
-      channelType: 'telegram',
+      channelType: 'feishu-default',
       chatId: '123',
       chatDisplayName: 'Alice Cooper',
       codepilotSessionId: 'sess-2',
@@ -96,7 +96,7 @@ describe('JsonFileStore', () => {
     settings.set('bridge_default_mode', 'plan');
     const store = new JsonFileStore(settings);
     const b = store.upsertChannelBinding({
-      channelType: 'telegram',
+      channelType: 'feishu-default',
       chatId: '456',
       codepilotSessionId: 'sess-1',
       workingDirectory: '/tmp',
@@ -107,13 +107,13 @@ describe('JsonFileStore', () => {
 
   it('getChannelBinding returns null for missing', () => {
     const store = new JsonFileStore(makeSettings());
-    assert.equal(store.getChannelBinding('telegram', 'missing'), null);
+    assert.equal(store.getChannelBinding('feishu-default', 'missing'), null);
   });
 
   it('deleteChannelBinding removes the binding by id', () => {
     const store = new JsonFileStore(makeSettings());
     const binding = store.upsertChannelBinding({
-      channelType: 'telegram',
+      channelType: 'feishu-default',
       chatId: 'delete-binding',
       codepilotSessionId: 'sess-1',
       workingDirectory: '/tmp',
@@ -122,27 +122,27 @@ describe('JsonFileStore', () => {
 
     store.deleteChannelBinding(binding.id);
 
-    assert.equal(store.getChannelBinding('telegram', 'delete-binding'), null);
+    assert.equal(store.getChannelBinding('feishu-default', 'delete-binding'), null);
   });
 
   it('listChannelBindings filters by type', () => {
     const store = new JsonFileStore(makeSettings());
     store.upsertChannelBinding({
-      channelType: 'telegram',
+      channelType: 'feishu-default',
       chatId: '1',
       codepilotSessionId: 's1',
       workingDirectory: '/tmp',
       model: 'm',
     });
     store.upsertChannelBinding({
-      channelType: 'discord',
+      channelType: 'weixin-default',
       chatId: '2',
       codepilotSessionId: 's2',
       workingDirectory: '/tmp',
       model: 'm',
     });
-    assert.equal(store.listChannelBindings('telegram').length, 1);
-    assert.equal(store.listChannelBindings('discord').length, 1);
+    assert.equal(store.listChannelBindings('feishu-default').length, 1);
+    assert.equal(store.listChannelBindings('weixin-default').length, 1);
     assert.equal(store.listChannelBindings().length, 2);
   });
 
@@ -361,7 +361,7 @@ describe('JsonFileStore', () => {
     const store = new JsonFileStore(makeSettings());
     store.insertPermissionLink({
       permissionRequestId: 'pr-1',
-      channelType: 'telegram',
+      channelType: 'feishu-default',
       chatId: '123',
       messageId: 'msg-1',
       sessionId: 'sess-1',
@@ -379,7 +379,7 @@ describe('JsonFileStore', () => {
     const store = new JsonFileStore(makeSettings());
     store.insertPermissionLink({
       permissionRequestId: 'pr-2',
-      channelType: 'telegram',
+      channelType: 'feishu-default',
       chatId: '123',
       messageId: 'msg-2',
       sessionId: 'sess-1',
@@ -397,7 +397,7 @@ describe('JsonFileStore', () => {
     const store = new JsonFileStore(makeSettings());
     store.insertPermissionLink({
       permissionRequestId: 'pr-a',
-      channelType: 'qq',
+      channelType: 'weixin-default',
       chatId: 'chat-1',
       messageId: 'msg-a',
       sessionId: 'sess-a',
@@ -406,7 +406,7 @@ describe('JsonFileStore', () => {
     });
     store.insertPermissionLink({
       permissionRequestId: 'pr-b',
-      channelType: 'qq',
+      channelType: 'weixin-default',
       chatId: 'chat-1',
       messageId: 'msg-b',
       sessionId: 'sess-b',
@@ -415,7 +415,7 @@ describe('JsonFileStore', () => {
     });
     store.insertPermissionLink({
       permissionRequestId: 'pr-c',
-      channelType: 'qq',
+      channelType: 'weixin-default',
       chatId: 'chat-2',
       messageId: 'msg-c',
       sessionId: 'sess-c',
@@ -458,7 +458,7 @@ describe('JsonFileStore', () => {
     const store = new JsonFileStore(makeSettings());
     for (let i = 0; i < 1010; i++) {
       store.insertAuditLog({
-        channelType: 'telegram',
+        channelType: 'feishu-default',
         chatId: '123',
         direction: 'inbound',
         messageId: `msg-${i}`,
@@ -477,8 +477,8 @@ describe('JsonFileStore', () => {
 
   it('setChannelOffset and getChannelOffset round-trip', () => {
     const store = new JsonFileStore(makeSettings());
-    store.setChannelOffset('tg:offset', '12345');
-    assert.equal(store.getChannelOffset('tg:offset'), '12345');
+    store.setChannelOffset('feishu:offset', '12345');
+    assert.equal(store.getChannelOffset('feishu:offset'), '12345');
   });
 
   // ── SDK Session ──
@@ -487,14 +487,14 @@ describe('JsonFileStore', () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createSession('test', 'model', undefined, '/tmp');
     store.upsertChannelBinding({
-      channelType: 'telegram',
+      channelType: 'feishu-default',
       chatId: '1',
       codepilotSessionId: session.id,
       workingDirectory: '/tmp',
       model: 'model',
     });
     store.updateSdkSessionId(session.id, 'sdk-123');
-    const binding = store.getChannelBinding('telegram', '1');
+    const binding = store.getChannelBinding('feishu-default', '1');
     assert.equal(binding?.sdkSessionId, 'sdk-123');
   });
 
@@ -542,7 +542,7 @@ describe('JsonFileStore', () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createSession('test', 'model', undefined, '/tmp');
     store.upsertChannelBinding({
-      channelType: 'telegram',
+      channelType: 'feishu-default',
       chatId: 'delete-me',
       codepilotSessionId: session.id,
       workingDirectory: '/tmp',
@@ -551,7 +551,7 @@ describe('JsonFileStore', () => {
     store.addMessage(session.id, 'user', 'hello');
     store.deleteSession(session.id);
     assert.equal(store.getSession(session.id), null);
-    assert.equal(store.getChannelBinding('telegram', 'delete-me'), null);
+    assert.equal(store.getChannelBinding('feishu-default', 'delete-me'), null);
     assert.deepEqual(store.getMessages(session.id).messages, []);
   });
 
