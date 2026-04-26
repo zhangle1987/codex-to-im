@@ -630,14 +630,15 @@ export async function handleBridgeCommand(
       }
 
       const binding = currentBinding || router.resolve(msg.address);
-      const targetSessionId = args.trim() || binding.codepilotSessionId;
+      const explicitTargetSessionId = args.trim();
+      const targetSessionId = explicitTargetSessionId || binding.codepilotSessionId;
       const diagnosis = await deps.diagnoseSessionHealth(targetSessionId);
       if (!diagnosis) {
         response = `没有找到会话 ${targetSessionId}。`;
         break;
       }
       response = buildHealthCommandResponse(
-        '当前会话健康检查',
+        explicitTargetSessionId ? '指定会话健康检查' : '当前会话健康检查',
         diagnosis,
         responseParseMode === 'Markdown',
       );

@@ -149,6 +149,7 @@ describe('command-dispatch', () => {
         getActiveTask: () => undefined,
         diagnoseSessionHealth: async (sessionId) => ({
           sessionId,
+          checkedAt: '2026-04-13T12:05:00.000Z',
           runtimeStatus: 'running',
           healthStatus: 'slow_observed',
           healthReason: '最近 10 到 30 分钟内没有新进展，先标记为待观察。',
@@ -172,9 +173,68 @@ describe('command-dispatch', () => {
 
     const response = sent[0] || '';
     assert.match(response, /当前会话健康检查/);
+    assert.match(response, /检查时间/);
     assert.match(response, new RegExp(binding.codepilotSessionId));
     assert.match(response, /长时运行，待观察/);
     assert.match(response, /shell_command/);
+  });
+
+  it('renders // diagnostics for an explicit session id', async () => {
+    initTestContext();
+    const sent: string[] = [];
+    const requestedSessionIds: string[] = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: 'reply-health-explicit' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-health-explicit' } as const;
+    router.createBinding(address, 'D:\\workspace\\health-current');
+    const explicitSessionId = 'fbfa3ff0-6226-4f79-99b5-7704754433fb';
+
+    await handleBridgeCommand(
+      adapter,
+      {
+        address,
+        text: `// ${explicitSessionId}`,
+        messageId: 'incoming-health-explicit',
+      } as any,
+      `// ${explicitSessionId}`,
+      {
+        getActiveTask: () => undefined,
+        diagnoseSessionHealth: async (sessionId) => {
+          requestedSessionIds.push(sessionId);
+          return {
+            sessionId,
+            checkedAt: '2026-04-13T12:05:00.000Z',
+            runtimeStatus: 'idle',
+            healthStatus: 'completed',
+            healthReason: '任务已完成。',
+            lastProgressAt: '2026-04-13T12:00:00.000Z',
+            lastProgressType: 'task_completed',
+            activeToolName: null,
+            activeToolStartedAt: null,
+            lastToolFinishedAt: null,
+            lastStreamUiAttemptAt: null,
+            lastStreamUiUpdateAt: null,
+            streamUiFlushStartedAt: null,
+            lastStreamUiErrorAt: null,
+            lastStreamUiError: null,
+            streamUiConsecutiveFailures: 0,
+            sdkSessionId: null,
+            processProbe: null,
+          };
+        },
+        diagnoseAllActiveSessions: async () => [],
+      },
+    );
+
+    assert.deepEqual(requestedSessionIds, [explicitSessionId]);
+    const response = sent[0] || '';
+    assert.match(response, /指定会话健康检查/);
+    assert.match(response, new RegExp(explicitSessionId));
   });
 
   it('renders /status for a chat that is still on the draft thread', async () => {

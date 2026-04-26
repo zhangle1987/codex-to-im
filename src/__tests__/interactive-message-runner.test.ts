@@ -28,6 +28,8 @@ class FakeFeishuStreamingAdapter extends BaseChannelAdapter {
   readonly streamedTexts: string[] = [];
   readonly streamedStatuses: string[] = [];
   readonly streamEnds: Array<{ status: 'completed' | 'interrupted' | 'error'; text: string }> = [];
+  readonly messageStarts: Array<{ chatId: string; streamKey?: string }> = [];
+  readonly messageEnds: Array<{ chatId: string; streamKey?: string }> = [];
   private streamUiActive = false;
 
   async start(): Promise<void> {}
@@ -46,6 +48,14 @@ class FakeFeishuStreamingAdapter extends BaseChannelAdapter {
 
   hasActiveStreamingUi(): boolean {
     return this.streamUiActive;
+  }
+
+  onMessageStart(chatId: string, streamKey?: string): void {
+    this.messageStarts.push({ chatId, streamKey });
+  }
+
+  onMessageEnd(chatId: string, streamKey?: string): void {
+    this.messageEnds.push({ chatId, streamKey });
   }
 
   onStreamText(_chatId: string, fullText: string): void {
@@ -186,7 +196,6 @@ describe('interactive-message-runner', () => {
           const task = taskStateMap.get(sessionId);
           if (task?.id !== taskId) return;
           task.lastActivityAt = clock.now();
-          task.idleReminderSent = false;
         },
         recordInteractiveHealthStart() {},
         recordInteractiveHealthProgress() {},
@@ -244,6 +253,117 @@ describe('interactive-message-runner', () => {
     const statusCountAfterFinish = adapter.streamedStatuses.length;
     clock.advance(10_000);
     assert.equal(adapter.streamedStatuses.length, statusCountAfterFinish);
+    assert.equal(adapter.messageStarts.length, 1);
+    assert.equal(adapter.messageEnds.length, 1);
+  });
+
+  it('finalizes a hanging task from an external terminal desktop event', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-external-terminal',
+      userId: 'user-external-terminal',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\external-terminal');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const clock = createManualIntervalClock();
+    const processStarted = createDeferred<void>();
+    const neverFinish = createDeferred<{
+      responseText: string;
+      outboundAttachments: [];
+      tokenUsage: null;
+      hasError: boolean;
+      errorMessage: string;
+      permissionRequests: [];
+      sdkSessionId: null;
+    }>();
+    const deliveredTexts: string[] = [];
+    const healthEnds: Array<{ outcome: string; detail?: string }> = [];
+
+    const runPromise = runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-external-terminal-1',
+        address,
+        text: 'hello',
+        timestamp: clock.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = clock.now();
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd(_sessionId, outcome, detail) {
+          healthEnds.push({ outcome, detail });
+        },
+        beginMirrorSuppression() { return 'suppression-external-terminal'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse(_adapter, _address, responseText) {
+          deliveredTexts.push(responseText);
+        },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
+          onPartialText?.('第一段输出');
+          processStarted.resolve();
+          return neverFinish.promise;
+        },
+        nowMs: () => clock.now(),
+        setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
+        clearIntervalFn: (handle) => clock.clearInterval(handle),
+        streamStatusIdleDetectionStartMs: 10_000,
+        streamStatusHeartbeatMs: 10_000,
+      },
+    );
+
+    await processStarted.promise;
+    const sessionId = Array.from(taskStateMap.keys())[0];
+    assert.ok(sessionId);
+    const task = taskStateMap.get(sessionId);
+    assert.ok(task?.finalizeFromExternalTerminal);
+
+    const finalized = await task.finalizeFromExternalTerminal(
+      'completed',
+      '检测到桌面线程已完成当前任务。',
+      '桌面最终回复',
+    );
+    await runPromise;
+
+    assert.equal(finalized, false);
+    assert.deepEqual(adapter.streamEnds, [{ status: 'completed', text: '桌面最终回复' }]);
+    assert.deepEqual(deliveredTexts, ['桌面最终回复']);
+    assert.deepEqual(healthEnds, [{
+      outcome: 'completed',
+      detail: '检测到桌面线程已完成当前任务。',
+    }]);
+    assert.equal(taskStateMap.size, 0);
+    assert.equal(clock.activeCount(), 0);
+    assert.equal(adapter.messageStarts.length, 1);
+    assert.equal(adapter.messageEnds.length, 1);
+
+    const statusCountAfterFinish = adapter.streamedStatuses.length;
+    clock.advance(10_000);
+    assert.equal(adapter.streamedStatuses.length, statusCountAfterFinish);
   });
 
   it('does not show silence before the configured startup threshold', async () => {
@@ -281,7 +401,6 @@ describe('interactive-message-runner', () => {
           const task = taskStateMap.get(sessionId);
           if (task?.id !== taskId) return;
           task.lastActivityAt = clock.now();
-          task.idleReminderSent = false;
         },
         recordInteractiveHealthStart() {},
         recordInteractiveHealthProgress() {},
@@ -370,7 +489,6 @@ describe('interactive-message-runner', () => {
           const task = taskStateMap.get(sessionId);
           if (task?.id !== taskId) return;
           task.lastActivityAt = Date.now();
-          task.idleReminderSent = false;
         },
         recordInteractiveHealthStart() {},
         recordInteractiveHealthProgress() {},
@@ -452,7 +570,6 @@ describe('interactive-message-runner', () => {
           const task = taskStateMap.get(sessionId);
           if (task?.id !== taskId) return;
           task.lastActivityAt = Date.now();
-          task.idleReminderSent = false;
         },
         recordInteractiveHealthStart() {},
         recordInteractiveHealthProgress() {},
@@ -527,7 +644,6 @@ describe('interactive-message-runner', () => {
           const task = taskStateMap.get(sessionId);
           if (task?.id !== taskId) return;
           task.lastActivityAt = Date.now();
-          task.idleReminderSent = false;
         },
         recordInteractiveHealthStart() {},
         recordInteractiveHealthProgress() {},
@@ -619,7 +735,6 @@ describe('interactive-message-runner', () => {
           const task = taskStateMap.get(sessionId);
           if (task?.id !== taskId) return;
           task.lastActivityAt = clock.now();
-          task.idleReminderSent = false;
         },
         recordInteractiveHealthStart() {},
         recordInteractiveHealthProgress() {},

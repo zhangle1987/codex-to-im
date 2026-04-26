@@ -76,7 +76,7 @@ export function createSessionHealthRuntime(
   function updateSessionHealth(
     sessionId: string,
     updates: Partial<BridgeSession>,
-    options?: { force?: boolean },
+    options?: { force?: boolean; touch?: boolean },
   ): void {
     const store = deps.getStore();
     const session = store.getSession(sessionId);
@@ -94,7 +94,7 @@ export function createSessionHealthRuntime(
     }
 
     if (!changed) return;
-    store.updateSession(sessionId, next);
+    store.updateSession(sessionId, next, { touch: options?.touch });
   }
 
   function maybePersistProgress(
@@ -229,6 +229,11 @@ export function createSessionHealthRuntime(
       active_tool_name: undefined,
       active_tool_started_at: undefined,
       stream_ui_flush_started_at: undefined,
+      last_stream_ui_attempt_at: undefined,
+      last_stream_ui_update_at: undefined,
+      last_stream_ui_error_at: undefined,
+      last_stream_ui_error: undefined,
+      stream_ui_consecutive_failures: undefined,
       last_health_check_at: nowIso,
     }, { force: true });
     lastProgressPersistAt.set(sessionId, Date.now());
@@ -255,6 +260,12 @@ export function createSessionHealthRuntime(
       updates.stream_ui_consecutive_failures = snapshot.consecutiveFailures && snapshot.consecutiveFailures > 0
         ? snapshot.consecutiveFailures
         : undefined;
+    } else {
+      updates.last_stream_ui_attempt_at = undefined;
+      updates.last_stream_ui_update_at = undefined;
+      updates.last_stream_ui_error_at = undefined;
+      updates.last_stream_ui_error = undefined;
+      updates.stream_ui_consecutive_failures = undefined;
     }
 
     updateSessionHealth(sessionId, updates);
@@ -327,7 +338,7 @@ export function createSessionHealthRuntime(
       updateSessionHealth(session.id, {
         health_status: diagnosis.healthStatus,
         health_reason: diagnosis.healthReason,
-      });
+      }, { touch: false });
     }
   }
 
@@ -356,18 +367,23 @@ export function createSessionHealthRuntime(
 
     const base = computeBaseDiagnosis(session, Date.now());
     const processProbe = await loadProcessProbe(session);
+    const checkedAt = deps.nowIso();
     const diagnosis = applyStreamUiDiagnosis(
       applyProcessProbeDiagnosis(base, processProbe),
       Date.now(),
     );
+    const checkedDiagnosis: SessionHealthDiagnosis = {
+      ...diagnosis,
+      checkedAt,
+    };
 
     updateSessionHealth(sessionId, {
-      health_status: diagnosis.healthStatus,
-      health_reason: diagnosis.healthReason,
-      last_health_check_at: deps.nowIso(),
-    });
+      health_status: checkedDiagnosis.healthStatus,
+      health_reason: checkedDiagnosis.healthReason,
+      last_health_check_at: checkedAt,
+    }, { touch: false });
 
-    return diagnosis;
+    return checkedDiagnosis;
   }
 
   async function diagnoseAllActiveSessions(): Promise<SessionHealthDiagnosis[]> {

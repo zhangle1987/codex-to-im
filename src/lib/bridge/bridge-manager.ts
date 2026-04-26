@@ -114,12 +114,12 @@ const MIRROR_WATCH_DEBOUNCE_MS = 350;
 const MIRROR_EVENT_BATCH_LIMIT = 8;
 const MIRROR_SUPPRESSION_WINDOW_MS = 4_000;
 const MIRROR_PROMPT_MATCH_GRACE_MS = 120_000;
-const INTERACTIVE_IDLE_REMINDER_MS = 600_000;
 const MIRROR_STREAM_STATUS_IDLE_START_MS = 180_000;
 const MIRROR_STREAM_STATUS_HEARTBEAT_MS = 10_000;
-// Idle timeout after the last desktop event before we flush a buffered turn
-// without seeing task_complete.
-const MIRROR_IDLE_TIMEOUT_MS = 600_000;
+// Timeout after the last desktop event before we flush a buffered mirror turn
+// without seeing task_complete. This is an internal mirror buffer guard, not an
+// IM idle reminder.
+const MIRROR_TURN_BUFFER_TIMEOUT_MS = 600_000;
 
 // ── Streaming preview helpers ──────────────────────────────────
 
@@ -235,8 +235,6 @@ function getState(): BridgeManagerState {
 }
 
 const INTERACTIVE_RUNTIME = createInteractiveRuntime(getState, {
-  idleReminderMs: INTERACTIVE_IDLE_REMINDER_MS,
-}, {
   getStore: () => getBridgeContext().store,
   nowIso,
 });
@@ -668,7 +666,7 @@ function flushTimedOutMirrorTurn(
   subscription: DesktopMirrorSubscription,
   nowMs = Date.now(),
 ): FinalizedDesktopMirrorTurn | null {
-  return flushTimedOutMirrorTurnBase(subscription, MIRROR_IDLE_TIMEOUT_MS, nowMs);
+  return flushTimedOutMirrorTurnBase(subscription, MIRROR_TURN_BUFFER_TIMEOUT_MS, nowMs);
 }
 
 function hasPendingMirrorWork(subscription: DesktopMirrorSubscription): boolean {
@@ -679,7 +677,33 @@ function consumeBufferedMirrorTurns(
   subscription: DesktopMirrorSubscription,
   nowMs = Date.now(),
 ): FinalizedDesktopMirrorTurn[] {
-  return consumeBufferedMirrorTurnsBase(subscription, MIRROR_IDLE_TIMEOUT_MS, nowMs, MIRROR_TURN_HOOKS);
+  return consumeBufferedMirrorTurnsBase(subscription, MIRROR_TURN_BUFFER_TIMEOUT_MS, nowMs, MIRROR_TURN_HOOKS);
+}
+
+function finalizeInteractiveTaskFromMirrorRecords(sessionId: string, records: DesktopMirrorRecord[]): Promise<boolean> {
+  let terminalRecord: DesktopMirrorRecord | null = null;
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record.type === 'task_complete' || record.type === 'task_aborted') {
+      terminalRecord = record;
+      break;
+    }
+  }
+  if (!terminalRecord) return Promise.resolve(false);
+
+  const outcome = terminalRecord.type === 'task_complete' ? 'completed' : 'aborted';
+  const detail = terminalRecord.type === 'task_complete'
+    ? '检测到桌面线程已完成当前任务。'
+    : '检测到桌面线程已停止当前任务。';
+  return INTERACTIVE_RUNTIME.finalizeTerminalActiveTask(
+    sessionId,
+    outcome,
+    detail,
+    terminalRecord.content,
+  ).catch((error) => {
+    console.error('[bridge-manager] Failed to finalize terminal interactive task:', describeUnknownError(error));
+    return false;
+  });
 }
 
 const MIRROR_RUNTIME = createMirrorRuntime(getState, {
@@ -696,6 +720,7 @@ const MIRROR_RUNTIME = createMirrorRuntime(getState, {
   filterSuppressedMirrorRecords,
   observeSessionHealthRecords: (sessionId, threadId, records) => {
     SESSION_HEALTH_RUNTIME.observeDesktopMirrorRecords(sessionId, threadId, records);
+    void finalizeInteractiveTaskFromMirrorRecords(sessionId, records);
   },
   consumeMirrorRecords,
   flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription),
@@ -776,15 +801,14 @@ export async function start(): Promise<void> {
     void ADAPTER_RUNTIME.syncConfiguredAdapters({ startLoops: true }).catch((err) => {
       console.error('[bridge-manager] Adapter reconcile failed:', err);
     });
-    void INTERACTIVE_RUNTIME.reconcileIdleInteractiveTasks().catch((err) => {
-      console.error('[bridge-manager] Interactive idle reminder reconcile failed:', err);
-    });
     try {
       SESSION_HEALTH_RUNTIME.reconcileSessionHealth();
-      INTERACTIVE_RUNTIME.reconcileTerminalSessionRuntimeState();
     } catch (err) {
       console.error('[bridge-manager] Session health reconcile failed:', describeUnknownError(err));
     }
+    void INTERACTIVE_RUNTIME.reconcileTerminalSessionRuntimeState().catch((err) => {
+      console.error('[bridge-manager] Terminal interactive reconcile failed:', describeUnknownError(err));
+    });
   }, 5_000);
 
   state.mirrorPollTimer = setInterval(() => {
@@ -1203,7 +1227,7 @@ export const _testOnly = {
   refreshMirrorStreamingStatus,
   filterSuppressedMirrorRecords,
   isMirrorSuppressed,
-  reconcileIdleInteractiveTasks: () => INTERACTIVE_RUNTIME.reconcileIdleInteractiveTasks(),
+  finalizeInteractiveTaskFromMirrorRecords,
   reconcileTerminalSessionRuntimeState: () => INTERACTIVE_RUNTIME.reconcileTerminalSessionRuntimeState(),
   beginMirrorSuppression,
   abortMirrorSuppression,

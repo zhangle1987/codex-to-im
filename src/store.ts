@@ -432,7 +432,7 @@ export class JsonFileStore implements BridgeStore {
     }
   }
 
-  updateSession(sessionId: string, updates: Partial<BridgeSession>): void {
+  updateSession(sessionId: string, updates: Partial<BridgeSession>, options?: { touch?: boolean }): void {
     this.reloadSessions();
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -440,7 +440,7 @@ export class JsonFileStore implements BridgeStore {
       ...session,
       ...updates,
       id: session.id,
-      updated_at: now(),
+      updated_at: options?.touch === false ? session.updated_at : now(),
     };
     this.sessions.set(sessionId, next);
     this.persistSessions();

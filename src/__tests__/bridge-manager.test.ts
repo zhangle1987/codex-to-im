@@ -1822,62 +1822,6 @@ describe('bridge-manager invalid adapter logging', () => {
   });
 });
 
-describe('bridge-manager idle reminder handling', () => {
-  beforeEach(() => {
-    fs.rmSync(DATA_DIR, { recursive: true, force: true });
-    const store = new JsonFileStore(makeSettings());
-    initBridgeContext({
-      store,
-      llm: noopLlm,
-      permissions: noopPermissions,
-      lifecycle: noopLifecycle,
-    });
-    _testOnly.resetStateForTests();
-  });
-
-  it('sends a 10-minute idle reminder without aborting the active IM task', async () => {
-    const sent: Array<{ text: string; replyToMessageId?: string }> = [];
-    const adapter: any = {
-      channelType: 'feishu',
-      send: async (message: { text: string; replyToMessageId?: string }) => {
-        sent.push({ text: message.text, replyToMessageId: message.replyToMessageId });
-        return { ok: true, messageId: 'msg-reminder' };
-      },
-    };
-    const address = { channelType: 'feishu', chatId: 'chat-reminder' } as const;
-    const binding = router.createBinding(address, 'D:\\workspace\\reminder');
-
-    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
-    const abortController = new AbortController();
-    state.activeTasks.set(binding.codepilotSessionId, {
-      id: 'task-reminder',
-      abortController,
-      adapter,
-      address,
-      requestMessageId: 'incoming-reminder',
-      streamKey: 'stream-reminder',
-      sessionId: binding.codepilotSessionId,
-      hasStreamingCards: false,
-      structuredStreamUiActive: false,
-      lastActivityAt: Date.now() - (10 * 60 * 1000) - 1,
-      idleReminderSent: false,
-      streamFinalized: false,
-      uiEnded: false,
-      mirrorSuppressionId: null,
-    });
-
-    await _testOnly.reconcileIdleInteractiveTasks();
-    await _testOnly.reconcileIdleInteractiveTasks();
-
-    assert.equal(abortController.signal.aborted, false);
-    assert.equal(sent.length, 1);
-    assert.match(sent[0].text, /超过 10 分钟没有新的执行输出/);
-    assert.equal(sent[0].replyToMessageId, 'incoming-reminder');
-    assert.equal(state.activeTasks.get(binding.codepilotSessionId)?.id, 'task-reminder');
-    assert.equal(state.activeTasks.get(binding.codepilotSessionId)?.idleReminderSent, true);
-  });
-});
-
 describe('bridge-manager new session handling', () => {
   beforeEach(() => {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
@@ -1918,7 +1862,6 @@ describe('bridge-manager new session handling', () => {
       hasStreamingCards: false,
       structuredStreamUiActive: false,
       lastActivityAt: Date.now(),
-      idleReminderSent: false,
       streamFinalized: false,
       uiEnded: false,
       mirrorSuppressionId: null,
@@ -1966,6 +1909,66 @@ describe('bridge-manager new session handling', () => {
     assert.equal(store.getSession(newSessionId)?.sdk_session_id || '', '');
     assert.equal(currentBinding?.codepilotSessionId, newSessionId);
     assert.equal(currentBinding?.sdkSessionId || '', '');
+  });
+});
+
+describe('bridge-manager mirror terminal finalization', () => {
+  beforeEach(() => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+  });
+
+  it('finalizes the active IM task when mirror records contain task_complete', async () => {
+    const address = { channelType: 'feishu', chatId: 'chat-terminal-finalize' } as const;
+    const binding = router.createBinding(address, 'D:\\workspace\\terminal-finalize');
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const finalized: Array<{ outcome: string; detail?: string; finalText?: string }> = [];
+
+    state.activeTasks.set(binding.codepilotSessionId, {
+      id: 'task-terminal-finalize',
+      abortController: new AbortController(),
+      adapter: { channelType: 'feishu', provider: 'feishu' },
+      address,
+      requestMessageId: 'incoming-terminal-finalize',
+      streamKey: 'stream-terminal-finalize',
+      sessionId: binding.codepilotSessionId,
+      hasStreamingCards: true,
+      structuredStreamUiActive: true,
+      lastActivityAt: Date.now(),
+      streamFinalized: false,
+      uiEnded: false,
+      mirrorSuppressionId: null,
+      finalizeFromExternalTerminal: async (outcome: string, detail?: string, finalText?: string) => {
+        finalized.push({ outcome, detail, finalText });
+        state.activeTasks.delete(binding.codepilotSessionId);
+        return true;
+      },
+    });
+
+    const didFinalize = await _testOnly.finalizeInteractiveTaskFromMirrorRecords(
+      binding.codepilotSessionId,
+      [{
+        signature: 'complete',
+        type: 'task_complete',
+        content: '桌面最终回复',
+        timestamp: '2026-04-13T12:00:00.000Z',
+      }],
+    );
+
+    assert.equal(didFinalize, true);
+    assert.deepEqual(finalized, [{
+      outcome: 'completed',
+      detail: '检测到桌面线程已完成当前任务。',
+      finalText: '桌面最终回复',
+    }]);
+    assert.equal(state.activeTasks.has(binding.codepilotSessionId), false);
   });
 });
 

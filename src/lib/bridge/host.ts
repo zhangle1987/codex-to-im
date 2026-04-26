@@ -225,7 +225,7 @@ export interface BridgeStore {
     },
   ): BridgeSession;
   updateSessionProviderId(sessionId: string, providerId: string): void;
-  updateSession(sessionId: string, updates: Partial<BridgeSession>): void;
+  updateSession(sessionId: string, updates: Partial<BridgeSession>, options?: { touch?: boolean }): void;
   deleteSession(sessionId: string): void;
 
   // ── Messages ──

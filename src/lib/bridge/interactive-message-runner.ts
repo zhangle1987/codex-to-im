@@ -154,10 +154,14 @@ export interface InteractiveTaskState {
   structuredStreamUiActive: boolean;
   lastActivityAt: number;
   lastResponseAt?: number | null;
-  idleReminderSent: boolean;
   streamFinalized: boolean;
   uiEnded: boolean;
   mirrorSuppressionId: string | null;
+  finalizeFromExternalTerminal?(
+    outcome: 'completed' | 'failed' | 'aborted',
+    detail?: string,
+    finalText?: string,
+  ): Promise<boolean>;
 }
 
 export interface RunInteractiveMessageDeps {
@@ -220,11 +224,37 @@ export async function runInteractiveMessage(
     deps.streamStatusHeartbeatMs ?? structuredStreamStatusConfig.heartbeatMs,
   );
 
-  adapter.onMessageStart?.(msg.address.chatId, streamKey);
+  let messageStartCalled = false;
+  const ensureMessageStarted = () => {
+    if (messageStartCalled) return;
+    adapter.onMessageStart?.(msg.address.chatId, streamKey);
+    messageStartCalled = true;
+  };
+  ensureMessageStarted();
 
   const taskAbort = new AbortController();
   const taskId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const taskStartedAt = nowMs();
+  type ExternalTerminalFinalization = {
+    outcome: 'completed' | 'failed' | 'aborted';
+    detail?: string;
+    finalText?: string;
+  };
+  let externalTerminalRequest: ExternalTerminalFinalization | null = null;
+  let resolveExternalTerminal: ((request: ExternalTerminalFinalization) => void) | null = null;
+  const externalTerminalPromise = new Promise<ExternalTerminalFinalization>((resolve) => {
+    resolveExternalTerminal = resolve;
+  });
+  let resolveExternalTerminalCompletion: ((finalized: boolean) => void) | null = null;
+  let externalTerminalCompletionSettled = false;
+  const externalTerminalCompletion = new Promise<boolean>((resolve) => {
+    resolveExternalTerminalCompletion = resolve;
+  });
+  const settleExternalTerminalCompletion = (finalized: boolean) => {
+    if (!externalTerminalRequest || externalTerminalCompletionSettled) return;
+    externalTerminalCompletionSettled = true;
+    resolveExternalTerminalCompletion?.(finalized);
+  };
   deps.resetMirrorSessionForInteractiveRun(binding.codepilotSessionId);
   const taskState: InteractiveTaskState = {
     id: taskId,
@@ -238,10 +268,19 @@ export async function runInteractiveMessage(
     structuredStreamUiActive: false,
     lastActivityAt: taskStartedAt,
     lastResponseAt: null,
-    idleReminderSent: false,
     streamFinalized: false,
     uiEnded: false,
     mirrorSuppressionId: null,
+    finalizeFromExternalTerminal: async (outcome, detail, finalText) => {
+      if (externalTerminalRequest) return externalTerminalCompletion;
+      if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return false;
+      externalTerminalRequest = { outcome, detail, finalText };
+      resolveExternalTerminal?.(externalTerminalRequest);
+      if (!taskAbort.signal.aborted) {
+        taskAbort.abort();
+      }
+      return externalTerminalCompletion;
+    },
   };
   deps.registerInteractiveTask(taskState);
   deps.recordInteractiveHealthStart(binding.codepilotSessionId);
@@ -310,7 +349,7 @@ export async function runInteractiveMessage(
     chatId: msg.address.chatId,
     streamKey,
     ensureStarted: () => {
-      adapter.onMessageStart?.(msg.address.chatId, streamKey);
+      ensureMessageStarted();
     },
   };
   const supportsPersistentStreamStatus = hasStreamingCards
@@ -356,6 +395,47 @@ export async function runInteractiveMessage(
   const stopStructuredStreamStatusUpdates = () => {
     streamStatusUpdatesClosed = true;
     clearStreamStatusHeartbeat();
+  };
+  let structuredStreamInactiveRecorded = false;
+  const recordStructuredStreamInactiveOnce = () => {
+    if (structuredStreamInactiveRecorded) return;
+    structuredStreamInactiveRecorded = true;
+    taskState.structuredStreamUiActive = false;
+    deps.recordInteractiveStreamUiSnapshot?.(binding.codepilotSessionId, { active: false });
+  };
+  let previewEnded = false;
+  const endPreviewOnce = () => {
+    if (previewEnded) return;
+    previewEnded = true;
+    if (!previewState) return;
+    if (previewState.throttleTimer) {
+      clearTimeout(previewState.throttleTimer);
+      previewState.throttleTimer = null;
+    }
+    adapter.endPreview?.(msg.address.chatId, previewState.draftId);
+  };
+  let streamUiFinalizeAttempted = false;
+  const finalizeStreamUiOnce = async (
+    status: 'completed' | 'interrupted' | 'error',
+    responseText: string,
+  ): Promise<boolean> => {
+    stopStructuredStreamStatusUpdates();
+    recordStructuredStreamInactiveOnce();
+    endPreviewOnce();
+    if (hasStreamingCards && !streamUiFinalizeAttempted) {
+      streamUiFinalizeAttempted = true;
+      taskState.streamFinalized = await finalizeStreamFeedback(
+        streamFeedbackTarget,
+        status,
+        responseText,
+      );
+    }
+    return taskState.streamFinalized;
+  };
+  const endMessageUiOnce = () => {
+    if (taskState.uiEnded) return;
+    adapter.onMessageEnd?.(msg.address.chatId, streamKey);
+    taskState.uiEnded = true;
   };
 
   const onStreamCardText = hasStreamingCards ? (fullText: string) => {
@@ -448,7 +528,7 @@ export async function runInteractiveMessage(
   try {
     const promptText = text || (attachments && attachments.length > 0 ? 'Describe this image.' : '');
 
-    const result = await processMessageImpl(
+    const processPromise = processMessageImpl(
       binding,
       promptText,
       async (perm) => {
@@ -483,6 +563,49 @@ export async function runInteractiveMessage(
         }
       },
     );
+    let raced: {
+      kind: 'process';
+      result: Awaited<ReturnType<typeof processMessageImpl>>;
+    } | {
+      kind: 'external';
+      terminal: ExternalTerminalFinalization;
+    };
+    try {
+      raced = await Promise.race([
+        processPromise.then((result) => ({ kind: 'process' as const, result })),
+        externalTerminalPromise.then((terminal) => ({ kind: 'external' as const, terminal })),
+      ]);
+    } catch (error) {
+      if (!externalTerminalRequest) throw error;
+      raced = { kind: 'external', terminal: externalTerminalRequest };
+    }
+
+    if (raced.kind === 'external') {
+      processPromise.catch(() => {});
+      finalOutcome = raced.terminal.outcome;
+      finalOutcomeDetail = raced.terminal.detail;
+      const streamEndStatus = raced.terminal.outcome === 'completed'
+        ? 'completed'
+        : raced.terminal.outcome === 'aborted'
+          ? 'interrupted'
+          : 'error';
+      const staleTaskNotice = buildStaleTaskCompletionNotice(msg.address, binding);
+      const terminalText = staleTaskNotice || raced.terminal.finalText || '';
+      const cardFinalized = await finalizeStreamUiOnce(streamEndStatus, terminalText);
+      if (!cardFinalized && terminalText) {
+        await deps.deliverResponse(
+          adapter,
+          msg.address,
+          terminalText,
+          binding.codepilotSessionId,
+          msg.messageId,
+          [],
+        );
+      }
+      return;
+    }
+
+    const result = raced.result;
 
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) {
       shouldRecordHealthEnd = false;
@@ -492,16 +615,13 @@ export async function runInteractiveMessage(
     let cardFinalized = false;
     const staleTaskNotice = buildStaleTaskCompletionNotice(msg.address, binding);
     if (hasStreamingCards) {
-      stopStructuredStreamStatusUpdates();
       const streamEndStatus = taskAbort.signal.aborted
         ? 'interrupted'
         : result.hasError ? 'error' : 'completed';
-      cardFinalized = await finalizeStreamFeedback(
-        streamFeedbackTarget,
+      cardFinalized = await finalizeStreamUiOnce(
         streamEndStatus,
         staleTaskNotice || (streamEndStatus === 'interrupted' ? '' : result.responseText),
       );
-      taskState.streamFinalized = cardFinalized;
     }
 
     if (staleTaskNotice) {
@@ -550,30 +670,17 @@ export async function runInteractiveMessage(
       ? (result.errorMessage?.trim() || undefined)
       : undefined;
   } finally {
-    stopStructuredStreamStatusUpdates();
-    deps.recordInteractiveStreamUiSnapshot?.(binding.codepilotSessionId, { active: false });
-    if (previewState) {
-      if (previewState.throttleTimer) {
-        clearTimeout(previewState.throttleTimer);
-        previewState.throttleTimer = null;
-      }
-      adapter.endPreview?.(msg.address.chatId, previewState.draftId);
-    }
-
-    if (
-      hasStreamingCards
-      && taskAbort.signal.aborted
-      && !taskState.streamFinalized
-    ) {
-      taskState.streamFinalized = await finalizeStreamFeedback(
-        streamFeedbackTarget,
-        'interrupted',
-        '',
-      );
-    }
+    await finalizeStreamUiOnce(
+      taskAbort.signal.aborted
+        ? 'interrupted'
+        : finalOutcome === 'completed'
+          ? 'completed'
+          : 'error',
+      '',
+    );
 
     if (taskState.mirrorSuppressionId) {
-      if (taskAbort.signal.aborted) {
+      if (finalOutcome === 'aborted') {
         deps.abortMirrorSuppression(binding.codepilotSessionId, taskState.mirrorSuppressionId);
       } else {
         deps.settleMirrorSuppression(binding.codepilotSessionId, taskState.mirrorSuppressionId);
@@ -581,16 +688,14 @@ export async function runInteractiveMessage(
       taskState.mirrorSuppressionId = null;
     }
     if (shouldRecordHealthEnd) {
-      if (taskAbort.signal.aborted) {
+      if (taskAbort.signal.aborted && !externalTerminalRequest) {
         finalOutcome = 'aborted';
         finalOutcomeDetail = '任务已收到停止请求。';
       }
       deps.recordInteractiveHealthEnd(binding.codepilotSessionId, finalOutcome, finalOutcomeDetail);
     }
     deps.releaseInteractiveTask(binding.codepilotSessionId, taskId);
-    if (!taskState.uiEnded) {
-      adapter.onMessageEnd?.(msg.address.chatId, streamKey);
-      taskState.uiEnded = true;
-    }
+    endMessageUiOnce();
+    settleExternalTerminalCompletion(taskState.streamFinalized || !hasStreamingCards);
   }
 }

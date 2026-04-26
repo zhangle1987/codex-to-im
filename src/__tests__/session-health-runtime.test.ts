@@ -53,6 +53,45 @@ describe('session-health-runtime', () => {
     assert.equal(diagnosis?.processProbe?.status, 'not_found');
   });
 
+  it('does not touch updated_at when diagnosing session health', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Read Only', 'test-model', undefined, 'D:\\workspace\\health-readonly', 'code');
+    const originalUpdatedAt = session.updated_at;
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:05:00.000Z',
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+    assert.ok(diagnosis);
+    assert.equal(diagnosis?.checkedAt, '2026-04-13T12:05:00.000Z');
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.last_health_check_at, '2026-04-13T12:05:00.000Z');
+    assert.equal(refreshed?.updated_at, originalUpdatedAt);
+  });
+
+  it('does not touch updated_at when reconciling derived health state', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Reconcile Read Only', 'test-model', undefined, 'D:\\workspace\\health-reconcile', 'code');
+    store.updateSession(session.id, {
+      runtime_status: 'running',
+      last_progress_at: new Date(Date.now() - (31 * 60 * 1000)).toISOString(),
+      last_progress_type: 'message',
+    }, { touch: false });
+    const originalUpdatedAt = store.getSession(session.id)?.updated_at;
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:05:00.000Z',
+    });
+
+    runtime.reconcileSessionHealth();
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.health_status, 'suspected_stall');
+    assert.equal(refreshed?.updated_at, originalUpdatedAt);
+  });
+
   it('keeps a long-running live thread in slow_observed instead of detached', async () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createSession('Health Alive', 'test-model', undefined, 'D:\\workspace\\health-alive', 'code');
@@ -112,6 +151,38 @@ describe('session-health-runtime', () => {
     assert.ok(diagnosis);
     assert.equal(diagnosis?.healthStatus, 'suspected_stream_ui_stall');
     assert.match(diagnosis?.healthReason || '', /流式 UI/);
+  });
+
+  it('clears stream UI runtime fields when the session reaches a terminal state', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Stream UI End', 'test-model', undefined, 'D:\\workspace\\health-stream-ui-end', 'code');
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:30:00.000Z',
+    });
+
+    runtime.recordInteractiveStart(session.id);
+    runtime.recordStructuredStreamUi(session.id, {
+      active: true,
+      lastAttemptAt: Date.parse('2026-04-13T12:29:50.000Z'),
+      lastUpdateAt: Date.parse('2026-04-13T12:29:51.000Z'),
+      lastErrorAt: Date.parse('2026-04-13T12:29:52.000Z'),
+      lastError: 'timeout after 15000ms',
+      consecutiveFailures: 2,
+      flushInFlight: true,
+      flushInFlightSince: Date.parse('2026-04-13T12:29:49.000Z'),
+    });
+
+    runtime.recordInteractiveEnd(session.id, 'completed');
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.health_status, 'completed');
+    assert.equal(refreshed?.stream_ui_flush_started_at, undefined);
+    assert.equal(refreshed?.last_stream_ui_attempt_at, undefined);
+    assert.equal(refreshed?.last_stream_ui_update_at, undefined);
+    assert.equal(refreshed?.last_stream_ui_error_at, undefined);
+    assert.equal(refreshed?.last_stream_ui_error, undefined);
+    assert.equal(refreshed?.stream_ui_consecutive_failures, undefined);
   });
 
   it('updates completion state from mirrored desktop records', () => {

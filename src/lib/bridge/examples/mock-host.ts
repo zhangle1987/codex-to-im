@@ -122,10 +122,15 @@ class InMemoryStore implements BridgeStore {
   }
 
   updateSessionProviderId() {}
-  updateSession(sessionId: string, updates: Partial<BridgeSession>) {
+  updateSession(sessionId: string, updates: Partial<BridgeSession>, options?: { touch?: boolean }) {
     const session = this.sessions.get(sessionId);
     if (!session) return;
-    this.sessions.set(sessionId, { ...session, ...updates, id: session.id, updated_at: new Date().toISOString() });
+    this.sessions.set(sessionId, {
+      ...session,
+      ...updates,
+      id: session.id,
+      updated_at: options?.touch === false ? session.updated_at : new Date().toISOString(),
+    });
   }
   deleteSession(sessionId: string) {
     this.sessions.delete(sessionId);

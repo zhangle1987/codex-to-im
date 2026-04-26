@@ -56,6 +56,22 @@ describe('JsonFileStore', () => {
     assert.equal(store.getSession('nonexistent'), null);
   });
 
+  it('updateSession can preserve updated_at for diagnostic metadata writes', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('diagnostic-touch', 'model-1', undefined, '/tmp');
+    const originalUpdatedAt = session.updated_at;
+
+    store.updateSession(session.id, {
+      last_health_check_at: '2026-04-13T12:05:00.000Z',
+      health_status: 'completed',
+    }, { touch: false });
+
+    const fetched = store.getSession(session.id);
+    assert.equal(fetched?.updated_at, originalUpdatedAt);
+    assert.equal(fetched?.last_health_check_at, '2026-04-13T12:05:00.000Z');
+    assert.equal(fetched?.health_status, 'completed');
+  });
+
   it('upsertChannelBinding creates and updates', () => {
     const store = new JsonFileStore(makeSettings());
     const b1 = store.upsertChannelBinding({

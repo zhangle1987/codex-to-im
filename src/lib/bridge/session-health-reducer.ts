@@ -43,6 +43,7 @@ export interface ActiveSessionTool {
 
 export interface SessionHealthDiagnosis {
   sessionId: string;
+  checkedAt: string | null;
   runtimeStatus: BridgeSession['runtime_status'];
   healthStatus: BridgeSessionHealthStatus;
   healthReason: string;
@@ -218,6 +219,7 @@ export function computeBaseDiagnosis(
     ? session.stream_ui_consecutive_failures
     : 0;
   const sdkSessionId = trimOrNull(session.sdk_session_id);
+  const checkedAt = trimOrNull(session.last_health_check_at);
   const lastProgressMs = parseIsoMs(lastProgressAt || undefined);
   const previousStatus = session.health_status || 'idle';
 
@@ -225,6 +227,7 @@ export function computeBaseDiagnosis(
     const fallbackStatus = isRunningRuntimeStatus(runtimeStatus) ? 'running_active' : previousStatus;
     return {
       sessionId: session.id,
+      checkedAt,
       runtimeStatus,
       healthStatus: fallbackStatus,
       healthReason: session.health_reason?.trim() || (
@@ -279,6 +282,7 @@ export function computeBaseDiagnosis(
 
   return {
     sessionId: session.id,
+    checkedAt,
     runtimeStatus,
     healthStatus,
     healthReason,

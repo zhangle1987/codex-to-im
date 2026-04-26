@@ -53,8 +53,6 @@ describe('interactive-runtime', () => {
       sessionLocks: new Map(),
     };
     const runtime = createInteractiveRuntime(() => state, {
-      idleReminderMs: 600_000,
-    }, {
       getStore: () => store,
       nowIso: () => '2026-04-13T00:00:00.000Z',
     });
@@ -70,7 +68,6 @@ describe('interactive-runtime', () => {
       hasStreamingCards: false,
       structuredStreamUiActive: false,
       lastActivityAt: Date.now(),
-      idleReminderSent: false,
       streamFinalized: false,
       uiEnded: false,
       mirrorSuppressionId: null,
@@ -104,104 +101,7 @@ describe('interactive-runtime', () => {
     assert.equal(idle?.queued_count || 0, 0);
   });
 
-  it('skips the legacy idle reminder for feishu streaming tasks that expose persistent status updates', async () => {
-    const store = new JsonFileStore(makeSettings());
-    initTestBridgeContext(store);
-    const session = store.createSession('Runtime Idle', 'test-model', undefined, 'D:\\workspace\\runtime-idle', 'code');
-    const state = {
-      activeTasks: new Map(),
-      queuedCounts: new Map(),
-      sessionLocks: new Map(),
-    };
-    const runtime = createInteractiveRuntime(() => state, {
-      idleReminderMs: 600_000,
-    }, {
-      getStore: () => store,
-      nowIso: () => '2026-04-13T00:00:00.000Z',
-    });
-
-    const sent: string[] = [];
-    runtime.registerInteractiveTask({
-      id: 'task-feishu-heartbeat',
-      abortController: new AbortController(),
-      adapter: {
-        channelType: 'feishu',
-        provider: 'feishu',
-        onStreamStatus() {},
-        send: async (message: { text: string }) => {
-          sent.push(message.text);
-          return { ok: true, messageId: 'msg-idle' };
-        },
-      } as never,
-      address: { channelType: 'feishu', chatId: 'chat-idle' },
-      requestMessageId: 'msg-idle',
-      streamKey: 'stream-idle',
-      sessionId: session.id,
-      hasStreamingCards: true,
-      structuredStreamUiActive: true,
-      lastActivityAt: Date.now() - (10 * 60 * 1000) - 1,
-      idleReminderSent: false,
-      streamFinalized: false,
-      uiEnded: false,
-      mirrorSuppressionId: null,
-    });
-
-    await runtime.reconcileIdleInteractiveTasks();
-
-    assert.deepEqual(sent, []);
-    assert.equal(state.activeTasks.get(session.id)?.idleReminderSent, false);
-  });
-
-  it('keeps the legacy idle reminder until the structured stream UI is actually active', async () => {
-    const store = new JsonFileStore(makeSettings());
-    initTestBridgeContext(store);
-    const session = store.createSession('Runtime Idle Pending', 'test-model', undefined, 'D:\\workspace\\runtime-idle-pending', 'code');
-    const state = {
-      activeTasks: new Map(),
-      queuedCounts: new Map(),
-      sessionLocks: new Map(),
-    };
-    const runtime = createInteractiveRuntime(() => state, {
-      idleReminderMs: 600_000,
-    }, {
-      getStore: () => store,
-      nowIso: () => '2026-04-13T00:00:00.000Z',
-    });
-
-    const sent: string[] = [];
-    runtime.registerInteractiveTask({
-      id: 'task-feishu-pending',
-      abortController: new AbortController(),
-      adapter: {
-        channelType: 'feishu',
-        provider: 'feishu',
-        onStreamStatus() {},
-        send: async (message: { text: string }) => {
-          sent.push(message.text);
-          return { ok: true, messageId: 'msg-idle-pending' };
-        },
-      } as never,
-      address: { channelType: 'feishu', chatId: 'chat-idle-pending' },
-      requestMessageId: 'msg-idle-pending',
-      streamKey: 'stream-idle-pending',
-      sessionId: session.id,
-      hasStreamingCards: true,
-      structuredStreamUiActive: false,
-      lastActivityAt: Date.now() - (10 * 60 * 1000) - 1,
-      idleReminderSent: false,
-      streamFinalized: false,
-      uiEnded: false,
-      mirrorSuppressionId: null,
-    });
-
-    await runtime.reconcileIdleInteractiveTasks();
-
-    assert.equal(sent.length, 1);
-    assert.match(sent[0] || '', /超过 10 分钟没有新的执行输出/);
-    assert.equal(state.activeTasks.get(session.id)?.idleReminderSent, true);
-  });
-
-  it('heals stale terminal runtime state back to idle when no active task remains', () => {
+  it('heals stale terminal runtime state back to idle when no active task remains', async () => {
     const store = new JsonFileStore(makeSettings());
     initTestBridgeContext(store);
     const session = store.createSession('Runtime Heal', 'test-model', undefined, 'D:\\workspace\\runtime-heal', 'code');
@@ -211,8 +111,6 @@ describe('interactive-runtime', () => {
       sessionLocks: new Map(),
     };
     const runtime = createInteractiveRuntime(() => state, {
-      idleReminderMs: 600_000,
-    }, {
       getStore: () => store,
       nowIso: () => '2026-04-20T16:00:00.000Z',
     });
@@ -225,7 +123,7 @@ describe('interactive-runtime', () => {
       last_runtime_update_at: '2026-04-20T15:00:00.000Z',
     });
 
-    runtime.reconcileTerminalSessionRuntimeState();
+    await runtime.reconcileTerminalSessionRuntimeState();
 
     const healed = store.getSession(session.id);
     assert.equal(healed?.runtime_status, 'idle');
@@ -233,7 +131,7 @@ describe('interactive-runtime', () => {
     assert.equal(healed?.last_runtime_update_at, '2026-04-20T16:00:00.000Z');
   });
 
-  it('does not clear runtime state during terminal healing while an active task still exists', () => {
+  it('finalizes an active task when terminal health is observed', async () => {
     const store = new JsonFileStore(makeSettings());
     initTestBridgeContext(store);
     const session = store.createSession('Runtime Heal Active', 'test-model', undefined, 'D:\\workspace\\runtime-heal-active', 'code');
@@ -243,11 +141,10 @@ describe('interactive-runtime', () => {
       sessionLocks: new Map(),
     };
     const runtime = createInteractiveRuntime(() => state, {
-      idleReminderMs: 600_000,
-    }, {
       getStore: () => store,
       nowIso: () => '2026-04-20T16:05:00.000Z',
     });
+    let finalized: Array<{ outcome: string; detail?: string }> = [];
 
     runtime.registerInteractiveTask({
       id: 'task-heal-active',
@@ -260,10 +157,14 @@ describe('interactive-runtime', () => {
       hasStreamingCards: false,
       structuredStreamUiActive: false,
       lastActivityAt: Date.now(),
-      idleReminderSent: false,
       streamFinalized: false,
       uiEnded: false,
       mirrorSuppressionId: null,
+      finalizeFromExternalTerminal: async (outcome, detail) => {
+        finalized.push({ outcome, detail });
+        runtime.releaseInteractiveTask(session.id, 'task-heal-active');
+        return true;
+      },
     });
 
     store.updateSession(session.id, {
@@ -272,10 +173,13 @@ describe('interactive-runtime', () => {
       last_runtime_update_at: '2026-04-20T15:05:00.000Z',
     });
 
-    runtime.reconcileTerminalSessionRuntimeState();
+    await runtime.reconcileTerminalSessionRuntimeState();
 
-    const stillRunning = store.getSession(session.id);
-    assert.equal(stillRunning?.runtime_status, 'running');
-    assert.equal(stillRunning?.last_runtime_update_at, '2026-04-20T15:05:00.000Z');
+    const healed = store.getSession(session.id);
+    assert.deepEqual(finalized, [{
+      outcome: 'completed',
+      detail: '检测到桌面线程已完成当前任务。',
+    }]);
+    assert.equal(healed?.runtime_status, 'idle');
   });
 });

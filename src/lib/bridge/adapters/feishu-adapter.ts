@@ -92,6 +92,11 @@ interface FeishuCardState {
   consecutiveFlushFailures: number;
 }
 
+interface TypingReactionState {
+  messageId: string;
+  reactionId: string;
+}
+
 /** Streaming card throttle interval (ms). */
 const CARD_THROTTLE_MS = 1000;
 const CARD_REQUEST_TIMEOUT_MS = 15_000;
@@ -150,8 +155,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private botIds = new Set<string>();
   /** Track last incoming message ID per chat for typing indicator. */
   private lastIncomingMessageId = new Map<string, string>();
-  /** Track active typing reaction IDs per chat for cleanup. */
-  private typingReactions = new Map<string, string>();
+  /** Track active typing reaction IDs per stream key for cleanup. */
+  private typingReactions = new Map<string, TypingReactionState>();
+  /** Track in-flight typing reaction creates so repeated status updates stay idempotent. */
+  private typingReactionCreatePromises = new Map<string, Promise<void>>();
+  /** Track streams that ended before the async reaction create finished. */
+  private typingReactionCleanupRequested = new Set<string>();
   /** Active streaming card state per stream key. */
   private activeCards = new Map<string, FeishuCardState>();
   /** In-flight card creation promises per stream key — prevents duplicate creation. */
@@ -296,6 +305,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.seenMessageIds.clear();
     this.lastIncomingMessageId.clear();
     this.typingReactions.clear();
+    this.typingReactionCreatePromises.clear();
+    this.typingReactionCleanupRequested.clear();
 
     console.log('[feishu-adapter] Stopped');
   }
@@ -318,28 +329,42 @@ export class FeishuAdapter extends BaseChannelAdapter {
    */
   onMessageStart(chatId: string, streamKey?: string): void {
     const messageId = this.lastIncomingMessageId.get(chatId);
+    const reactionKey = this.resolveStreamKey(chatId, streamKey);
 
     // Create streaming card (fire-and-forget — fallback to traditional if fails)
     if (messageId && this.isStreamingEnabled()) {
       this.createStreamingCard(chatId, messageId, streamKey).catch(() => {});
     }
 
-    // Typing indicator (same as before)
+    // Typing indicator, idempotent per stream.
     if (!messageId || !this.restClient) return;
-    this.restClient.im.messageReaction.create({
+    if (this.typingReactions.has(reactionKey) || this.typingReactionCreatePromises.has(reactionKey)) {
+      return;
+    }
+
+    const createPromise = this.restClient.im.messageReaction.create({
       path: { message_id: messageId },
       data: { reaction_type: { emoji_type: TYPING_EMOJI } },
     }).then((res) => {
       const reactionId = (res as any)?.data?.reaction_id;
       if (reactionId) {
-        this.typingReactions.set(chatId, reactionId);
+        this.typingReactions.set(reactionKey, { messageId, reactionId });
+        if (this.typingReactionCleanupRequested.delete(reactionKey)) {
+          this.removeTypingReaction(reactionKey);
+        }
       }
     }).catch((err) => {
       const code = (err as { code?: number })?.code;
       if (code !== 99991400 && code !== 99991403) {
         console.warn('[feishu-adapter] Typing indicator failed:', err instanceof Error ? err.message : err);
       }
+    }).finally(() => {
+      this.typingReactionCreatePromises.delete(reactionKey);
+      if (!this.typingReactions.has(reactionKey)) {
+        this.typingReactionCleanupRequested.delete(reactionKey);
+      }
     });
+    this.typingReactionCreatePromises.set(reactionKey, createPromise);
   }
 
   /**
@@ -350,13 +375,20 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Clean up any orphaned card state (normally cleaned by finalizeCard)
     this.cleanupCard(chatId, streamKey);
 
-    // Remove typing reaction (same as before)
-    const reactionId = this.typingReactions.get(chatId);
-    const messageId = this.lastIncomingMessageId.get(chatId);
-    if (!reactionId || !messageId || !this.restClient) return;
-    this.typingReactions.delete(chatId);
+    const reactionKey = this.resolveStreamKey(chatId, streamKey);
+    if (this.typingReactionCreatePromises.has(reactionKey) && !this.typingReactions.has(reactionKey)) {
+      this.typingReactionCleanupRequested.add(reactionKey);
+      return;
+    }
+    this.removeTypingReaction(reactionKey);
+  }
+
+  private removeTypingReaction(reactionKey: string): void {
+    const reaction = this.typingReactions.get(reactionKey);
+    if (!reaction || !this.restClient) return;
+    this.typingReactions.delete(reactionKey);
     this.restClient.im.messageReaction.delete({
-      path: { message_id: messageId, reaction_id: reactionId },
+      path: { message_id: reaction.messageId, reaction_id: reaction.reactionId },
     }).catch(() => { /* ignore */ });
   }
 

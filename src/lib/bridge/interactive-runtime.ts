@@ -1,15 +1,10 @@
 import type { BridgeSession, BridgeStore } from './host.js';
 import type { InteractiveTaskState } from './interactive-message-runner.js';
-import { deliverBridgeNotice } from './feedback-delivery.js';
 
 export interface BridgeInteractiveRuntimeState {
   activeTasks: Map<string, InteractiveTaskState>;
   queuedCounts: Map<string, number>;
   sessionLocks: Map<string, Promise<void>>;
-}
-
-export interface CreateInteractiveRuntimeOptions {
-  idleReminderMs: number;
 }
 
 export interface CreateInteractiveRuntimeDeps {
@@ -25,8 +20,13 @@ export interface InteractiveRuntime {
   touchInteractiveTask(sessionId: string, taskId: string): void;
   releaseInteractiveTask(sessionId: string, taskId: string): void;
   syncSessionRuntimeState(sessionId: string): void;
-  reconcileIdleInteractiveTasks(): Promise<void>;
-  reconcileTerminalSessionRuntimeState(): void;
+  finalizeTerminalActiveTask(
+    sessionId: string,
+    outcome: 'completed' | 'failed' | 'aborted',
+    detail?: string,
+    finalText?: string,
+  ): Promise<boolean>;
+  reconcileTerminalSessionRuntimeState(): Promise<void>;
   resetPersistedInteractiveRuntimeState(): void;
   processWithSessionLock(sessionId: string, fn: () => Promise<void>): Promise<void>;
 }
@@ -41,21 +41,17 @@ function isTerminalSessionHealthStatus(status: BridgeSession['health_status'] | 
   return Boolean(status && TERMINAL_SESSION_HEALTH_STATUSES.has(status));
 }
 
-function buildInteractiveIdleReminderNotice(): string {
-  return [
-    '提醒：这轮任务仍在运行，但已经超过 10 分钟没有新的执行输出。',
-    '系统不会自动终止它；如果你仍在对应线程，可发送 `/stop` 主动停止；如果已经切到别的线程，需要先切回对应线程。',
-  ].join('\n');
-}
-
-function shouldSkipIdleReminder(task: InteractiveTaskState): boolean {
-  return task.adapter.provider === 'feishu'
-    && task.structuredStreamUiActive;
+function terminalOutcomeFromHealthStatus(
+  status: BridgeSession['health_status'] | undefined,
+): 'completed' | 'failed' | 'aborted' | null {
+  if (status === 'completed') return 'completed';
+  if (status === 'failed') return 'failed';
+  if (status === 'aborted') return 'aborted';
+  return null;
 }
 
 export function createInteractiveRuntime(
   getState: () => BridgeInteractiveRuntimeState,
-  options: CreateInteractiveRuntimeOptions,
   deps: CreateInteractiveRuntimeDeps,
 ): InteractiveRuntime {
   function getQueuedCount(sessionId: string): number {
@@ -106,7 +102,6 @@ export function createInteractiveRuntime(
     const task = getState().activeTasks.get(sessionId);
     if (task?.id !== taskId) return;
     task.lastActivityAt = Date.now();
-    task.idleReminderSent = false;
   }
 
   function releaseInteractiveTask(sessionId: string, taskId: string): void {
@@ -117,41 +112,36 @@ export function createInteractiveRuntime(
     syncSessionRuntimeState(sessionId);
   }
 
-  async function remindIdleInteractiveTask(task: InteractiveTaskState): Promise<void> {
-    if (!isCurrentInteractiveTask(task.sessionId, task.id) || task.idleReminderSent) return;
-    task.idleReminderSent = true;
-
-    try {
-      await deliverBridgeNotice(task.adapter, task.address, buildInteractiveIdleReminderNotice(), {
-        sessionId: task.sessionId,
-        replyToMessageId: task.requestMessageId,
-      });
-    } catch {
-      // best effort reminder
-    }
+  async function finalizeTerminalActiveTask(
+    sessionId: string,
+    outcome: 'completed' | 'failed' | 'aborted',
+    detail?: string,
+    finalText?: string,
+  ): Promise<boolean> {
+    const task = getState().activeTasks.get(sessionId);
+    if (!task?.finalizeFromExternalTerminal) return false;
+    return task.finalizeFromExternalTerminal(outcome, detail, finalText);
   }
 
-  async function reconcileIdleInteractiveTasks(): Promise<void> {
-    const now = Date.now();
-    const tasks = Array.from(getState().activeTasks.values());
-    for (const task of tasks) {
-      if (shouldSkipIdleReminder(task)) continue;
-      if (task.idleReminderSent) continue;
-      if (now - task.lastActivityAt < options.idleReminderMs) continue;
-      await remindIdleInteractiveTask(task);
-    }
-  }
-
-  function reconcileTerminalSessionRuntimeState(): void {
+  async function reconcileTerminalSessionRuntimeState(): Promise<void> {
     const store = deps.getStore();
     for (const session of store.listSessions()) {
+      if (!isTerminalSessionHealthStatus(session.health_status)) continue;
+
+      const activeTask = getState().activeTasks.get(session.id);
+      if (activeTask) {
+        const outcome = terminalOutcomeFromHealthStatus(session.health_status);
+        if (outcome) {
+          await finalizeTerminalActiveTask(session.id, outcome, session.health_reason || undefined);
+        }
+        continue;
+      }
+
       const queuedCount = getQueuedCount(session.id);
       const persistedQueuedCount = session.queued_count && session.queued_count > 0
         ? session.queued_count
         : 0;
-      const hasActiveTask = getState().activeTasks.has(session.id);
-      if (hasActiveTask || queuedCount > 0) continue;
-      if (!isTerminalSessionHealthStatus(session.health_status)) continue;
+      if (queuedCount > 0) continue;
       if (persistedQueuedCount === 0 && session.runtime_status !== 'running' && session.runtime_status !== 'queued') {
         continue;
       }
@@ -228,7 +218,7 @@ export function createInteractiveRuntime(
     touchInteractiveTask,
     releaseInteractiveTask,
     syncSessionRuntimeState,
-    reconcileIdleInteractiveTasks,
+    finalizeTerminalActiveTask,
     reconcileTerminalSessionRuntimeState,
     resetPersistedInteractiveRuntimeState,
     processWithSessionLock,
