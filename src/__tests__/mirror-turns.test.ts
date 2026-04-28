@@ -148,5 +148,40 @@ describe('mirror-turns pending delivery queue', () => {
       { text: '检查镜像流状态', status: 'completed' },
       { text: '补交界处测试', status: 'in_progress' },
     ]);
+    assert.equal(subscription.pendingTurn?.lastActivityAt, '2026-04-21T10:00:02.000Z');
+    assert.equal(subscription.pendingTurn?.lastContentResponseAt, null);
+    assert.equal(subscription.pendingTurn?.lastResponseAt, null);
+  });
+
+  it('does not reset content response time for tool progress', () => {
+    const subscription = {
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+      pendingTurn: null,
+    } as any;
+
+    consumeMirrorRecords(subscription, [
+      {
+        signature: 'assistant-1',
+        type: 'message',
+        role: 'assistant',
+        content: '正文输出',
+        timestamp: '2026-04-21T10:00:01.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'tool-1',
+        type: 'tool_started',
+        content: '',
+        timestamp: '2026-04-21T10:03:00.000Z',
+        turnId: 'turn-1',
+        toolId: 'tool-1',
+        toolName: 'shell_command',
+      },
+    ]);
+
+    assert.equal(subscription.pendingTurn?.lastActivityAt, '2026-04-21T10:03:00.000Z');
+    assert.equal(subscription.pendingTurn?.lastContentResponseAt, '2026-04-21T10:00:01.000Z');
+    assert.equal(subscription.pendingTurn?.lastResponseAt, '2026-04-21T10:00:01.000Z');
   });
 });

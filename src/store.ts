@@ -379,7 +379,11 @@ export class JsonFileStore implements BridgeStore {
   findSessionBySdkSessionId(sdkSessionId: string): BridgeSession | null {
     this.reloadSessions();
     for (const session of this.sessions.values()) {
-      if (session.sdk_session_id === sdkSessionId) {
+      if (
+        session.sdk_session_id === sdkSessionId
+        || session.codex_thread_id === sdkSessionId
+        || session.desktop_thread_id === sdkSessionId
+      ) {
         return session;
       }
     }
@@ -547,6 +551,15 @@ export class JsonFileStore implements BridgeStore {
     const s = this.sessions.get(sessionId);
     if (s) {
       s.sdk_session_id = sdkSessionId;
+      if (sdkSessionId) {
+        s.codex_thread_id = sdkSessionId;
+        s.thread_origin = s.thread_origin || 'bridge';
+      } else {
+        delete s.codex_thread_id;
+        if (s.thread_origin !== 'desktop') {
+          delete s.thread_origin;
+        }
+      }
       s.updated_at = now();
       this.persistSessions();
     }

@@ -87,7 +87,14 @@ export interface BridgeSession {
   preferred_mode?: ChannelBinding['mode'];
   system_prompt?: string;
   provider_id?: string;
+  /** Legacy resume/thread id. Kept for persisted data compatibility. */
   sdk_session_id?: string;
+  /** Codex SDK resume thread id used by IM-initiated conversations. */
+  codex_thread_id?: string;
+  /** Codex Desktop thread id used by desktop reuse and mirror delivery. */
+  desktop_thread_id?: string;
+  /** Explicit owner of the current persisted thread identity. */
+  thread_origin?: 'bridge' | 'desktop';
   reasoning_effort?: CodexReasoningEffort;
   session_type?: 'normal' | 'draft';
   hidden?: boolean;
@@ -110,7 +117,6 @@ export interface BridgeSession {
   last_stream_ui_error_at?: string;
   last_stream_ui_error?: string;
   stream_ui_consecutive_failures?: number;
-  last_health_check_at?: string;
   mirror_status?: 'inactive' | 'watching' | 'stale';
   mirror_last_event_at?: string;
   created_at?: string;

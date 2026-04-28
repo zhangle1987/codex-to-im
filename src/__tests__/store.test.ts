@@ -56,20 +56,20 @@ describe('JsonFileStore', () => {
     assert.equal(store.getSession('nonexistent'), null);
   });
 
-  it('updateSession can preserve updated_at for diagnostic metadata writes', () => {
+  it('updateSession can preserve updated_at for derived metadata writes', () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createSession('diagnostic-touch', 'model-1', undefined, '/tmp');
     const originalUpdatedAt = session.updated_at;
 
     store.updateSession(session.id, {
-      last_health_check_at: '2026-04-13T12:05:00.000Z',
       health_status: 'completed',
+      health_reason: '任务已完成。',
     }, { touch: false });
 
     const fetched = store.getSession(session.id);
     assert.equal(fetched?.updated_at, originalUpdatedAt);
-    assert.equal(fetched?.last_health_check_at, '2026-04-13T12:05:00.000Z');
     assert.equal(fetched?.health_status, 'completed');
+    assert.equal(fetched?.health_reason, '任务已完成。');
   });
 
   it('upsertChannelBinding creates and updates', () => {
@@ -511,7 +511,12 @@ describe('JsonFileStore', () => {
     });
     store.updateSdkSessionId(session.id, 'sdk-123');
     const binding = store.getChannelBinding('feishu-default', '1');
+    const updated = store.getSession(session.id);
     assert.equal(binding?.sdkSessionId, 'sdk-123');
+    assert.equal(updated?.sdk_session_id, 'sdk-123');
+    assert.equal(updated?.codex_thread_id, 'sdk-123');
+    assert.equal(updated?.desktop_thread_id, undefined);
+    assert.equal(updated?.thread_origin, 'bridge');
   });
 
   it('updateSessionModel updates model', () => {

@@ -85,7 +85,6 @@ export function buildHealthCommandResponse(
     title,
     [
       ['Session', diagnosis.sessionId],
-      ['检查时间', formatCommandTimestamp(diagnosis.checkedAt)],
       ['运行状态', formatRuntimeStatus({ runtime_status: diagnosis.runtimeStatus, queued_count: 0 } as BridgeSession)],
       ['健康状态', formatHealthStatusLabel(diagnosis.healthStatus)],
       ['当前阶段', currentStage],
@@ -112,7 +111,6 @@ export function buildHealthListResponse(
     diagnoses.map((diagnosis) => ({
       heading: diagnosis.sessionId,
       details: [
-        `检查时间：${formatCommandTimestamp(diagnosis.checkedAt)}`,
         `健康状态：${formatHealthStatusLabel(diagnosis.healthStatus)}`,
         `当前阶段：${diagnosis.activeToolName ? `工具 · ${diagnosis.activeToolName}` : (diagnosis.lastProgressType || '-')}`,
         `最后进展：${formatCommandTimestamp(diagnosis.lastProgressAt)}`,

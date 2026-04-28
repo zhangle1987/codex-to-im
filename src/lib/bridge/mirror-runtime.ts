@@ -26,6 +26,7 @@ import {
 import { buildMirrorDeliveryPlan } from './mirror-delivery-plan.js';
 import { buildMirrorSubscriptionRegistryPlan } from './mirror-subscription-registry.js';
 import { runMirrorReconcileBatch, type MirrorReconcileStatus } from './mirror-reconcile-batch.js';
+import { getExplicitDesktopThreadId } from './turns/turn-classifier.js';
 
 export interface BridgeMirrorRuntimeState {
   running: boolean;
@@ -48,9 +49,13 @@ export interface CreateMirrorRuntimeDeps {
   describeUnknownError(error: unknown): string;
   getDesktopSessionByThreadIdSafe(threadId: string, context: string): DesktopSessionSummary | null;
   syncMirrorSessionStateSafe(sessionId: string, context: string): void;
-  isMirrorSuppressed(sessionId: string): boolean;
   filterSuppressedMirrorRecords(sessionId: string, records: DesktopMirrorRecord[]): DesktopMirrorRecord[];
   observeSessionHealthRecords(sessionId: string, threadId: string, records: DesktopMirrorRecord[]): void;
+  routeDesktopRecords?(
+    sessionId: string,
+    threadId: string,
+    records: DesktopMirrorRecord[],
+  ): Promise<{ claimed: DesktopMirrorRecord[]; unclaimed: DesktopMirrorRecord[]; terminalClaimed: boolean }>;
   consumeMirrorRecords(subscription: DesktopMirrorSubscription, records: DesktopMirrorRecord[]): FinalizedDesktopMirrorTurn[];
   flushTimedOutMirrorTurn(subscription: DesktopMirrorSubscription): FinalizedDesktopMirrorTurn | null;
   hasPendingMirrorWork(subscription: DesktopMirrorSubscription): boolean;
@@ -136,11 +141,17 @@ export function createMirrorRuntime(
   function clearDanglingMirrorThread(subscription: DesktopMirrorSubscription, reason: string): void {
     const { store } = getBridgeContext();
     const session = store.getSession(subscription.sessionId);
-    const currentThreadId = session?.sdk_session_id || subscription.threadId;
+    const currentThreadId = getExplicitDesktopThreadId(session) || subscription.threadId;
     console.warn(
       `[bridge-manager] Clearing dangling desktop thread ${currentThreadId} for session ${subscription.sessionId}: ${reason}`,
     );
     store.updateSdkSessionId(subscription.sessionId, '');
+    store.updateSession(subscription.sessionId, {
+      sdk_session_id: '',
+      codex_thread_id: undefined,
+      desktop_thread_id: undefined,
+      thread_origin: undefined,
+    });
     removeMirrorSubscription(subscription.bindingId);
   }
 
@@ -153,7 +164,7 @@ export function createMirrorRuntime(
       return;
     }
 
-    const threadId = binding.sdkSessionId || session.sdk_session_id || '';
+    const threadId = getExplicitDesktopThreadId(session) || '';
     if (!threadId) {
       removeMirrorSubscription(binding.id);
       return;
@@ -281,11 +292,16 @@ export function createMirrorRuntime(
         `[bridge-manager] Unhandled desktop mirror event for thread ${subscription.threadId}: ${kind}`,
       );
     }
-    if (deliverableRecords.length > 0) {
-      deps.observeSessionHealthRecords(subscription.sessionId, subscription.threadId, deliverableRecords);
+    const routeResult = deliverableRecords.length > 0 && deps.routeDesktopRecords
+      ? await deps.routeDesktopRecords(subscription.sessionId, subscription.threadId, deliverableRecords)
+      : { claimed: [], unclaimed: deliverableRecords, terminalClaimed: false };
+    const mirrorRecords = routeResult.unclaimed;
+
+    if (mirrorRecords.length > 0) {
+      deps.observeSessionHealthRecords(subscription.sessionId, subscription.threadId, mirrorRecords);
     }
-    const blocked = getState().activeTasks.has(subscription.sessionId) || deps.isMirrorSuppressed(subscription.sessionId);
-    const deliveryPlan = buildMirrorDeliveryPlan(subscription, deliverableRecords, {
+    const blocked = getState().activeTasks.has(subscription.sessionId);
+    const deliveryPlan = buildMirrorDeliveryPlan(subscription, mirrorRecords, {
       blocked,
       filterSuppressedRecords: deps.filterSuppressedMirrorRecords,
       flushTimedOutTurn: (currentSubscription) => deps.flushTimedOutMirrorTurn(currentSubscription),

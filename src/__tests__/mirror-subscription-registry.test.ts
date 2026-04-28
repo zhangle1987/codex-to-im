@@ -7,7 +7,7 @@ describe('mirror-subscription-registry', () => {
   it('keeps only bindings that are active, have a running channel, and resolve to a desktop thread', () => {
     const bindings = [
       {
-        id: 'keep-from-binding',
+        id: 'ignore-bridge-sdk-thread',
         channelType: 'feishu-default',
         codepilotSessionId: 'session-1',
         sdkSessionId: 'thread-1',
@@ -44,8 +44,11 @@ describe('mirror-subscription-registry', () => {
       ['feishu-default'],
       [],
       (sessionId) => {
+        if (sessionId === 'session-1') {
+          return { sdk_session_id: 'thread-1', thread_origin: 'bridge' };
+        }
         if (sessionId === 'session-2') {
-          return { sdk_session_id: 'thread-2' };
+          return { sdk_session_id: 'thread-2', desktop_thread_id: 'thread-2', thread_origin: 'desktop' };
         }
         if (sessionId === 'session-5') {
           return { sdk_session_id: '' };
@@ -56,7 +59,7 @@ describe('mirror-subscription-registry', () => {
 
     assert.deepEqual(
       plan.upsertBindings.map((binding) => binding.id),
-      ['keep-from-binding', 'keep-from-session'],
+      ['keep-from-session'],
     );
     assert.deepEqual(plan.removeBindingIds, []);
   });
@@ -73,7 +76,7 @@ describe('mirror-subscription-registry', () => {
       ],
       ['feishu-default'],
       ['binding-1', 'binding-2', 'binding-3'],
-      () => null,
+      () => ({ desktop_thread_id: 'thread-1', thread_origin: 'desktop' }),
     );
 
     assert.deepEqual(plan.upsertBindings.map((binding) => binding.id), ['binding-1']);

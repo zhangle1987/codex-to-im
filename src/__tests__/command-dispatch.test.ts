@@ -149,7 +149,7 @@ describe('command-dispatch', () => {
         getActiveTask: () => undefined,
         diagnoseSessionHealth: async (sessionId) => ({
           sessionId,
-          checkedAt: '2026-04-13T12:05:00.000Z',
+          checkedAt: null,
           runtimeStatus: 'running',
           healthStatus: 'slow_observed',
           healthReason: '最近 10 到 30 分钟内没有新进展，先标记为待观察。',
@@ -173,7 +173,7 @@ describe('command-dispatch', () => {
 
     const response = sent[0] || '';
     assert.match(response, /当前会话健康检查/);
-    assert.match(response, /检查时间/);
+    assert.doesNotMatch(response, /检查时间/);
     assert.match(response, new RegExp(binding.codepilotSessionId));
     assert.match(response, /长时运行，待观察/);
     assert.match(response, /shell_command/);
@@ -208,7 +208,7 @@ describe('command-dispatch', () => {
           requestedSessionIds.push(sessionId);
           return {
             sessionId,
-            checkedAt: '2026-04-13T12:05:00.000Z',
+            checkedAt: null,
             runtimeStatus: 'idle',
             healthStatus: 'completed',
             healthReason: '任务已完成。',
@@ -235,10 +235,11 @@ describe('command-dispatch', () => {
     const response = sent[0] || '';
     assert.match(response, /指定会话健康检查/);
     assert.match(response, new RegExp(explicitSessionId));
+    assert.doesNotMatch(response, /检查时间/);
   });
 
-  it('renders /status for a chat that is still on the draft thread', async () => {
-    initTestContext();
+  it('renders /status without creating a session or binding for an unbound chat', async () => {
+    const store = initTestContext();
     const sent: string[] = [];
     const adapter: any = {
       channelType: 'feishu',
@@ -266,8 +267,49 @@ describe('command-dispatch', () => {
 
     const response = sent[0] || '';
     assert.match(response, /当前会话/);
-    assert.match(response, /临时草稿线程/);
-    assert.match(response, /ask/);
+    assert.match(response, /还没有绑定会话/);
+    assert.equal(store.getChannelBinding(address.channelType, address.chatId), null);
+    assert.equal(store.listSessions().length, 0);
+    assert.deepEqual(readAuditSummaries(), []);
+  });
+
+  it('renders // without creating a session or binding for an unbound chat', async () => {
+    const store = initTestContext();
+    const sent: string[] = [];
+    let diagnoseCalls = 0;
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: 'reply-health-unbound' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-health-unbound' } as const;
+
+    await handleBridgeCommand(
+      adapter,
+      {
+        address,
+        text: '//',
+        messageId: 'incoming-health-unbound',
+      } as any,
+      '//',
+      {
+        getActiveTask: () => undefined,
+        diagnoseSessionHealth: async () => {
+          diagnoseCalls += 1;
+          return null;
+        },
+        diagnoseAllActiveSessions: async () => [],
+      },
+    );
+
+    const response = sent[0] || '';
+    assert.match(response, /还没有绑定会话/);
+    assert.equal(diagnoseCalls, 0);
+    assert.equal(store.getChannelBinding(address.channelType, address.chatId), null);
+    assert.equal(store.listSessions().length, 0);
+    assert.deepEqual(readAuditSummaries(), []);
   });
 
   it('creates a new IM session with /new and points the binding at the requested directory', async () => {

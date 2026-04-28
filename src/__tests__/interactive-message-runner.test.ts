@@ -8,7 +8,7 @@ import { CTI_HOME } from '../config.js';
 import { JsonFileStore } from '../store.js';
 import { initBridgeContext } from '../lib/bridge/context.js';
 import { BaseChannelAdapter } from '../lib/bridge/channel-adapter.js';
-import type { InboundMessage, OutboundMessage, SendResult } from '../lib/bridge/types.js';
+import type { InboundMessage, OutboundAttachment, OutboundMessage, SendResult } from '../lib/bridge/types.js';
 import * as router from '../lib/bridge/channel-router.js';
 import { formatInteractiveRuntimeStatus, runInteractiveMessage, type InteractiveTaskState } from '../lib/bridge/interactive-message-runner.js';
 
@@ -30,13 +30,16 @@ class FakeFeishuStreamingAdapter extends BaseChannelAdapter {
   readonly streamEnds: Array<{ status: 'completed' | 'interrupted' | 'error'; text: string }> = [];
   readonly messageStarts: Array<{ chatId: string; streamKey?: string }> = [];
   readonly messageEnds: Array<{ chatId: string; streamKey?: string }> = [];
+  readonly sentMessages: OutboundMessage[] = [];
+  streamEndResult = false;
   private streamUiActive = false;
 
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   isRunning(): boolean { return true; }
   consumeOne(): Promise<InboundMessage | null> { return Promise.resolve(null); }
-  async send(_message: OutboundMessage): Promise<SendResult> {
+  async send(message: OutboundMessage): Promise<SendResult> {
+    this.sentMessages.push(message);
     return { ok: true, messageId: 'sent-1' };
   }
   validateConfig(): string | null { return null; }
@@ -74,7 +77,7 @@ class FakeFeishuStreamingAdapter extends BaseChannelAdapter {
     responseText: string,
   ): Promise<boolean> {
     this.streamEnds.push({ status, text: responseText });
-    return false;
+    return this.streamEndResult;
   }
 }
 
@@ -366,6 +369,234 @@ describe('interactive-message-runner', () => {
     assert.equal(adapter.streamedStatuses.length, statusCountAfterFinish);
   });
 
+  it('sends outbound artifacts when an external terminal event finalizes the stream card', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    adapter.streamEndResult = true;
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-external-terminal-artifact',
+      userId: 'user-external-terminal-artifact',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\external-terminal-artifact');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const clock = createManualIntervalClock();
+    const processStarted = createDeferred<void>();
+    const neverFinish = createDeferred<{
+      responseText: string;
+      outboundAttachments: [];
+      tokenUsage: null;
+      hasError: boolean;
+      errorMessage: string;
+      permissionRequests: [];
+      sdkSessionId: null;
+    }>();
+    const delivered: Array<{ text: string; attachments: OutboundAttachment[] }> = [];
+
+    const runPromise = runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-external-terminal-artifact-1',
+        address,
+        text: 'send image',
+        timestamp: clock.now(),
+      },
+      'send image',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = clock.now();
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-external-terminal-artifact'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse(_adapter, _address, responseText, _sessionId, _replyTo, attachments = []) {
+          delivered.push({ text: responseText, attachments });
+        },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
+          onPartialText?.('正在生成截图');
+          processStarted.resolve();
+          return neverFinish.promise;
+        },
+        nowMs: () => clock.now(),
+        setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
+        clearIntervalFn: (handle) => clock.clearInterval(handle),
+        streamStatusIdleDetectionStartMs: 10_000,
+        streamStatusHeartbeatMs: 10_000,
+      },
+    );
+
+    await processStarted.promise;
+    const sessionId = Array.from(taskStateMap.keys())[0];
+    assert.ok(sessionId);
+    const task = taskStateMap.get(sessionId);
+    assert.ok(task?.finalizeFromExternalTerminal);
+
+    const finalized = await task.finalizeFromExternalTerminal(
+      'completed',
+      '检测到桌面线程已完成当前任务。',
+      [
+        '桌面最终回复',
+        '',
+        '<cti-send>{"type":"image","path":"D:\\\\workspace\\\\out.png","caption":"截图"}</cti-send>',
+      ].join('\n'),
+    );
+    await runPromise;
+
+    assert.equal(finalized, true);
+    assert.deepEqual(adapter.streamEnds, [{ status: 'completed', text: '桌面最终回复' }]);
+    assert.deepEqual(delivered, [{
+      text: '',
+      attachments: [{
+        kind: 'image',
+        path: 'D:\\workspace\\out.png',
+        caption: '截图',
+        name: undefined,
+      }],
+    }]);
+    assert.doesNotMatch(adapter.streamEnds[0]?.text || '', /cti-send/);
+    assert.equal(taskStateMap.size, 0);
+    assert.equal(clock.activeCount(), 0);
+  });
+
+  it('merges desktop terminal artifacts when the SDK stream finishes first', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    adapter.streamEndResult = true;
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-sdk-first-terminal-artifact',
+      userId: 'user-sdk-first-terminal-artifact',
+    } as const;
+    router.bindToSdkSession(address, 'desktop-thread-sdk-first-terminal-artifact', {
+      workingDirectory: 'D:\\workspace\\sdk-first-terminal-artifact',
+      displayName: 'Desktop artifact thread',
+    });
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const delivered: Array<{ text: string; attachments: OutboundAttachment[] }> = [];
+    const terminalFinalizeResult = createDeferred<boolean>();
+    let capturedAbortSignal: AbortSignal | undefined;
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-sdk-first-terminal-artifact-1',
+        address,
+        text: 'send image',
+        timestamp: Date.now(),
+      },
+      'send image',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = Date.now();
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return ''; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse(_adapter, _address, responseText, _sessionId, _replyTo, attachments = []) {
+          delivered.push({ text: responseText, attachments });
+        },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (
+          _binding,
+          _text,
+          _onPermission,
+          abortSignal,
+          _files,
+          onPartialText,
+          _onToolEvent,
+          _onTaskEvent,
+          _onStatusNote,
+          onPromptPrepared,
+        ) => {
+          capturedAbortSignal = abortSignal;
+          onPromptPrepared?.('send image');
+          onPartialText?.('SDK 流回复');
+          setTimeout(() => {
+            const task = Array.from(taskStateMap.values())[0];
+            if (!task?.finalizeFromExternalTerminal) {
+              terminalFinalizeResult.reject(new Error('missing active task'));
+              return;
+            }
+            task.finalizeFromExternalTerminal(
+              'completed',
+              '检测到桌面线程已完成当前任务。',
+              [
+                '桌面最终回复',
+                '',
+                '<cti-send>{"type":"image","path":"D:\\\\workspace\\\\out.png","caption":"截图"}</cti-send>',
+              ].join('\n'),
+            ).then(terminalFinalizeResult.resolve, terminalFinalizeResult.reject);
+          }, 0);
+          return {
+            responseText: 'SDK 流回复',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: false,
+            errorMessage: '',
+            permissionRequests: [],
+            sdkSessionId: 'desktop-thread-sdk-first-terminal-artifact',
+          };
+        },
+        desktopTerminalFinalizationTimeoutMs: 50,
+      },
+    );
+
+    assert.equal(await terminalFinalizeResult.promise, true);
+    assert.equal(capturedAbortSignal?.aborted, false);
+    assert.deepEqual(adapter.streamEnds, [{ status: 'completed', text: '桌面最终回复' }]);
+    assert.deepEqual(delivered, [{
+      text: '',
+      attachments: [{
+        kind: 'image',
+        path: 'D:\\workspace\\out.png',
+        caption: '截图',
+        name: undefined,
+      }],
+    }]);
+    assert.equal(taskStateMap.size, 0);
+  });
+
   it('does not show silence before the configured startup threshold', async () => {
     const adapter = new FakeFeishuStreamingAdapter();
     const address = {
@@ -425,6 +656,92 @@ describe('interactive-message-runner', () => {
 
           clock.advance(150_000);
           assert.equal(adapter.streamedStatuses.at(-1), '已运行 3分，上次响应距今 3分');
+
+          return {
+            responseText: '最终回复',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: false,
+            errorMessage: '',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+        nowMs: () => clock.now(),
+        setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
+        clearIntervalFn: (handle) => clock.clearInterval(handle),
+        streamStatusIdleDetectionStartMs: 180_000,
+        streamStatusHeartbeatMs: 10_000,
+      },
+    );
+  });
+
+  it('does not reset last response age when only tool progress is updated', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-tool-age',
+      userId: 'user-tool-age',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\tool-age');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const clock = createManualIntervalClock();
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-tool-age-1',
+        address,
+        text: 'hello',
+        timestamp: clock.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = clock.now();
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-tool-age'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse() {},
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (
+          _binding,
+          _text,
+          _onPermission,
+          _abortSignal,
+          _files,
+          onPartialText,
+          onToolEvent,
+        ) => {
+          onPartialText?.('第一段输出');
+          clock.advance(180_000);
+          onToolEvent?.('tool-1', 'shell_command', 'running');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 3分');
+
+          clock.advance(10_000);
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 3分10秒，上次响应距今 3分10秒');
 
           return {
             responseText: '最终回复',

@@ -11,6 +11,8 @@ export interface DesktopMirrorTurnState {
   streamKey: string;
   startedAt: string;
   lastActivityAt: string;
+  lastContentResponseAt?: string | null;
+  /** @deprecated use lastContentResponseAt. Kept for persisted/test compatibility. */
   lastResponseAt?: string | null;
   lastStatusText: string | null;
   lastStatusAt: number;
@@ -66,6 +68,8 @@ export function createMirrorTurnState(
     streamKey: buildMirrorStreamKey(sessionId, turnId || null, safeTimestamp),
     startedAt: safeTimestamp,
     lastActivityAt: safeTimestamp,
+    lastContentResponseAt: null,
+    lastResponseAt: null,
     lastStatusText: null,
     lastStatusAt: 0,
     statusNote: null,
@@ -124,11 +128,21 @@ export function ensureMirrorTurnState<TSubscription extends MirrorTurnStateHolde
   return subscription.pendingTurn;
 }
 
-function markMirrorResponse(
+function markMirrorActivity(
   turnState: DesktopMirrorTurnState,
   timestamp: string,
 ): void {
-  turnState.lastResponseAt = timestamp || nowIso();
+  turnState.lastActivityAt = timestamp || nowIso();
+}
+
+function markMirrorContentResponse(
+  turnState: DesktopMirrorTurnState,
+  timestamp: string,
+): void {
+  const responseAt = timestamp || nowIso();
+  markMirrorActivity(turnState, responseAt);
+  turnState.lastContentResponseAt = responseAt;
+  turnState.lastResponseAt = responseAt;
 }
 
 export function finalizeMirrorTurn<TSubscription extends MirrorTurnStateHolder>(
@@ -226,7 +240,7 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
         if (text) {
           pendingTurn.lastAssistantText = text;
           appendMirrorStreamText(pendingTurn, text);
-          markMirrorResponse(pendingTurn, record.timestamp);
+          markMirrorContentResponse(pendingTurn, record.timestamp);
           hooks.onStreamText?.(subscription, pendingTurn);
         }
       } else if (record.role === 'commentary') {
@@ -234,7 +248,7 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
         if (text) {
           pendingTurn.lastCommentaryText = text;
           appendMirrorStreamText(pendingTurn, text);
-          markMirrorResponse(pendingTurn, record.timestamp);
+          markMirrorContentResponse(pendingTurn, record.timestamp);
           hooks.onStreamText?.(subscription, pendingTurn);
         }
       }
@@ -246,7 +260,7 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
       const text = record.content.trim();
       if (!text) continue;
       pendingTurn.statusNote = text;
-      markMirrorResponse(pendingTurn, record.timestamp);
+      markMirrorActivity(pendingTurn, record.timestamp);
       hooks.onStatusProgress?.(subscription, pendingTurn);
       continue;
     }
@@ -254,7 +268,7 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
     if (record.type === 'plan_update') {
       const pendingTurn = ensureMirrorTurnState(subscription, record);
       pendingTurn.taskItems = record.tasks || [];
-      markMirrorResponse(pendingTurn, record.timestamp);
+      markMirrorActivity(pendingTurn, record.timestamp);
       hooks.onTaskProgress?.(subscription, pendingTurn);
       continue;
     }
@@ -268,7 +282,7 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
         name: toolName,
         status: 'running',
       });
-      markMirrorResponse(pendingTurn, record.timestamp);
+      markMirrorActivity(pendingTurn, record.timestamp);
       hooks.onToolProgress?.(subscription, pendingTurn);
       continue;
     }
@@ -282,7 +296,7 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
         name: existing?.name || record.toolName || 'tool',
         status: record.isError ? 'error' : 'complete',
       });
-      markMirrorResponse(pendingTurn, record.timestamp);
+      markMirrorActivity(pendingTurn, record.timestamp);
       hooks.onToolProgress?.(subscription, pendingTurn);
       continue;
     }

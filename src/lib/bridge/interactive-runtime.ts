@@ -41,15 +41,6 @@ function isTerminalSessionHealthStatus(status: BridgeSession['health_status'] | 
   return Boolean(status && TERMINAL_SESSION_HEALTH_STATUSES.has(status));
 }
 
-function terminalOutcomeFromHealthStatus(
-  status: BridgeSession['health_status'] | undefined,
-): 'completed' | 'failed' | 'aborted' | null {
-  if (status === 'completed') return 'completed';
-  if (status === 'failed') return 'failed';
-  if (status === 'aborted') return 'aborted';
-  return null;
-}
-
 export function createInteractiveRuntime(
   getState: () => BridgeInteractiveRuntimeState,
   deps: CreateInteractiveRuntimeDeps,
@@ -128,14 +119,7 @@ export function createInteractiveRuntime(
     for (const session of store.listSessions()) {
       if (!isTerminalSessionHealthStatus(session.health_status)) continue;
 
-      const activeTask = getState().activeTasks.get(session.id);
-      if (activeTask) {
-        const outcome = terminalOutcomeFromHealthStatus(session.health_status);
-        if (outcome) {
-          await finalizeTerminalActiveTask(session.id, outcome, session.health_reason || undefined);
-        }
-        continue;
-      }
+      if (getState().activeTasks.has(session.id)) continue;
 
       const queuedCount = getQueuedCount(session.id);
       const persistedQueuedCount = session.queued_count && session.queued_count > 0

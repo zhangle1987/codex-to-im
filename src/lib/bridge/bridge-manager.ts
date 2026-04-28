@@ -18,7 +18,6 @@ import { inspect } from 'node:util';
 import './adapters/index.js';
 import * as router from './channel-router.js';
 import * as broker from './permission-broker.js';
-import { deliver } from './delivery-layer.js';
 import { getBridgeContext } from './context.js';
 import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
 import {
@@ -48,9 +47,7 @@ import {
   consumeMirrorRecords as consumeMirrorRecordsBase,
   flushTimedOutMirrorTurn as flushTimedOutMirrorTurnBase,
   hasPendingMirrorWork as hasPendingMirrorWorkBase,
-  type DesktopMirrorTurnState,
   type FinalizedDesktopMirrorTurn,
-  type MirrorTurnHooks,
 } from './mirror-turns.js';
 import {
   abortMirrorSuppression as abortMirrorSuppressionBase,
@@ -72,9 +69,6 @@ import {
 } from './bridge-adapter-runtime.js';
 import {
   formatBindingChatLabel,
-  getChannelProviderKey,
-  getFeedbackParseMode,
-  renderFeedbackText,
 } from './bridge-channel-runtime.js';
 import {
   formatDisplayedModel,
@@ -86,7 +80,6 @@ import {
 } from './bridge-session-support.js';
 import { handleBridgeCommand } from './command-dispatch.js';
 import {
-  formatInteractiveRuntimeStatus,
   runInteractiveMessage,
 } from './interactive-message-runner.js';
 import {
@@ -94,16 +87,16 @@ import {
   type BridgeInteractiveRuntimeState,
 } from './interactive-runtime.js';
 import { createMirrorRuntime } from './mirror-runtime.js';
+import {
+  createMirrorFeedbackController,
+  type MirrorStructuredStreamStatusConfig,
+} from './mirror-feedback-controller.js';
 import { probeCodexThreadProcess } from './session-health-process.js';
 import { createSessionHealthRuntime } from './session-health-runtime.js';
 import { deliverBridgeNotice, deliverResponse } from './feedback-delivery.js';
-import {
-  finalizeStreamFeedback,
-  pushStreamFeedbackText,
-  pushStreamFeedbackStatus,
-  pushStreamFeedbackTasks,
-  pushStreamFeedbackTools,
-} from './stream-feedback-controller.js';
+import { routeDesktopRecords } from './turns/desktop-terminal-router.js';
+import { createTurnCoordinator } from './turns/turn-coordinator.js';
+import type { BridgeTurnTerminalRecord } from './turns/turn-types.js';
 
 const GLOBAL_KEY = '__bridge_manager__';
 const DANGLING_MIRROR_THREAD_RETRY_LIMIT = 3;
@@ -114,6 +107,10 @@ const MIRROR_WATCH_DEBOUNCE_MS = 350;
 const MIRROR_EVENT_BATCH_LIMIT = 8;
 const MIRROR_SUPPRESSION_WINDOW_MS = 4_000;
 const MIRROR_PROMPT_MATCH_GRACE_MS = 120_000;
+// When IM drives a Desktop thread, Desktop task_complete is the canonical
+// final source. If the SDK stream finishes first, wait for the terminal JSONL
+// record before falling back to the SDK response.
+const DESKTOP_TERMINAL_FINALIZATION_TIMEOUT_MS = 30_000;
 const MIRROR_STREAM_STATUS_IDLE_START_MS = 180_000;
 const MIRROR_STREAM_STATUS_HEARTBEAT_MS = 10_000;
 // Timeout after the last desktop event before we flush a buffered mirror turn
@@ -239,6 +236,25 @@ const INTERACTIVE_RUNTIME = createInteractiveRuntime(getState, {
   nowIso,
 });
 
+function formatDesktopTerminalDetail(terminal: BridgeTurnTerminalRecord): string {
+  if (terminal.outcome === 'aborted') {
+    return '检测到桌面线程已停止当前任务。';
+  }
+  if (terminal.outcome === 'failed') {
+    return '检测到桌面线程当前任务执行失败。';
+  }
+  return '检测到桌面线程已完成当前任务。';
+}
+
+const TURN_COORDINATOR = createTurnCoordinator({
+  finalizeTerminalTurn: (turn, terminal) => INTERACTIVE_RUNTIME.finalizeTerminalActiveTask(
+    turn.sessionId,
+    terminal.outcome,
+    formatDesktopTerminalDetail(terminal),
+    terminal.text,
+  ),
+});
+
 const SESSION_HEALTH_RUNTIME = createSessionHealthRuntime({
   getStore: () => getBridgeContext().store,
   nowIso,
@@ -349,33 +365,6 @@ function syncMirrorSessionStateSafe(sessionId: string, context: string): void {
   }
 }
 
-function getMirrorStreamingAdapter(subscription: DesktopMirrorSubscription): BaseChannelAdapter | null {
-  const state = getState();
-  const adapter = state.adapters.get(subscription.channelType);
-  if (!adapter || !adapter.isRunning()) return null;
-  if (getChannelProviderKey(subscription.channelType) !== 'feishu') return null;
-  if (typeof adapter.onStreamText !== 'function' || typeof adapter.onStreamEnd !== 'function') {
-    return null;
-  }
-  return adapter;
-}
-
-function getMirrorStreamingText(
-  subscription: DesktopMirrorSubscription,
-  turnState: DesktopMirrorTurnState,
-): string {
-  const title = getDesktopThreadTitle(subscription.threadId)?.trim() || '桌面线程';
-  const markdown = getFeedbackParseMode(subscription.channelType) === 'Markdown';
-  const rendered = formatMirrorMessage(
-    title,
-    turnState.userText,
-    turnState.streamedText,
-    markdown,
-    true,
-  );
-  return rendered || buildMirrorTitle(title, markdown);
-}
-
 function getMirrorStructuredStreamStatusConfig(): {
   idleStartMs: number;
   heartbeatMs: number;
@@ -395,110 +384,20 @@ function getMirrorStructuredStreamStatusConfig(): {
   };
 }
 
-function startMirrorStreaming(
-  subscription: DesktopMirrorSubscription,
-  turnState: DesktopMirrorTurnState,
-): void {
-  const adapter = getMirrorStreamingAdapter(subscription);
-  if (!adapter || turnState.streamStarted) return;
-
-  try {
-    adapter.onMirrorStreamStart?.(subscription.chatId, turnState.streamKey);
-    if (!adapter.onMirrorStreamStart) {
-      adapter.onStreamText?.(subscription.chatId, '', turnState.streamKey);
-    }
-    turnState.streamStarted = true;
-  } catch {
-    // Non-critical best effort only.
-  }
-}
-
-function createMirrorStreamFeedbackTarget(
-  subscription: DesktopMirrorSubscription,
-  turnState: DesktopMirrorTurnState,
-  adapter: BaseChannelAdapter,
-): {
-  adapter: BaseChannelAdapter;
-  channelType: string;
-  chatId: string;
-  streamKey: string;
-  ensureStarted(): void;
-} {
-  return {
-    adapter,
-    channelType: subscription.channelType,
-    chatId: subscription.chatId,
-    streamKey: turnState.streamKey,
-    ensureStarted: () => {
-      startMirrorStreaming(subscription, turnState);
-    },
-  };
-}
-
-function pushMirrorStreamingStatus(
-  subscription: DesktopMirrorSubscription,
-  turnState: DesktopMirrorTurnState,
-  options: {
-    nowMs?: number;
-    lastResponseAgeMs?: number | null;
-    minIntervalMs?: number;
-  } = {},
-): void {
-  const adapter = getMirrorStreamingAdapter(subscription);
-  if (!adapter || typeof adapter.onStreamStatus !== 'function') return;
-  if (!(adapter.supportsStructuredStreamingUi?.(subscription.chatId) ?? true)) return;
-
-  const startedAtMs = Date.parse(turnState.startedAt);
-  if (!Number.isFinite(startedAtMs)) return;
-
-  const nowMs = options.nowMs ?? Date.now();
-  const minIntervalMs = Math.max(0, options.minIntervalMs ?? 0);
-  if (minIntervalMs > 0 && turnState.lastStatusAt > 0 && nowMs - turnState.lastStatusAt < minIntervalMs) {
-    return;
-  }
-
-  const statusText = formatInteractiveRuntimeStatus(
-    Math.max(0, nowMs - startedAtMs),
-    options.lastResponseAgeMs,
-    turnState.statusNote,
-  );
-  if (turnState.lastStatusText === statusText) return;
-
-  pushStreamFeedbackStatus(
-    createMirrorStreamFeedbackTarget(subscription, turnState, adapter),
-    statusText,
-  );
-  turnState.lastStatusText = statusText;
-  turnState.lastStatusAt = nowMs;
-}
+const MIRROR_FEEDBACK = createMirrorFeedbackController({
+  getAdapter: (channelType) => getState().adapters.get(channelType) || null,
+  getThreadTitle: (threadId) => getDesktopThreadTitle(threadId),
+  nowIso,
+  eventBatchLimit: MIRROR_EVENT_BATCH_LIMIT,
+  deliverResponse,
+});
 
 function refreshMirrorStreamingStatus(
   subscription: DesktopMirrorSubscription,
   nowMs = Date.now(),
-  config = getMirrorStructuredStreamStatusConfig(),
+  config: MirrorStructuredStreamStatusConfig = getMirrorStructuredStreamStatusConfig(),
 ): void {
-  const pendingTurn = subscription.pendingTurn;
-  if (!pendingTurn?.streamStarted) return;
-
-  const startedAtMs = Date.parse(pendingTurn.startedAt);
-  if (!Number.isFinite(startedAtMs)) return;
-
-  const elapsedMs = nowMs - startedAtMs;
-  if (elapsedMs < config.idleStartMs) return;
-
-  const lastResponseAtMs = pendingTurn.lastResponseAt
-    ? Date.parse(pendingTurn.lastResponseAt)
-    : NaN;
-  const lastResponseAgeMs = Number.isFinite(lastResponseAtMs)
-    ? nowMs - lastResponseAtMs
-    : null;
-  if (lastResponseAgeMs != null && lastResponseAgeMs < config.heartbeatMs) return;
-
-  pushMirrorStreamingStatus(subscription, pendingTurn, {
-    nowMs,
-    lastResponseAgeMs,
-    minIntervalMs: config.heartbeatMs,
-  });
+  MIRROR_FEEDBACK.refreshMirrorStreamingStatus(subscription, nowMs, config);
 }
 
 function refreshActiveMirrorStreamingStatuses(nowMs = Date.now()): void {
@@ -507,153 +406,21 @@ function refreshActiveMirrorStreamingStatuses(nowMs = Date.now()): void {
   }
 }
 
-function updateMirrorStreaming(
-  subscription: DesktopMirrorSubscription,
-  turnState: DesktopMirrorTurnState,
-): void {
-  const adapter = getMirrorStreamingAdapter(subscription);
-  if (!adapter) return;
-  pushStreamFeedbackText(
-    createMirrorStreamFeedbackTarget(subscription, turnState, adapter),
-    getMirrorStreamingText(subscription, turnState),
-  );
-  pushMirrorStreamingStatus(subscription, turnState);
-}
-
-function updateMirrorToolProgress(
-  subscription: DesktopMirrorSubscription,
-  turnState: DesktopMirrorTurnState,
-): void {
-  const adapter = getMirrorStreamingAdapter(subscription);
-  if (!adapter) return;
-  pushStreamFeedbackTools(
-    createMirrorStreamFeedbackTarget(subscription, turnState, adapter),
-    Array.from(turnState.toolCalls.values()),
-  );
-  pushMirrorStreamingStatus(subscription, turnState);
-}
-
-function updateMirrorTaskProgress(
-  subscription: DesktopMirrorSubscription,
-  turnState: DesktopMirrorTurnState,
-): void {
-  const adapter = getMirrorStreamingAdapter(subscription);
-  if (!adapter) return;
-  pushStreamFeedbackTasks(
-    createMirrorStreamFeedbackTarget(subscription, turnState, adapter),
-    turnState.taskItems,
-  );
-  pushMirrorStreamingStatus(subscription, turnState);
-}
-
-function updateMirrorStatusProgress(
-  subscription: DesktopMirrorSubscription,
-  turnState: DesktopMirrorTurnState,
-): void {
-  const adapter = getMirrorStreamingAdapter(subscription);
-  if (!adapter) return;
-  pushMirrorStreamingStatus(subscription, turnState);
-}
-
 function stopMirrorStreaming(
   subscription: DesktopMirrorSubscription,
   status: 'completed' | 'interrupted' = 'interrupted',
 ): void {
-  const adapter = getMirrorStreamingAdapter(subscription);
-  const pendingTurn = subscription.pendingTurn;
-  if (!adapter || !pendingTurn?.streamStarted) return;
-  void finalizeStreamFeedback(
-    createMirrorStreamFeedbackTarget(subscription, pendingTurn, adapter),
-    status,
-    getMirrorStreamingText(subscription, pendingTurn),
-  );
-}
-
-async function deliverMirrorTurn(
-  subscription: DesktopMirrorSubscription,
-  turn: FinalizedDesktopMirrorTurn,
-): Promise<void> {
-  const state = getState();
-  const adapter = state.adapters.get(subscription.channelType);
-  if (!adapter || !adapter.isRunning()) return;
-
-  const title = getDesktopThreadTitle(subscription.threadId)?.trim() || '桌面线程';
-  const responseParseMode = getFeedbackParseMode(subscription.channelType);
-  const markdown = responseParseMode === 'Markdown';
-  const renderedTextBase = formatMirrorMessage(title, turn.userText, turn.text, markdown);
-  const renderedStreamTextBase = formatMirrorMessage(title, turn.userText, turn.text, markdown, true);
-  const renderedText = turn.timedOut
-    ? appendMirrorTimeoutNotice(renderedTextBase || buildMirrorTitle(title, markdown), markdown)
-    : renderedTextBase;
-  const renderedStreamText = turn.timedOut
-    ? appendMirrorTimeoutNotice(renderedStreamTextBase || buildMirrorTitle(title, markdown), markdown)
-    : renderedStreamTextBase;
-  const text = renderedText ? renderFeedbackText(renderedText, responseParseMode) : '';
-  const streamText = renderFeedbackText(
-    renderedStreamText || buildMirrorTitle(title, markdown),
-    responseParseMode,
-  );
-
-  if (getChannelProviderKey(subscription.channelType) === 'feishu' && typeof adapter.onStreamEnd === 'function') {
-    try {
-      const finalized = await adapter.onStreamEnd(
-        subscription.chatId,
-        turn.status,
-        streamText,
-        turn.streamKey,
-      );
-      if (finalized) {
-        subscription.lastDeliveredAt = turn.timestamp || nowIso();
-        return;
-      }
-    } catch (error) {
-      console.warn('[bridge-manager] Mirror stream finalize failed:', error instanceof Error ? error.message : error);
-    }
-  }
-
-  if (!text) return;
-
-  const response = await deliver(adapter, {
-    address: {
-      channelType: subscription.channelType,
-      chatId: subscription.chatId,
-    },
-    text,
-    parseMode: responseParseMode,
-  }, {
-    sessionId: subscription.sessionId,
-    dedupKey: `mirror:${subscription.bindingId}:${turn.signature}`,
-  });
-
-  if (!response.ok) {
-    throw new Error(response.error || 'mirror delivery failed');
-  }
-
-  subscription.lastDeliveredAt = turn.timestamp || nowIso();
+  MIRROR_FEEDBACK.stopMirrorStreaming(subscription, status);
 }
 
 async function deliverMirrorTurns(
   subscription: DesktopMirrorSubscription,
   turns: FinalizedDesktopMirrorTurn[],
 ): Promise<{ deliveredCount: number; error?: unknown }> {
-  let deliveredCount = 0;
-  for (const turn of turns.slice(0, MIRROR_EVENT_BATCH_LIMIT)) {
-    try {
-      await deliverMirrorTurn(subscription, turn);
-      deliveredCount += 1;
-    } catch (error) {
-      return { deliveredCount, error };
-    }
-  }
-  return { deliveredCount };
+  return MIRROR_FEEDBACK.deliverMirrorTurns(subscription, turns);
 }
 
-const MIRROR_TURN_HOOKS: MirrorTurnHooks<DesktopMirrorSubscription> = {
-  onStreamText: updateMirrorStreaming,
-  onStatusProgress: updateMirrorStatusProgress,
-  onTaskProgress: updateMirrorTaskProgress,
-  onToolProgress: updateMirrorToolProgress,
-};
+const MIRROR_TURN_HOOKS = MIRROR_FEEDBACK.hooks;
 
 function consumeMirrorRecords(
   subscription: DesktopMirrorSubscription,
@@ -666,6 +433,9 @@ function flushTimedOutMirrorTurn(
   subscription: DesktopMirrorSubscription,
   nowMs = Date.now(),
 ): FinalizedDesktopMirrorTurn | null {
+  if (subscription.pendingTurn?.streamStarted) {
+    return null;
+  }
   return flushTimedOutMirrorTurnBase(subscription, MIRROR_TURN_BUFFER_TIMEOUT_MS, nowMs);
 }
 
@@ -677,33 +447,10 @@ function consumeBufferedMirrorTurns(
   subscription: DesktopMirrorSubscription,
   nowMs = Date.now(),
 ): FinalizedDesktopMirrorTurn[] {
-  return consumeBufferedMirrorTurnsBase(subscription, MIRROR_TURN_BUFFER_TIMEOUT_MS, nowMs, MIRROR_TURN_HOOKS);
-}
-
-function finalizeInteractiveTaskFromMirrorRecords(sessionId: string, records: DesktopMirrorRecord[]): Promise<boolean> {
-  let terminalRecord: DesktopMirrorRecord | null = null;
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    const record = records[index];
-    if (record.type === 'task_complete' || record.type === 'task_aborted') {
-      terminalRecord = record;
-      break;
-    }
-  }
-  if (!terminalRecord) return Promise.resolve(false);
-
-  const outcome = terminalRecord.type === 'task_complete' ? 'completed' : 'aborted';
-  const detail = terminalRecord.type === 'task_complete'
-    ? '检测到桌面线程已完成当前任务。'
-    : '检测到桌面线程已停止当前任务。';
-  return INTERACTIVE_RUNTIME.finalizeTerminalActiveTask(
-    sessionId,
-    outcome,
-    detail,
-    terminalRecord.content,
-  ).catch((error) => {
-    console.error('[bridge-manager] Failed to finalize terminal interactive task:', describeUnknownError(error));
-    return false;
-  });
+  const timeoutMs = subscription.pendingTurn?.streamStarted
+    ? Number.POSITIVE_INFINITY
+    : MIRROR_TURN_BUFFER_TIMEOUT_MS;
+  return consumeBufferedMirrorTurnsBase(subscription, timeoutMs, nowMs, MIRROR_TURN_HOOKS);
 }
 
 const MIRROR_RUNTIME = createMirrorRuntime(getState, {
@@ -716,12 +463,16 @@ const MIRROR_RUNTIME = createMirrorRuntime(getState, {
   describeUnknownError,
   getDesktopSessionByThreadIdSafe,
   syncMirrorSessionStateSafe,
-  isMirrorSuppressed,
   filterSuppressedMirrorRecords,
   observeSessionHealthRecords: (sessionId, threadId, records) => {
     SESSION_HEALTH_RUNTIME.observeDesktopMirrorRecords(sessionId, threadId, records);
-    void finalizeInteractiveTaskFromMirrorRecords(sessionId, records);
   },
+  routeDesktopRecords: (sessionId, threadId, records) => routeDesktopRecords(
+    sessionId,
+    threadId,
+    records,
+    TURN_COORDINATOR,
+  ),
   consumeMirrorRecords,
   flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription),
   hasPendingMirrorWork,
@@ -1088,6 +839,7 @@ async function handleMessage(
   try {
     await runInteractiveMessage(adapter, msg, text, hasAttachments ? msg.attachments : undefined, {
       registerInteractiveTask: (task) => INTERACTIVE_RUNTIME.registerInteractiveTask(task),
+      registerBridgeTurn: (turn) => TURN_COORDINATOR.registerInteractiveTurn(turn),
       resetMirrorSessionForInteractiveRun,
       isCurrentInteractiveTask: (sessionId, taskId) => INTERACTIVE_RUNTIME.isCurrentInteractiveTask(sessionId, taskId),
       touchInteractiveTask: (sessionId, taskId) => INTERACTIVE_RUNTIME.touchInteractiveTask(sessionId, taskId),
@@ -1104,8 +856,10 @@ async function handleMessage(
       abortMirrorSuppression,
       settleMirrorSuppression,
       releaseInteractiveTask: (sessionId, taskId) => INTERACTIVE_RUNTIME.releaseInteractiveTask(sessionId, taskId),
+      releaseBridgeTurn: (sessionId, taskId) => TURN_COORDINATOR.releaseSessionTurn(sessionId, taskId),
       deliverResponse,
       persistSdkSessionUpdate,
+      desktopTerminalFinalizationTimeoutMs: DESKTOP_TERMINAL_FINALIZATION_TIMEOUT_MS,
     });
   } finally {
     ack();
@@ -1178,6 +932,7 @@ function resetStateForTests(): void {
   state.mirrorIgnoredTurnIds.clear();
   state.queuedCounts.clear();
   state.sessionLocks.clear();
+  TURN_COORDINATOR.clear();
   state.mirrorSyncInFlight = false;
   if (state.reconcileTimer) {
     clearInterval(state.reconcileTimer);
@@ -1223,11 +978,11 @@ export const _testOnly = {
   buildAdapterConfigFingerprint,
   consumeMirrorRecords,
   consumeBufferedMirrorTurns,
+  deliverMirrorTurns,
   flushTimedOutMirrorTurn,
   refreshMirrorStreamingStatus,
   filterSuppressedMirrorRecords,
   isMirrorSuppressed,
-  finalizeInteractiveTaskFromMirrorRecords,
   reconcileTerminalSessionRuntimeState: () => INTERACTIVE_RUNTIME.reconcileTerminalSessionRuntimeState(),
   beginMirrorSuppression,
   abortMirrorSuppression,

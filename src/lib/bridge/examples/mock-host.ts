@@ -85,7 +85,11 @@ class InMemoryStore implements BridgeStore {
   listSessions() { return Array.from(this.sessions.values()); }
 
   findSessionBySdkSessionId(sdkSessionId: string) {
-    return Array.from(this.sessions.values()).find((session) => session.sdk_session_id === sdkSessionId) ?? null;
+    return Array.from(this.sessions.values()).find((session) => (
+      session.sdk_session_id === sdkSessionId
+      || session.codex_thread_id === sdkSessionId
+      || session.desktop_thread_id === sdkSessionId
+    )) ?? null;
   }
 
   createSession(
@@ -153,7 +157,11 @@ class InMemoryStore implements BridgeStore {
   setSessionRuntimeStatus() {}
   updateSdkSessionId(sessionId: string, sdkSessionId: string) {
     const session = this.sessions.get(sessionId);
-    if (session) session.sdk_session_id = sdkSessionId;
+    if (session) {
+      session.sdk_session_id = sdkSessionId;
+      session.codex_thread_id = sdkSessionId || undefined;
+      session.thread_origin = session.thread_origin || (sdkSessionId ? 'bridge' : undefined);
+    }
   }
   updateSessionModel() {}
   syncSdkTasks() {}

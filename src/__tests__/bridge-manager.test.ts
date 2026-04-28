@@ -13,6 +13,7 @@ import { BaseChannelAdapter, registerAdapterFactory } from '../lib/bridge/channe
 import { createMirrorSubscription } from '../lib/bridge/mirror-subscription-state.js';
 import * as router from '../lib/bridge/channel-router.js';
 import type { LifecycleHooks, LLMProvider, PermissionGateway, StreamChatParams } from '../lib/bridge/host.js';
+import type { OutboundMessage, SendResult } from '../lib/bridge/types.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 
@@ -682,6 +683,8 @@ describe('bridge-manager status formatting', () => {
       streamKey: 'mirror:session-1:2026-03-25T08:00:00.000Z',
       startedAt: '2026-03-25T08:00:00.000Z',
       lastActivityAt: '2026-03-25T08:00:00.000Z',
+      lastContentResponseAt: null,
+      lastResponseAt: null,
       lastStatusText: null,
       lastStatusAt: 0,
       statusNote: null,
@@ -882,6 +885,129 @@ describe('bridge-manager status formatting', () => {
     }
   });
 
+  it('hides outbound artifact blocks from mirror stream text', () => {
+    _testOnly.resetStateForTests();
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const streamedTexts: string[] = [];
+    state.adapters.set('feishu', {
+      channelType: 'feishu',
+      provider: 'feishu',
+      isRunning: () => true,
+      onMirrorStreamStart: () => {},
+      onStreamText: (_chatId: string, text: string) => {
+        streamedTexts.push(text);
+      },
+      onStreamStatus: () => {},
+      onStreamEnd: async () => true,
+    });
+
+    const subscription = {
+      pendingTurn: null,
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+      channelType: 'feishu',
+      chatId: 'chat-1',
+    } as { pendingTurn: any; threadId: string };
+
+    _testOnly.consumeMirrorRecords(subscription as any, [
+      {
+        signature: 'user',
+        type: 'message',
+        role: 'user',
+        content: 'desktop prompt',
+        timestamp: '2026-03-25T08:00:00.500Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'assistant',
+        type: 'message',
+        role: 'assistant',
+        content: [
+          'done',
+          '',
+          '<cti-send>{"type":"image","path":"D:\\\\workspace\\\\out.png","caption":"截图"}</cti-send>',
+        ].join('\n'),
+        timestamp: '2026-03-25T08:00:01.000Z',
+        turnId: 'turn-1',
+      },
+    ]);
+
+    assert.ok(streamedTexts.at(-1)?.includes('done'));
+    assert.equal(streamedTexts.some((text) => text.includes('cti-send')), false);
+  });
+
+  it('sends outbound artifacts from finalized mirror turns as attachments', async () => {
+    _testOnly.resetStateForTests();
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const sentMessages: OutboundMessage[] = [];
+    const streamEnds: Array<{ status: 'completed' | 'interrupted'; text: string; streamKey?: string }> = [];
+    state.adapters.set('feishu', {
+      channelType: 'feishu',
+      provider: 'feishu',
+      isRunning: () => true,
+      send: async (message: OutboundMessage): Promise<SendResult> => {
+        sentMessages.push(message);
+        return { ok: true, messageId: `sent-${sentMessages.length}` };
+      },
+      onStreamEnd: async (
+        _chatId: string,
+        status: 'completed' | 'interrupted',
+        text: string,
+        streamKey?: string,
+      ): Promise<boolean> => {
+        streamEnds.push({ status, text, streamKey });
+        return true;
+      },
+    });
+
+    const subscription = createMirrorSubscription({
+      bindingId: 'binding-1',
+      sessionId: 'session-1',
+      channelType: 'feishu',
+      chatId: 'chat-1',
+      threadId: 'thread-1',
+      filePath: null,
+      lastDeliveredAt: null,
+    });
+
+    const result = await _testOnly.deliverMirrorTurns(subscription, [{
+      streamKey: 'mirror:session-1:turn-1',
+      userText: 'desktop prompt',
+      text: [
+        '结果如下',
+        '',
+        '<cti-send>{"type":"image","path":"D:\\\\workspace\\\\out.png","caption":"结果图"}</cti-send>',
+      ].join('\n'),
+      signature: 'complete',
+      timestamp: '2026-03-25T08:00:03.000Z',
+      status: 'completed',
+    }]);
+
+    assert.deepEqual(result, { deliveredCount: 1 });
+    assert.equal(streamEnds.length, 1);
+    assert.ok(streamEnds[0]?.text.includes('结果如下'));
+    assert.doesNotMatch(streamEnds[0]?.text || '', /cti-send/);
+    assert.deepEqual(sentMessages.map((message) => ({
+      text: message.text,
+      attachments: message.attachments,
+    })), [
+      {
+        text: '结果图',
+        attachments: undefined,
+      },
+      {
+        text: '',
+        attachments: [{
+          kind: 'image',
+          path: 'D:\\workspace\\out.png',
+          caption: '结果图',
+          name: undefined,
+        }],
+      },
+    ]);
+    assert.equal(subscription.lastDeliveredAt, '2026-03-25T08:00:03.000Z');
+  });
+
   it('refreshes mirror stream status with runtime and last response age during long-running turns', () => {
     _testOnly.resetStateForTests();
     const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
@@ -928,6 +1054,68 @@ describe('bridge-manager status formatting', () => {
     assert.deepEqual(statusEvents, [
       'status:mirror:session-1:turn-1:已运行 5分，上次响应距今 20秒',
     ]);
+  });
+
+  it('retries mirror stream status when the adapter rejects the previous status update', () => {
+    _testOnly.resetStateForTests();
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const statusEvents: string[] = [];
+    let failNext = true;
+    state.adapters.set('feishu', {
+      channelType: 'feishu',
+      provider: 'feishu',
+      isRunning: () => true,
+      onStreamText: () => {},
+      onStreamStatus: (_chatId: string, text: string, streamKey: string) => {
+        statusEvents.push(`status:${streamKey}:${text}`);
+        if (failNext) {
+          failNext = false;
+          throw new Error('status failed');
+        }
+      },
+      onStreamEnd: async () => true,
+    });
+
+    const subscription = {
+      pendingTurn: {
+        turnId: 'turn-1',
+        streamKey: 'mirror:session-1:turn-1',
+        startedAt: '2026-03-25T08:00:00.000Z',
+        lastActivityAt: '2026-03-25T08:04:40.000Z',
+        lastResponseAt: '2026-03-25T08:04:40.000Z',
+        lastStatusText: null,
+        lastStatusAt: 0,
+        userText: 'desktop prompt',
+        lastAssistantText: 'thinking',
+        lastCommentaryText: null,
+        streamedText: 'thinking',
+        streamStarted: true,
+        toolCalls: new Map(),
+      },
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+      channelType: 'feishu',
+      chatId: 'chat-1',
+    } as { pendingTurn: any; threadId: string };
+
+    _testOnly.refreshMirrorStreamingStatus(
+      subscription as any,
+      Date.parse('2026-03-25T08:05:00.000Z'),
+      { idleStartMs: 180_000, heartbeatMs: 10_000 },
+    );
+    assert.equal(subscription.pendingTurn.lastStatusText, null);
+
+    _testOnly.refreshMirrorStreamingStatus(
+      subscription as any,
+      Date.parse('2026-03-25T08:05:00.000Z'),
+      { idleStartMs: 180_000, heartbeatMs: 10_000 },
+    );
+
+    assert.deepEqual(statusEvents, [
+      'status:mirror:session-1:turn-1:已运行 5分，上次响应距今 20秒',
+      'status:mirror:session-1:turn-1:已运行 5分，上次响应距今 20秒',
+    ]);
+    assert.equal(subscription.pendingTurn.lastStatusText, '已运行 5分，上次响应距今 20秒');
   });
 
   it('keeps the original mirror stream key when turnId arrives after streaming has started', () => {
@@ -1106,6 +1294,8 @@ describe('bridge-manager status formatting', () => {
       streamKey: 'mirror:session-1:2026-03-25T08:00:00.000Z',
       startedAt: '2026-03-25T08:00:00.000Z',
       lastActivityAt: '2026-03-25T08:00:00.000Z',
+      lastContentResponseAt: null,
+      lastResponseAt: null,
       lastStatusText: null,
       lastStatusAt: 0,
       statusNote: null,
@@ -1158,6 +1348,63 @@ describe('bridge-manager status formatting', () => {
     ]);
     assert.deepEqual(subscription.bufferedRecords, []);
     assert.equal(subscription.pendingTurn, null);
+  });
+
+  it('keeps an active mirror stream open past the buffer timeout so status can keep refreshing', () => {
+    _testOnly.resetStateForTests();
+    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
+    const statusEvents: string[] = [];
+    state.adapters.set('feishu', {
+      channelType: 'feishu',
+      provider: 'feishu',
+      isRunning: () => true,
+      onStreamText: () => {},
+      onStreamStatus: (_chatId: string, text: string, streamKey: string) => {
+        statusEvents.push(`status:${streamKey}:${text}`);
+      },
+      onStreamEnd: async () => true,
+    });
+
+    const subscription = {
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+      channelType: 'feishu',
+      chatId: 'chat-1',
+      bufferedRecords: [],
+      pendingTurn: {
+        turnId: 'turn-1',
+        streamKey: 'mirror:session-1:turn-1',
+        startedAt: '2026-03-25T08:00:00.000Z',
+        lastActivityAt: '2026-03-25T08:00:00.000Z',
+        lastResponseAt: '2026-03-25T08:00:00.000Z',
+        lastStatusText: null,
+        lastStatusAt: 0,
+        userText: 'desktop prompt',
+        lastAssistantText: 'still running',
+        lastCommentaryText: null,
+        streamedText: 'still running',
+        streamStarted: true,
+        toolCalls: new Map(),
+      },
+    } as { pendingTurn: any; threadId: string; bufferedRecords: unknown[] };
+
+    const finalized = _testOnly.consumeBufferedMirrorTurns(
+      subscription as any,
+      Date.parse('2026-03-25T08:10:01.000Z'),
+    );
+
+    assert.deepEqual(finalized, []);
+    assert.ok(subscription.pendingTurn);
+
+    _testOnly.refreshMirrorStreamingStatus(
+      subscription as any,
+      Date.parse('2026-03-25T08:10:01.000Z'),
+      { idleStartMs: 180_000, heartbeatMs: 10_000 },
+    );
+
+    assert.deepEqual(statusEvents, [
+      'status:mirror:session-1:turn-1:已运行 10分1秒，上次响应距今 10分1秒',
+    ]);
   });
 
   it('suppresses all mirror records from an IM-originated turn until task_complete', () => {
@@ -1580,6 +1827,10 @@ describe('bridge-manager mirror subscription recovery', () => {
     const address = { channelType: 'feishu-default', chatId: 'chat-dangling' } as const;
     const binding = router.createBinding(address, 'D:\\workspace\\dangling');
     store.updateSdkSessionId(binding.codepilotSessionId, 'missing-thread-id');
+    store.updateSession(binding.codepilotSessionId, {
+      desktop_thread_id: 'missing-thread-id',
+      thread_origin: 'desktop',
+    });
 
     const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
     state.running = true;
@@ -1615,6 +1866,10 @@ describe('bridge-manager mirror subscription recovery', () => {
     const address = { channelType: 'feishu-default', chatId: 'chat-sync-failure' } as const;
     const binding = router.createBinding(address, 'D:\\workspace\\sync-failure');
     store.updateSdkSessionId(binding.codepilotSessionId, 'missing-thread-id');
+    store.updateSession(binding.codepilotSessionId, {
+      desktop_thread_id: 'missing-thread-id',
+      thread_origin: 'desktop',
+    });
 
     const originalUpdateSession = store.updateSession.bind(store);
     (store as unknown as { updateSession: typeof store.updateSession }).updateSession = (() => {
@@ -1658,6 +1913,10 @@ describe('bridge-manager mirror subscription recovery', () => {
     const address = { channelType: 'feishu-default', chatId: 'chat-suspended' } as const;
     const binding = router.createBinding(address, 'D:\\workspace\\suspended');
     store.updateSdkSessionId(binding.codepilotSessionId, 'thread-suspended');
+    store.updateSession(binding.codepilotSessionId, {
+      desktop_thread_id: 'thread-suspended',
+      thread_origin: 'desktop',
+    });
 
     const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
     state.running = true;
@@ -1909,66 +2168,6 @@ describe('bridge-manager new session handling', () => {
     assert.equal(store.getSession(newSessionId)?.sdk_session_id || '', '');
     assert.equal(currentBinding?.codepilotSessionId, newSessionId);
     assert.equal(currentBinding?.sdkSessionId || '', '');
-  });
-});
-
-describe('bridge-manager mirror terminal finalization', () => {
-  beforeEach(() => {
-    fs.rmSync(DATA_DIR, { recursive: true, force: true });
-    const store = new JsonFileStore(makeSettings());
-    initBridgeContext({
-      store,
-      llm: noopLlm,
-      permissions: noopPermissions,
-      lifecycle: noopLifecycle,
-    });
-    _testOnly.resetStateForTests();
-  });
-
-  it('finalizes the active IM task when mirror records contain task_complete', async () => {
-    const address = { channelType: 'feishu', chatId: 'chat-terminal-finalize' } as const;
-    const binding = router.createBinding(address, 'D:\\workspace\\terminal-finalize');
-    const state = (globalThis as unknown as Record<string, any>).__bridge_manager__;
-    const finalized: Array<{ outcome: string; detail?: string; finalText?: string }> = [];
-
-    state.activeTasks.set(binding.codepilotSessionId, {
-      id: 'task-terminal-finalize',
-      abortController: new AbortController(),
-      adapter: { channelType: 'feishu', provider: 'feishu' },
-      address,
-      requestMessageId: 'incoming-terminal-finalize',
-      streamKey: 'stream-terminal-finalize',
-      sessionId: binding.codepilotSessionId,
-      hasStreamingCards: true,
-      structuredStreamUiActive: true,
-      lastActivityAt: Date.now(),
-      streamFinalized: false,
-      uiEnded: false,
-      mirrorSuppressionId: null,
-      finalizeFromExternalTerminal: async (outcome: string, detail?: string, finalText?: string) => {
-        finalized.push({ outcome, detail, finalText });
-        state.activeTasks.delete(binding.codepilotSessionId);
-        return true;
-      },
-    });
-
-    const didFinalize = await _testOnly.finalizeInteractiveTaskFromMirrorRecords(
-      binding.codepilotSessionId,
-      [{
-        signature: 'complete',
-        type: 'task_complete',
-        content: '桌面最终回复',
-        timestamp: '2026-04-13T12:00:00.000Z',
-      }],
-    );
-
-    assert.equal(didFinalize, true);
-    assert.deepEqual(finalized, [{
-      outcome: 'completed',
-      detail: '检测到桌面线程已完成当前任务。',
-      finalText: '桌面最终回复',
-    }]);
-    assert.equal(state.activeTasks.has(binding.codepilotSessionId), false);
   });
 });
 

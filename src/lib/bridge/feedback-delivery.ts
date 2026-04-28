@@ -18,6 +18,9 @@ export async function deliverTextResponse(
   responseText: string,
   sessionId?: string,
   replyToMessageId?: string,
+  options?: {
+    audit?: boolean;
+  },
 ): Promise<SendResult> {
   if (!responseText.trim()) return { ok: true };
 
@@ -30,14 +33,14 @@ export async function deliverTextResponse(
       text: responseText,
       parseMode: 'Markdown',
       replyToMessageId,
-    }, { sessionId });
+    }, { sessionId, audit: options?.audit });
   }
   return deliver(adapter, {
     address,
     text: parseMode === 'Markdown' ? responseText : renderedText,
     parseMode,
     replyToMessageId,
-  }, { sessionId });
+  }, { sessionId, audit: options?.audit });
 }
 
 export async function deliverBridgeNotice(
@@ -47,6 +50,7 @@ export async function deliverBridgeNotice(
   options?: {
     sessionId?: string;
     replyToMessageId?: string;
+    audit?: boolean;
   },
 ): Promise<SendResult> {
   return deliverTextResponse(
@@ -55,6 +59,7 @@ export async function deliverBridgeNotice(
     text,
     options?.sessionId,
     options?.replyToMessageId,
+    { audit: options?.audit },
   );
 }
 

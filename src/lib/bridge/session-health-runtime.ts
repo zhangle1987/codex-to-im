@@ -9,7 +9,6 @@ import {
   buildEndStatus,
   buildProgressReason,
   computeBaseDiagnosis,
-  HEALTH_PROCESS_PROBE_CACHE_MS,
   HEALTH_PROGRESS_PERSIST_THROTTLE_MS,
   parseActiveToolsJson,
   serializeActiveTools,
@@ -23,10 +22,6 @@ import type {
   SessionToolStatus,
 } from './session-health-reducer.js';
 
-interface SessionHealthProbeCacheEntry {
-  checkedAtMs: number;
-  result: ThreadProcessProbeResult;
-}
 export type {
   SessionEndOutcome,
   SessionHealthDiagnosis,
@@ -56,7 +51,6 @@ export function createSessionHealthRuntime(
   deps: CreateSessionHealthRuntimeDeps,
 ): SessionHealthRuntime {
   const lastProgressPersistAt = new Map<string, number>();
-  const processProbeCache = new Map<string, SessionHealthProbeCacheEntry>();
 
   function summarizePlanUpdate(tasks: DesktopMirrorRecord['tasks']): string {
     if (!Array.isArray(tasks) || tasks.length === 0) {
@@ -234,10 +228,8 @@ export function createSessionHealthRuntime(
       last_stream_ui_error_at: undefined,
       last_stream_ui_error: undefined,
       stream_ui_consecutive_failures: undefined,
-      last_health_check_at: nowIso,
     }, { force: true });
     lastProgressPersistAt.set(sessionId, Date.now());
-    processProbeCache.delete(sessionId);
   }
 
   function toIso(value: number | null | undefined): string | undefined {
@@ -345,19 +337,7 @@ export function createSessionHealthRuntime(
   async function loadProcessProbe(session: BridgeSession): Promise<ThreadProcessProbeResult | null> {
     const threadId = session.sdk_session_id?.trim();
     if (!threadId || !deps.probeThreadProcess) return null;
-
-    const cached = processProbeCache.get(session.id);
-    const nowMs = Date.now();
-    if (cached && nowMs - cached.checkedAtMs < HEALTH_PROCESS_PROBE_CACHE_MS) {
-      return cached.result;
-    }
-
-    const result = await deps.probeThreadProcess(threadId);
-    processProbeCache.set(session.id, {
-      checkedAtMs: nowMs,
-      result,
-    });
-    return result;
+    return deps.probeThreadProcess(threadId);
   }
 
   async function diagnoseSessionHealth(sessionId: string): Promise<SessionHealthDiagnosis | null> {
@@ -367,23 +347,10 @@ export function createSessionHealthRuntime(
 
     const base = computeBaseDiagnosis(session, Date.now());
     const processProbe = await loadProcessProbe(session);
-    const checkedAt = deps.nowIso();
-    const diagnosis = applyStreamUiDiagnosis(
+    return applyStreamUiDiagnosis(
       applyProcessProbeDiagnosis(base, processProbe),
       Date.now(),
     );
-    const checkedDiagnosis: SessionHealthDiagnosis = {
-      ...diagnosis,
-      checkedAt,
-    };
-
-    updateSessionHealth(sessionId, {
-      health_status: checkedDiagnosis.healthStatus,
-      health_reason: checkedDiagnosis.healthReason,
-      last_health_check_at: checkedAt,
-    }, { touch: false });
-
-    return checkedDiagnosis;
   }
 
   async function diagnoseAllActiveSessions(): Promise<SessionHealthDiagnosis[]> {

@@ -53,6 +53,8 @@ describe('mirror-runtime pending deliveries', () => {
     const session = {
       id: 'session-1',
       sdk_session_id: 'thread-1',
+      desktop_thread_id: 'thread-1',
+      thread_origin: 'desktop',
       mirror_last_event_at: null,
     };
     const store = {
@@ -97,7 +99,6 @@ describe('mirror-runtime pending deliveries', () => {
           : null
       ),
       syncMirrorSessionStateSafe: () => {},
-      isMirrorSuppressed: () => false,
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
@@ -180,6 +181,8 @@ describe('mirror-runtime pending deliveries', () => {
     const session = {
       id: 'session-1',
       sdk_session_id: 'thread-1',
+      desktop_thread_id: 'thread-1',
+      thread_origin: 'desktop',
       mirror_last_event_at: null,
     };
     const store = {
@@ -223,7 +226,6 @@ describe('mirror-runtime pending deliveries', () => {
           : null
       ),
       syncMirrorSessionStateSafe: () => {},
-      isMirrorSuppressed: () => false,
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
@@ -286,6 +288,132 @@ describe('mirror-runtime pending deliveries', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('delivers surviving mirror records after suppression filtering without treating suppression as a global block', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-mirror-runtime-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(filePath, '', 'utf-8');
+
+    const bindings = [{
+      id: 'binding-1',
+      channelType: 'feishu-default',
+      chatId: 'chat-1',
+      codepilotSessionId: 'session-1',
+      sdkSessionId: 'thread-1',
+      active: true,
+    }];
+    const session = {
+      id: 'session-1',
+      sdk_session_id: 'thread-1',
+      desktop_thread_id: 'thread-1',
+      thread_origin: 'desktop',
+      mirror_last_event_at: null,
+    };
+    const store = {
+      listChannelBindings: () => bindings,
+      getSession: (sessionId: string) => (sessionId === session.id ? session : null),
+      updateSdkSessionId: () => {},
+    };
+    initBridgeContext({
+      store: store as never,
+      llm: noopLlm as never,
+      permissions: noopPermissions as never,
+      lifecycle: {},
+    });
+
+    const state = {
+      running: true,
+      adapters: new Map([
+        ['feishu-default', { channelType: 'feishu-default', provider: 'feishu', isRunning: () => false }],
+      ]),
+      mirrorSubscriptions: new Map(),
+      mirrorWakeTimer: null,
+      mirrorSyncInFlight: false,
+      activeTasks: new Map(),
+    };
+    const deliveryCalls: string[][] = [];
+    const filteredSignatures: string[] = [];
+
+    runtime = createMirrorRuntime(() => state as never, {
+      watchDebounceMs: 0,
+      danglingThreadRetryLimit: 3,
+      failureSuspendThreshold: 3,
+      failureSuspendMs: 60_000,
+    }, {
+      nowIso: () => '2026-04-21T10:00:00.000Z',
+      describeUnknownError: (error) => (error instanceof Error ? error.message : String(error)),
+      getDesktopSessionByThreadIdSafe: (threadId) => (
+        threadId === 'thread-1'
+          ? {
+              id: threadId,
+              filePath,
+            } as never
+          : null
+      ),
+      syncMirrorSessionStateSafe: () => {},
+      filterSuppressedMirrorRecords: (_sessionId, records) => {
+        filteredSignatures.push(...records.map((record) => record.signature));
+        return records.filter((record) => record.turnId !== 'echo-turn');
+      },
+      observeSessionHealthRecords: () => {},
+      consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
+      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, 600_000, Date.now()),
+      hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
+      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, 600_000, Date.now()),
+      stopMirrorStreaming: () => {},
+      deliverMirrorTurns: async (_subscription, turns) => {
+        deliveryCalls.push(turns.map((turn) => turn.signature));
+        return { deliveredCount: turns.length };
+      },
+    });
+
+    await runtime.reconcileMirrorSubscriptions();
+
+    fs.appendFileSync(filePath, [
+      JSON.stringify({
+        timestamp: '2026-04-21T10:00:01.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'task_started',
+          turn_id: 'echo-turn',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-04-21T10:00:02.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'task_complete',
+          turn_id: 'echo-turn',
+          last_agent_message: 'echo answer',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-04-21T10:00:03.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'task_started',
+          turn_id: 'desktop-turn',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-04-21T10:00:04.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'task_complete',
+          turn_id: 'desktop-turn',
+          last_agent_message: 'desktop answer',
+        },
+      }),
+    ].join('\n') + '\n', 'utf-8');
+
+    await runtime.reconcileMirrorSubscriptions();
+
+    assert.equal(filteredSignatures.length > 0, true);
+    assert.equal(deliveryCalls.length, 1);
+    assert.equal(deliveryCalls[0]?.length, 1);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('logs each unknown desktop mirror event kind at most once per subscription', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-mirror-runtime-'));
     const filePath = path.join(tempRoot, 'rollout.jsonl');
@@ -302,6 +430,8 @@ describe('mirror-runtime pending deliveries', () => {
     const session = {
       id: 'session-1',
       sdk_session_id: 'thread-1',
+      desktop_thread_id: 'thread-1',
+      thread_origin: 'desktop',
       mirror_last_event_at: null,
     };
     const store = {
@@ -344,7 +474,6 @@ describe('mirror-runtime pending deliveries', () => {
           : null
       ),
       syncMirrorSessionStateSafe: () => {},
-      isMirrorSuppressed: () => false,
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),

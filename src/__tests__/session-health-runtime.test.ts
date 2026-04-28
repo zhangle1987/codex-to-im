@@ -53,10 +53,10 @@ describe('session-health-runtime', () => {
     assert.equal(diagnosis?.processProbe?.status, 'not_found');
   });
 
-  it('does not touch updated_at when diagnosing session health', async () => {
+  it('does not persist session metadata when diagnosing session health', async () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createSession('Health Read Only', 'test-model', undefined, 'D:\\workspace\\health-readonly', 'code');
-    const originalUpdatedAt = session.updated_at;
+    const before = store.getSession(session.id);
     const runtime = createSessionHealthRuntime({
       getStore: () => store,
       nowIso: () => '2026-04-13T12:05:00.000Z',
@@ -64,11 +64,10 @@ describe('session-health-runtime', () => {
 
     const diagnosis = await runtime.diagnoseSessionHealth(session.id);
     assert.ok(diagnosis);
-    assert.equal(diagnosis?.checkedAt, '2026-04-13T12:05:00.000Z');
+    assert.equal(diagnosis?.checkedAt, null);
 
     const refreshed = store.getSession(session.id);
-    assert.equal(refreshed?.last_health_check_at, '2026-04-13T12:05:00.000Z');
-    assert.equal(refreshed?.updated_at, originalUpdatedAt);
+    assert.deepEqual(refreshed, before);
   });
 
   it('does not touch updated_at when reconciling derived health state', () => {

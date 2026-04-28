@@ -12,15 +12,36 @@ import * as router from './channel-router.js';
 import * as engine from './conversation-engine.js';
 import * as broker from './permission-broker.js';
 import { getBridgeContext } from './context.js';
-import { stripOutboundArtifactBlocksForStreaming } from './outbound-artifacts.js';
+import {
+  assembleDesktopFinalResponse,
+  assembleSdkFinalResponse,
+  hasFinalResponsePayload,
+  mergeFinalResponses,
+  stripFinalOnlyBlocksForStreaming,
+} from './turns/response-assembler.js';
 import { buildInteractiveStreamKey } from './mirror-formatters.js';
 import {
-  finalizeStreamFeedback,
   pushStreamFeedbackStatus,
   pushStreamFeedbackTasks,
   pushStreamFeedbackText,
   pushStreamFeedbackTools,
 } from './stream-feedback-controller.js';
+import { getExplicitDesktopThreadId } from './turns/turn-classifier.js';
+import type { ActiveBridgeTurn } from './turns/turn-types.js';
+import {
+  deliverFinalResponse,
+  finalizeStreamingUi,
+} from './turns/delivery-pipeline.js';
+import {
+  buildStreamRuntimeStatus,
+  createStreamState,
+  formatStreamRuntimeStatus,
+  getStreamLastContentResponseAgeMs,
+  recordStreamActivity,
+  recordStreamContentResponse,
+  shouldShowStreamLastContentResponseAge,
+  updateStreamStatusNote,
+} from './turns/stream-state.js';
 
 /** Generate a non-zero random 31-bit integer for use as draft_id. */
 function generateDraftId(): number {
@@ -87,19 +108,6 @@ function flushPreview(
   }).catch(() => {});
 }
 
-function formatRuntimeDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const seconds = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const minutes = totalMinutes % 60;
-  const hours = Math.floor(totalMinutes / 60);
-  const parts: string[] = [];
-  if (hours > 0) parts.push(`${hours}小时`);
-  if (minutes > 0) parts.push(`${minutes}分`);
-  if (seconds > 0 || parts.length === 0) parts.push(`${seconds}秒`);
-  return parts.join('');
-}
-
 function pathBaseName(value: string): string {
   return value.includes('\\') ? path.win32.basename(value) : path.basename(value);
 }
@@ -133,13 +141,7 @@ export function formatInteractiveRuntimeStatus(
   lastResponseAgeMs?: number | null,
   statusNote?: string | null,
 ): string {
-  const parts = [elapsedMs < 1000 ? '处理中' : `已运行 ${formatRuntimeDuration(elapsedMs)}`];
-  if (typeof lastResponseAgeMs === 'number' && lastResponseAgeMs >= 0) {
-    parts.push(`上次响应距今 ${formatRuntimeDuration(lastResponseAgeMs)}`);
-  }
-  const runtimeText = parts.join('，');
-  const note = (statusNote || '').trim();
-  return note ? `当前步骤：${note}\n${runtimeText}` : runtimeText;
+  return formatStreamRuntimeStatus(elapsedMs, lastResponseAgeMs, statusNote);
 }
 
 export interface InteractiveTaskState {
@@ -154,6 +156,7 @@ export interface InteractiveTaskState {
   structuredStreamUiActive: boolean;
   lastActivityAt: number;
   lastResponseAt?: number | null;
+  lastContentResponseAt?: number | null;
   streamFinalized: boolean;
   uiEnded: boolean;
   mirrorSuppressionId: string | null;
@@ -166,6 +169,7 @@ export interface InteractiveTaskState {
 
 export interface RunInteractiveMessageDeps {
   registerInteractiveTask(task: InteractiveTaskState): void;
+  registerBridgeTurn?(turn: ActiveBridgeTurn): void;
   resetMirrorSessionForInteractiveRun(sessionId: string): void;
   isCurrentInteractiveTask(sessionId: string, taskId: string): boolean;
   touchInteractiveTask(sessionId: string, taskId: string): void;
@@ -178,6 +182,7 @@ export interface RunInteractiveMessageDeps {
   abortMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
   settleMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
   releaseInteractiveTask(sessionId: string, taskId: string): void;
+  releaseBridgeTurn?(sessionId: string, taskId: string): void;
   deliverResponse(
     adapter: BaseChannelAdapter,
     address: InboundMessage['address'],
@@ -198,6 +203,7 @@ export interface RunInteractiveMessageDeps {
   clearIntervalFn?(handle: unknown): void;
   streamStatusIdleDetectionStartMs?: number;
   streamStatusHeartbeatMs?: number;
+  desktopTerminalFinalizationTimeoutMs?: number;
 }
 
 export async function runInteractiveMessage(
@@ -208,6 +214,8 @@ export async function runInteractiveMessage(
   deps: RunInteractiveMessageDeps,
 ): Promise<void> {
   const binding = router.resolve(msg.address);
+  const initialSession = getBridgeContext().store.getSession(binding.codepilotSessionId);
+  const desktopThreadId = getExplicitDesktopThreadId(initialSession);
   const streamKey = buildInteractiveStreamKey(binding.codepilotSessionId, msg.messageId);
   const nowMs = deps.nowMs ?? (() => Date.now());
   const setIntervalFn = deps.setIntervalFn ?? ((callback: () => void, intervalMs: number) => setInterval(callback, intervalMs));
@@ -235,16 +243,19 @@ export async function runInteractiveMessage(
   const taskAbort = new AbortController();
   const taskId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const taskStartedAt = nowMs();
+  const streamState = createStreamState(taskStartedAt);
   type ExternalTerminalFinalization = {
     outcome: 'completed' | 'failed' | 'aborted';
     detail?: string;
     finalText?: string;
   };
   let externalTerminalRequest: ExternalTerminalFinalization | null = null;
+  let desktopTerminalFinalExpected = false;
   let resolveExternalTerminal: ((request: ExternalTerminalFinalization) => void) | null = null;
   const externalTerminalPromise = new Promise<ExternalTerminalFinalization>((resolve) => {
     resolveExternalTerminal = resolve;
   });
+  let processResultSettled = false;
   let resolveExternalTerminalCompletion: ((finalized: boolean) => void) | null = null;
   let externalTerminalCompletionSettled = false;
   const externalTerminalCompletion = new Promise<boolean>((resolve) => {
@@ -268,6 +279,7 @@ export async function runInteractiveMessage(
     structuredStreamUiActive: false,
     lastActivityAt: taskStartedAt,
     lastResponseAt: null,
+    lastContentResponseAt: null,
     streamFinalized: false,
     uiEnded: false,
     mirrorSuppressionId: null,
@@ -276,13 +288,26 @@ export async function runInteractiveMessage(
       if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return false;
       externalTerminalRequest = { outcome, detail, finalText };
       resolveExternalTerminal?.(externalTerminalRequest);
-      if (!taskAbort.signal.aborted) {
+      if (!processResultSettled && !taskAbort.signal.aborted) {
         taskAbort.abort();
       }
       return externalTerminalCompletion;
     },
   };
   deps.registerInteractiveTask(taskState);
+  deps.registerBridgeTurn?.({
+    id: taskId,
+    sessionId: binding.codepilotSessionId,
+    kind: desktopThreadId ? 'im_desktop_reuse' : 'im_sdk',
+    origin: 'im',
+    progressSource: 'sdk_stream',
+    finalSource: desktopThreadId ? 'desktop_task_complete' : 'sdk_result',
+    codexThreadId: binding.sdkSessionId || initialSession?.codex_thread_id || initialSession?.sdk_session_id || undefined,
+    desktopThreadId,
+    requestMessageId: msg.messageId,
+    streamKey,
+    startedAt: taskStartedAt,
+  });
   deps.recordInteractiveHealthStart(binding.codepilotSessionId);
 
   let previewState: StreamingPreviewState | null = null;
@@ -304,7 +329,7 @@ export async function runInteractiveMessage(
     const ps = previewState!;
     const cfg = streamCfg!;
     if (ps.degraded) return;
-    const sanitizedText = stripOutboundArtifactBlocksForStreaming(fullText);
+    const sanitizedText = stripFinalOnlyBlocksForStreaming(fullText);
 
     ps.pendingText = sanitizedText.length > cfg.maxChars
       ? sanitizedText.slice(0, cfg.maxChars) + '...'
@@ -357,7 +382,6 @@ export async function runInteractiveMessage(
     && typeof adapter.onStreamStatus === 'function';
   const supportsStructuredStreamUi = supportsPersistentStreamStatus
     && (adapter.supportsStructuredStreamingUi?.(msg.address.chatId) ?? true);
-  let latestStatusNote: string | null = null;
   let latestTasks: TaskProgressInfo[] = [];
   const syncStructuredStreamUiState = () => {
     if (!supportsStructuredStreamUi || taskState.structuredStreamUiActive) return;
@@ -376,12 +400,24 @@ export async function runInteractiveMessage(
     if (!supportsStructuredStreamUi || streamStatusUpdatesClosed) return;
     pushStreamFeedbackStatus(
       streamFeedbackTarget,
-      formatInteractiveRuntimeStatus(nowMs() - taskStartedAt, lastResponseAgeMs, latestStatusNote),
+      lastResponseAgeMs == null
+        ? buildStreamRuntimeStatus(streamState, nowMs())
+        : formatStreamRuntimeStatus(nowMs() - taskStartedAt, lastResponseAgeMs, streamState.statusNote),
     );
     syncStructuredStreamUiSnapshot();
   };
-  const markSuccessfulResponse = () => {
-    taskState.lastResponseAt = nowMs();
+  const markActivity = () => {
+    const now = nowMs();
+    recordStreamActivity(streamState, now);
+    taskState.lastActivityAt = streamState.lastActivityAtMs;
+    deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
+  };
+  const markContentResponse = () => {
+    const now = nowMs();
+    recordStreamContentResponse(streamState, now);
+    taskState.lastActivityAt = streamState.lastActivityAtMs;
+    taskState.lastResponseAt = streamState.lastContentResponseAtMs;
+    taskState.lastContentResponseAt = streamState.lastContentResponseAtMs;
     deps.touchInteractiveTask(binding.codepilotSessionId, taskId);
   };
 
@@ -424,10 +460,10 @@ export async function runInteractiveMessage(
     endPreviewOnce();
     if (hasStreamingCards && !streamUiFinalizeAttempted) {
       streamUiFinalizeAttempted = true;
-      taskState.streamFinalized = await finalizeStreamFeedback(
+      taskState.streamFinalized = await finalizeStreamingUi(
         streamFeedbackTarget,
         status,
-        responseText,
+        assembleDesktopFinalResponse({ text: responseText }),
       );
     }
     return taskState.streamFinalized;
@@ -442,13 +478,13 @@ export async function runInteractiveMessage(
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
     pushStreamFeedbackText(
       streamFeedbackTarget,
-      stripOutboundArtifactBlocksForStreaming(fullText),
+      stripFinalOnlyBlocksForStreaming(fullText),
     );
   } : undefined;
 
   const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
-    markSuccessfulResponse();
+    markActivity();
     deps.recordInteractiveHealthTool(binding.codepilotSessionId, toolId, toolName, status);
     if (toolName) {
       toolCallTracker.set(toolId, { id: toolId, name: toolName, status });
@@ -465,7 +501,7 @@ export async function runInteractiveMessage(
 
   const onTaskEvent = (tasks: TaskProgressInfo[]) => {
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
-    markSuccessfulResponse();
+    markActivity();
     latestTasks = tasks;
     if (hasStreamingCards) {
       pushStreamFeedbackTasks(streamFeedbackTarget, latestTasks);
@@ -476,10 +512,8 @@ export async function runInteractiveMessage(
 
   const onStatusNote = (note: string | null) => {
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
-    latestStatusNote = (note || '').trim() || null;
-    if (latestStatusNote) {
-      markSuccessfulResponse();
-    }
+    updateStreamStatusNote(streamState, note, nowMs());
+    if (streamState.statusNote) markActivity();
     pushRunningStatus(null);
     syncStructuredStreamUiSnapshot();
   };
@@ -487,13 +521,44 @@ export async function runInteractiveMessage(
   const onPartialText = (fullText: string) => {
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
     if (fullText.trim()) {
-      markSuccessfulResponse();
+      markContentResponse();
     }
     deps.recordInteractiveHealthProgress(binding.codepilotSessionId, 'text');
     previewOnPartialText?.(fullText);
     onStreamCardText?.(fullText);
     pushRunningStatus(null);
     syncStructuredStreamUiSnapshot();
+  };
+
+  const waitForDesktopTerminalFinalization = async (): Promise<ExternalTerminalFinalization | null> => {
+    if (externalTerminalRequest) return externalTerminalRequest;
+    const timeoutMs = Math.max(0, deps.desktopTerminalFinalizationTimeoutMs ?? 0);
+    if (!desktopThreadId || !desktopTerminalFinalExpected || timeoutMs <= 0) return null;
+    if (taskAbort.signal.aborted) return null;
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (terminal: ExternalTerminalFinalization | null) => {
+        if (settled) return;
+        settled = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        taskAbort.signal.removeEventListener('abort', onAbort);
+        resolve(terminal);
+      };
+      const onAbort = () => finish(null);
+
+      timer = setTimeout(() => finish(null), timeoutMs);
+      taskAbort.signal.addEventListener('abort', onAbort, { once: true });
+      externalTerminalPromise.then((terminal) => {
+        finish(terminal);
+      }, () => {
+        finish(null);
+      });
+    });
   };
 
   if (supportsStructuredStreamUi) {
@@ -508,13 +573,11 @@ export async function runInteractiveMessage(
         return;
       }
       const elapsedMs = nowMs() - taskStartedAt;
-      const lastResponseAgeMs = taskState.lastResponseAt == null
-        ? null
-        : nowMs() - taskState.lastResponseAt;
-      const showLastResponseAge = elapsedMs >= streamStatusIdleDetectionStartMs
-        && lastResponseAgeMs != null
-        && lastResponseAgeMs >= streamStatusHeartbeatMs
-        ? lastResponseAgeMs
+      const showLastResponseAge = shouldShowStreamLastContentResponseAge(streamState, nowMs(), {
+        idleStartMs: streamStatusIdleDetectionStartMs,
+        heartbeatMs: streamStatusHeartbeatMs,
+      })
+        ? getStreamLastContentResponseAgeMs(streamState, nowMs())
         : null;
       pushRunningStatus(showLastResponseAge);
       syncStructuredStreamUiSnapshot();
@@ -547,7 +610,7 @@ export async function runInteractiveMessage(
           'permission_wait',
           `当前正在等待工具 ${perm.toolName} 的权限确认。`,
         );
-        markSuccessfulResponse();
+        markActivity();
         pushRunningStatus(null);
         syncStructuredStreamUiSnapshot();
       },
@@ -558,7 +621,10 @@ export async function runInteractiveMessage(
       onTaskEvent,
       onStatusNote,
       (preparedPrompt) => {
-        if (!taskState.mirrorSuppressionId) {
+        if (desktopThreadId) {
+          desktopTerminalFinalExpected = true;
+        }
+        if (desktopThreadId && !taskState.mirrorSuppressionId) {
           taskState.mirrorSuppressionId = deps.beginMirrorSuppression(binding.codepilotSessionId, preparedPrompt);
         }
       },
@@ -590,73 +656,97 @@ export async function runInteractiveMessage(
           ? 'interrupted'
           : 'error';
       const staleTaskNotice = buildStaleTaskCompletionNotice(msg.address, binding);
-      const terminalText = staleTaskNotice || raced.terminal.finalText || '';
-      const cardFinalized = await finalizeStreamUiOnce(streamEndStatus, terminalText);
-      if (!cardFinalized && terminalText) {
-        await deps.deliverResponse(
+      const terminalResponse = assembleDesktopFinalResponse({
+        text: staleTaskNotice || raced.terminal.finalText || '',
+      });
+      const cardFinalized = await finalizeStreamUiOnce(streamEndStatus, terminalResponse.text);
+      if (hasFinalResponsePayload(terminalResponse)) {
+        await deliverFinalResponse({
           adapter,
-          msg.address,
-          terminalText,
-          binding.codepilotSessionId,
-          msg.messageId,
-          [],
-        );
+          address: msg.address,
+          sessionId: binding.codepilotSessionId,
+          replyToMessageId: msg.messageId,
+          deliverResponse: deps.deliverResponse,
+        }, terminalResponse, { skipText: cardFinalized });
       }
       return;
     }
 
     const result = raced.result;
+    processResultSettled = true;
 
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) {
       shouldRecordHealthEnd = false;
       return;
     }
 
+    const terminalAfterProcess = await waitForDesktopTerminalFinalization();
+    const terminalResponse = terminalAfterProcess?.outcome === 'completed'
+      ? assembleDesktopFinalResponse({ text: terminalAfterProcess.finalText || '' })
+      : null;
+    const sdkResponse = assembleSdkFinalResponse({
+      text: result.responseText,
+      attachments: result.outboundAttachments,
+      hasError: result.hasError,
+      errorMessage: result.errorMessage,
+    });
+    const terminalHasFinalPayload = Boolean(
+      terminalResponse && hasFinalResponsePayload(terminalResponse),
+    );
+    const effectiveResponse = terminalResponse && terminalHasFinalPayload
+      ? mergeFinalResponses(terminalResponse, sdkResponse)
+      : sdkResponse;
+
     let cardFinalized = false;
     const staleTaskNotice = buildStaleTaskCompletionNotice(msg.address, binding);
+    const staleResponse = staleTaskNotice
+      ? assembleDesktopFinalResponse({ text: staleTaskNotice })
+      : null;
     if (hasStreamingCards) {
-      const streamEndStatus = taskAbort.signal.aborted
-        ? 'interrupted'
-        : result.hasError ? 'error' : 'completed';
+      const streamEndStatus = terminalAfterProcess
+        ? terminalAfterProcess.outcome === 'completed'
+          ? 'completed'
+          : terminalAfterProcess.outcome === 'aborted'
+            ? 'interrupted'
+            : 'error'
+        : taskAbort.signal.aborted
+          ? 'interrupted'
+          : result.hasError ? 'error' : 'completed';
       cardFinalized = await finalizeStreamUiOnce(
         streamEndStatus,
-        staleTaskNotice || (streamEndStatus === 'interrupted' ? '' : result.responseText),
+        staleResponse?.text || (streamEndStatus === 'interrupted' ? '' : effectiveResponse.text),
       );
     }
 
-    if (staleTaskNotice) {
-      if (!cardFinalized) {
-        await deps.deliverResponse(
-          adapter,
-          msg.address,
-          staleTaskNotice,
-          binding.codepilotSessionId,
-          msg.messageId,
-          [],
-        );
-      }
-    } else if (
-      result.responseText || result.outboundAttachments.length > 0
-    ) {
-      const textToDeliver = cardFinalized ? '' : result.responseText;
-      if (!cardFinalized || result.outboundAttachments.length > 0) {
-        await deps.deliverResponse(
-          adapter,
-          msg.address,
-          textToDeliver,
-          binding.codepilotSessionId,
-          msg.messageId,
-          result.outboundAttachments,
-        );
-      }
-    } else if (result.hasError && !taskAbort.signal.aborted) {
-      await deps.deliverResponse(
+    if (staleResponse) {
+      await deliverFinalResponse({
         adapter,
-        msg.address,
-        `**Error:** ${result.errorMessage}`,
-        binding.codepilotSessionId,
-        msg.messageId,
-        [],
+        address: msg.address,
+        sessionId: binding.codepilotSessionId,
+        replyToMessageId: msg.messageId,
+        deliverResponse: deps.deliverResponse,
+      }, staleResponse, { skipText: cardFinalized });
+    } else if (hasFinalResponsePayload(effectiveResponse)) {
+      await deliverFinalResponse({
+        adapter,
+        address: msg.address,
+        sessionId: binding.codepilotSessionId,
+        replyToMessageId: msg.messageId,
+        deliverResponse: deps.deliverResponse,
+      }, effectiveResponse, { skipText: cardFinalized });
+    } else if (result.hasError && !taskAbort.signal.aborted) {
+      await deliverFinalResponse({
+          adapter,
+          address: msg.address,
+          sessionId: binding.codepilotSessionId,
+          replyToMessageId: msg.messageId,
+          deliverResponse: deps.deliverResponse,
+        },
+        assembleSdkFinalResponse({
+          text: `**Error:** ${result.errorMessage}`,
+          hasError: true,
+          errorMessage: result.errorMessage,
+        }),
       );
     }
 
@@ -665,10 +755,10 @@ export async function runInteractiveMessage(
     } catch {
       // best effort
     }
-    finalOutcome = result.hasError ? 'failed' : 'completed';
-    finalOutcomeDetail = result.hasError
+    finalOutcome = terminalAfterProcess?.outcome || (result.hasError ? 'failed' : 'completed');
+    finalOutcomeDetail = terminalAfterProcess?.detail || (result.hasError
       ? (result.errorMessage?.trim() || undefined)
-      : undefined;
+      : undefined);
   } finally {
     await finalizeStreamUiOnce(
       taskAbort.signal.aborted
@@ -695,6 +785,7 @@ export async function runInteractiveMessage(
       deps.recordInteractiveHealthEnd(binding.codepilotSessionId, finalOutcome, finalOutcomeDetail);
     }
     deps.releaseInteractiveTask(binding.codepilotSessionId, taskId);
+    deps.releaseBridgeTurn?.(binding.codepilotSessionId, taskId);
     endMessageUiOnce();
     settleExternalTerminalCompletion(taskState.streamFinalized || !hasStreamingCards);
   }

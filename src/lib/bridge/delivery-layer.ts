@@ -136,6 +136,7 @@ export async function deliver(
   opts?: {
     sessionId?: string;
     dedupKey?: string;
+    audit?: boolean;
   },
 ): Promise<SendResult> {
   const { store } = getBridgeContext();
@@ -200,16 +201,17 @@ export async function deliver(
     try { store.insertDedup(opts.dedupKey); } catch { /* best effort */ }
   }
 
-  // Audit log
-  try {
-    store.insertAuditLog({
-      channelType: adapter.channelType,
-      chatId: message.address.chatId,
-      direction: 'outbound',
-      messageId: lastMessageId || '',
-      summary: message.text.slice(0, 200),
-    });
-  } catch { /* best effort */ }
+  if (opts?.audit !== false) {
+    try {
+      store.insertAuditLog({
+        channelType: adapter.channelType,
+        chatId: message.address.chatId,
+        direction: 'outbound',
+        messageId: lastMessageId || '',
+        summary: message.text.slice(0, 200),
+      });
+    } catch { /* best effort */ }
+  }
 
   return { ok: true, messageId: lastMessageId };
 }

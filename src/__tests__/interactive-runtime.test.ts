@@ -131,7 +131,7 @@ describe('interactive-runtime', () => {
     assert.equal(healed?.last_runtime_update_at, '2026-04-20T16:00:00.000Z');
   });
 
-  it('finalizes an active task when terminal health is observed', async () => {
+  it('does not finalize an active task from terminal health alone', async () => {
     const store = new JsonFileStore(makeSettings());
     initTestBridgeContext(store);
     const session = store.createSession('Runtime Heal Active', 'test-model', undefined, 'D:\\workspace\\runtime-heal-active', 'code');
@@ -175,11 +175,9 @@ describe('interactive-runtime', () => {
 
     await runtime.reconcileTerminalSessionRuntimeState();
 
-    const healed = store.getSession(session.id);
-    assert.deepEqual(finalized, [{
-      outcome: 'completed',
-      detail: '检测到桌面线程已完成当前任务。',
-    }]);
-    assert.equal(healed?.runtime_status, 'idle');
+    const running = store.getSession(session.id);
+    assert.deepEqual(finalized, []);
+    assert.equal(running?.runtime_status, 'running');
+    assert.equal(state.activeTasks.has(session.id), true);
   });
 });

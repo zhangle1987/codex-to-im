@@ -51,6 +51,7 @@ import {
   getFeedbackParseMode,
 } from './bridge-channel-runtime.js';
 import { readDesktopSessionMessages } from '../../desktop-sessions.js';
+import { getExplicitDesktopThreadId } from './turns/turn-classifier.js';
 
 const MODE_OPTIONS_TEXT = '可选：`code`（直接执行，默认） `plan`（先分析再行动） `ask`（轻对话 / 草稿）';
 const REASONING_OPTIONS_TEXT = '可选：`1=minimal` `2=low` `3=medium` `4=high` `5=xhigh`';
@@ -150,6 +151,7 @@ export async function handleBridgeCommand(
 
   let response = '';
   let responseParseMode: 'Markdown' | 'plain' = getFeedbackParseMode(adapter.channelType);
+  let auditResponse = true;
   const currentBinding = store.getChannelBinding(msg.address.channelType, msg.address.chatId);
 
   switch (command) {
@@ -503,6 +505,7 @@ export async function handleBridgeCommand(
       }
 
       if (!args) {
+        const desktopThreadId = getExplicitDesktopThreadId(session);
         const currentModel = resolveDisplayedModel(
           binding,
           session,
@@ -514,7 +517,7 @@ export async function handleBridgeCommand(
           [['模型', formatDisplayedModel(currentModel)]],
           [
             getAvailableModelChoicesText(),
-            binding.sdkSessionId
+            desktopThreadId
               ? '当前是共享桌面线程，只支持查看模型；如需切换，请先用 `/new` 新建一个 IM 会话线程。'
               : '发送 `/model gpt-5.4` 可切换；发送 `/model default` 可回退到默认模型。',
             '模型切换只影响后续从 IM 发起的 Codex CLI 请求。',
@@ -524,7 +527,7 @@ export async function handleBridgeCommand(
         break;
       }
 
-      if (binding.sdkSessionId) {
+      if (getExplicitDesktopThreadId(session)) {
         response = '当前是共享桌面线程，不支持直接切换模型。请先用 `/new` 新建一个线程，再执行 `/model ...`。';
         break;
       }
@@ -581,9 +584,34 @@ export async function handleBridgeCommand(
     }
 
     case '/status': {
-      const binding = router.resolve(msg.address);
+      auditResponse = false;
+      const binding = currentBinding;
+      if (!binding) {
+        response = buildCommandFields(
+          '当前会话',
+          [],
+          ['当前聊天还没有绑定会话。可先发送 `/t` 查看最近桌面会话，再用 `/t 1` 接管；或发送 `/new proj1` / `/new 绝对路径` 创建项目会话。'],
+          responseParseMode === 'Markdown',
+        );
+        break;
+      }
+
       const session = store.getSession(binding.codepilotSessionId);
-      const threadTitle = getDesktopThreadTitle(binding.sdkSessionId);
+      if (!session) {
+        response = buildCommandFields(
+          '当前会话',
+          [
+            ['Session', binding.codepilotSessionId],
+            ['目录', formatCommandPath(binding.workingDirectory)],
+          ],
+          ['当前聊天绑定的会话已经不存在。可用 `/t` 接管桌面会话，或用 `/new proj1` / `/new 绝对路径` 创建新会话。'],
+          responseParseMode === 'Markdown',
+        );
+        break;
+      }
+
+      const desktopThreadId = getExplicitDesktopThreadId(session);
+      const threadTitle = getDesktopThreadTitle(desktopThreadId);
       const sandboxMode = resolveEffectiveSandboxMode();
       const reasoningEffort = resolveEffectiveReasoningEffort(session);
       const currentModel = resolveDisplayedModel(
@@ -609,7 +637,7 @@ export async function handleBridgeCommand(
           ['思考级别', formatReasoningEffort(reasoningEffort)],
         ],
         [
-          binding.sdkSessionId
+          desktopThreadId
             ? '当前聊天已绑定到一条共享会话，直接发送消息即可继续。'
             : session?.session_type === 'draft'
               ? '当前聊天正在使用临时草稿线程（等同 `/t 0`）。可直接发送消息，或用 `/t` / `/new proj1` / `/new 绝对路径` 切换到正式会话。'
@@ -621,6 +649,7 @@ export async function handleBridgeCommand(
     }
 
     case '/health': {
+      auditResponse = false;
       if (args === 'all') {
         const diagnoses = await deps.diagnoseAllActiveSessions();
         response = diagnoses.length > 0
@@ -629,9 +658,12 @@ export async function handleBridgeCommand(
         break;
       }
 
-      const binding = currentBinding || router.resolve(msg.address);
       const explicitTargetSessionId = args.trim();
-      const targetSessionId = explicitTargetSessionId || binding.codepilotSessionId;
+      const targetSessionId = explicitTargetSessionId || currentBinding?.codepilotSessionId;
+      if (!targetSessionId) {
+        response = '当前聊天还没有绑定会话。先发送消息创建会话，或先用 `/t 1` 接管桌面会话。';
+        break;
+      }
       const diagnosis = await deps.diagnoseSessionHealth(targetSessionId);
       if (!diagnosis) {
         response = `没有找到会话 ${targetSessionId}。`;
@@ -652,8 +684,10 @@ export async function handleBridgeCommand(
       }
 
       const limit = getHistoryMessageLimit();
-      const desktopMessages = currentBinding.sdkSessionId
-        ? readDesktopSessionMessages(currentBinding.sdkSessionId, limit)
+      const session = store.getSession(currentBinding.codepilotSessionId);
+      const desktopThreadId = getExplicitDesktopThreadId(session);
+      const desktopMessages = desktopThreadId
+        ? readDesktopSessionMessages(desktopThreadId, limit)
         : [];
       const { messages: storedMessages } = store.getMessages(currentBinding.codepilotSessionId, { limit });
       const messages = desktopMessages.length > 0 ? desktopMessages : storedMessages;
@@ -661,8 +695,7 @@ export async function handleBridgeCommand(
         response = '当前会话还没有历史消息。';
         break;
       }
-      const threadTitle = getDesktopThreadTitle(currentBinding.sdkSessionId);
-      const session = store.getSession(currentBinding.codepilotSessionId);
+      const threadTitle = getDesktopThreadTitle(desktopThreadId);
 
       const header = buildCommandFields(
         '最近对话（raw）',
@@ -806,6 +839,7 @@ export async function handleBridgeCommand(
   if (response) {
     await deliverBridgeNotice(adapter, msg.address, response, {
       replyToMessageId: msg.messageId,
+      audit: auditResponse,
     });
   }
 }

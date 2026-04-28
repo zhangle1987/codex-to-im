@@ -10,6 +10,10 @@ import {
   listDesktopSessions,
   type DesktopSessionSummary,
 } from './desktop-sessions.js';
+import {
+  getCodexThreadId,
+  getExplicitDesktopThreadId,
+} from './lib/bridge/turns/turn-classifier.js';
 
 export interface BindingTargetOption {
   key: string;
@@ -126,6 +130,24 @@ function getSessionMode(store: BridgeStore, session: BridgeSession): ChannelBind
     || 'code';
 }
 
+function getBindingResumeThreadId(session: BridgeSession): string {
+  return getCodexThreadId(session) || '';
+}
+
+function markSessionAsDesktopBacked(
+  store: BridgeStore,
+  sessionId: string,
+  desktopThreadId: string,
+): void {
+  store.updateSdkSessionId(sessionId, desktopThreadId);
+  store.updateSession(sessionId, {
+    sdk_session_id: desktopThreadId,
+    codex_thread_id: desktopThreadId,
+    desktop_thread_id: desktopThreadId,
+    thread_origin: 'desktop',
+  });
+}
+
 export function bindStoreToSession(
   store: BridgeStore,
   channelType: string,
@@ -139,9 +161,13 @@ export function bindStoreToSession(
   assertBindingTargetAvailable(
     store,
     { channelType, chatId },
-    { sessionId: session.id, sdkSessionId: session.sdk_session_id || undefined },
+    {
+      sessionId: session.id,
+      sdkSessionId: getCodexThreadId(session) || getExplicitDesktopThreadId(session),
+    },
   );
   const meta = resolveChannelMeta(channelType);
+  const sdkSessionId = getBindingResumeThreadId(session);
 
   return store.upsertChannelBinding({
     channelType,
@@ -151,7 +177,7 @@ export function bindStoreToSession(
     chatUserId: chatMeta?.chatUserId,
     chatDisplayName: chatMeta?.chatDisplayName,
     codepilotSessionId: session.id,
-    sdkSessionId: session.sdk_session_id || '',
+    sdkSessionId,
     workingDirectory: session.working_directory,
     model: session.model,
     mode: getSessionMode(store, session),
@@ -174,6 +200,7 @@ export function bindStoreToSdkSession(
 
   const existing = store.findSessionBySdkSessionId(sdkSessionId);
   if (existing) {
+      markSessionAsDesktopBacked(store, existing.id, sdkSessionId);
       return store.upsertChannelBinding({
         channelType,
         channelProvider: meta.provider,
@@ -202,7 +229,7 @@ export function bindStoreToSdkSession(
     workingDirectory,
     'code',
   );
-  store.updateSdkSessionId(session.id, sdkSessionId);
+  markSessionAsDesktopBacked(store, session.id, sdkSessionId);
 
   return store.upsertChannelBinding({
     channelType,
@@ -237,12 +264,12 @@ export function listBindingTargetOptions(
 export function listBindingSummaries(store: BridgeStore): BindingSummary[] {
   return store.listChannelBindings().map((binding) => {
     const session = store.getSession(binding.codepilotSessionId);
-    const currentThreadId = binding.sdkSessionId || session?.sdk_session_id || undefined;
-    const desktop = currentThreadId ? getDesktopSessionByThreadId(currentThreadId) : null;
-    const archived = currentThreadId ? isArchivedDesktopThread(currentThreadId) : false;
-    const currentTargetKey = currentThreadId ? `desktop:${currentThreadId}` : `session:${binding.codepilotSessionId}`;
-    const currentTargetLabel = currentThreadId
-      ? (desktop?.title || (archived ? `已归档桌面线程 ${currentThreadId.slice(0, 8)}...` : `Desktop thread ${currentThreadId.slice(0, 8)}...`))
+    const currentDesktopThreadId = session ? getExplicitDesktopThreadId(session) : undefined;
+    const desktop = currentDesktopThreadId ? getDesktopSessionByThreadId(currentDesktopThreadId) : null;
+    const archived = currentDesktopThreadId ? isArchivedDesktopThread(currentDesktopThreadId) : false;
+    const currentTargetKey = currentDesktopThreadId ? `desktop:${currentDesktopThreadId}` : `session:${binding.codepilotSessionId}`;
+    const currentTargetLabel = currentDesktopThreadId
+      ? (desktop?.title || (archived ? `已归档桌面线程 ${currentDesktopThreadId.slice(0, 8)}...` : `Desktop thread ${currentDesktopThreadId.slice(0, 8)}...`))
       : getSessionName(session || {
           id: binding.codepilotSessionId,
           working_directory: binding.workingDirectory,
@@ -264,7 +291,7 @@ export function listBindingSummaries(store: BridgeStore): BindingSummary[] {
       currentTargetLabel,
       currentSessionId: binding.codepilotSessionId,
       currentSessionName: session ? getSessionName(session) : binding.codepilotSessionId.slice(0, 8),
-      currentThreadId,
+      currentThreadId: currentDesktopThreadId || getCodexThreadId(session, binding),
       runtimeStatus: session?.runtime_status,
       queuedCount: session?.queued_count,
       mirrorStatus: session?.mirror_status,

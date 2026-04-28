@@ -54,15 +54,17 @@ export function pushStreamFeedbackTasks(
 export function pushStreamFeedbackStatus(
   target: StreamFeedbackTarget,
   text: string,
-): void {
-  if (typeof target.adapter.onStreamStatus !== 'function') return;
+): boolean {
+  if (typeof target.adapter.onStreamStatus !== 'function') return false;
   target.ensureStarted?.();
   const rendered = renderFeedbackTextForChannel(target.channelType, text);
-  if (!rendered) return;
+  if (!rendered) return false;
   try {
     target.adapter.onStreamStatus(target.chatId, rendered, target.streamKey);
+    return true;
   } catch {
     // Streaming UI updates are best effort only.
+    return false;
   }
 }
 

@@ -4,7 +4,6 @@ import type { ThreadProcessProbeResult } from './session-health-process.js';
 export const HEALTH_RECENT_PROGRESS_MS = 10 * 60 * 1000;
 export const HEALTH_SLOW_OBSERVED_MS = 30 * 60 * 1000;
 export const HEALTH_PROGRESS_PERSIST_THROTTLE_MS = 15 * 1000;
-export const HEALTH_PROCESS_PROBE_CACHE_MS = 30 * 1000;
 export const HEALTH_STREAM_UI_STALL_MS = 60 * 1000;
 
 const RUNNING_HEALTH_STATUSES = new Set<BridgeSessionHealthStatus>([
@@ -219,7 +218,6 @@ export function computeBaseDiagnosis(
     ? session.stream_ui_consecutive_failures
     : 0;
   const sdkSessionId = trimOrNull(session.sdk_session_id);
-  const checkedAt = trimOrNull(session.last_health_check_at);
   const lastProgressMs = parseIsoMs(lastProgressAt || undefined);
   const previousStatus = session.health_status || 'idle';
 
@@ -227,7 +225,7 @@ export function computeBaseDiagnosis(
     const fallbackStatus = isRunningRuntimeStatus(runtimeStatus) ? 'running_active' : previousStatus;
     return {
       sessionId: session.id,
-      checkedAt,
+      checkedAt: null,
       runtimeStatus,
       healthStatus: fallbackStatus,
       healthReason: session.health_reason?.trim() || (
@@ -282,7 +280,7 @@ export function computeBaseDiagnosis(
 
   return {
     sessionId: session.id,
-    checkedAt,
+    checkedAt: null,
     runtimeStatus,
     healthStatus,
     healthReason,

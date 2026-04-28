@@ -19,8 +19,9 @@ import type {
 import { getBridgeContext } from './context.js';
 import crypto from 'crypto';
 import {
-  parseOutboundArtifacts,
-} from './outbound-artifacts.js';
+  collectFinalResponseArtifacts,
+  dedupeOutboundAttachments,
+} from './turns/final-response-artifacts.js';
 import {
   normalizeReasoningEffort,
   normalizeSandboxMode,
@@ -457,8 +458,8 @@ async function consumeStream(
     if (contentBlocks.length > 0) {
       for (const block of contentBlocks) {
         if (block.type !== 'text') continue;
-        const parsed = parseOutboundArtifacts(block.text);
-        block.text = parsed.cleanText;
+        const parsed = collectFinalResponseArtifacts(block.text);
+        block.text = parsed.text;
         outboundAttachments.push(...parsed.attachments);
       }
 
@@ -487,7 +488,7 @@ async function consumeStream(
 
     return {
       responseText,
-      outboundAttachments,
+      outboundAttachments: dedupeOutboundAttachments(outboundAttachments),
       tokenUsage,
       hasError,
       errorMessage,

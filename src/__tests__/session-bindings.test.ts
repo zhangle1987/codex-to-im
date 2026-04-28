@@ -109,7 +109,26 @@ describe('session-bindings uniqueness', () => {
       chatDisplayName: '张乐',
     });
 
+    const session = store.getSession(binding.codepilotSessionId);
     assert.equal(binding.chatUserId, 'ou_456');
     assert.equal(binding.chatDisplayName, '张乐');
+    assert.equal(session?.codex_thread_id, 'thread-meta');
+    assert.equal(session?.desktop_thread_id, 'thread-meta');
+    assert.equal(session?.thread_origin, 'desktop');
+  });
+
+  it('keeps bridge SDK threads distinct from desktop threads when binding an existing session', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('bridge', 'test-model', undefined, '/tmp/shared');
+    store.updateSdkSessionId(session.id, 'bridge-thread-1');
+
+    const binding = bindStoreToSession(store, 'feishu-default', 'oc_bridge', session.id);
+    const updated = store.getSession(session.id);
+
+    assert.ok(binding);
+    assert.equal(binding.sdkSessionId, 'bridge-thread-1');
+    assert.equal(updated?.codex_thread_id, 'bridge-thread-1');
+    assert.equal(updated?.desktop_thread_id, undefined);
+    assert.equal(updated?.thread_origin, 'bridge');
   });
 });
