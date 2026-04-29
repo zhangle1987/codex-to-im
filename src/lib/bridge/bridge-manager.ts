@@ -115,8 +115,8 @@ const MIRROR_STREAM_STATUS_IDLE_START_MS = 180_000;
 const MIRROR_STREAM_STATUS_HEARTBEAT_MS = 10_000;
 // Timeout after the last desktop event before we flush a buffered mirror turn
 // without seeing task_complete. This is an internal mirror buffer guard, not an
-// IM idle reminder.
-const MIRROR_TURN_BUFFER_TIMEOUT_MS = 600_000;
+// IM idle reminder. Active streaming turns never use this fallback timeout.
+const MIRROR_TURN_BUFFER_TIMEOUT_MS = 10 * 60_000;
 
 // ── Streaming preview helpers ──────────────────────────────────
 
@@ -876,6 +876,8 @@ async function handleCommand(
 ): Promise<void> {
   await handleBridgeCommand(adapter, msg, text, {
     getActiveTask: (sessionId) => INTERACTIVE_RUNTIME.getActiveTask(sessionId),
+    forceStopSession: (sessionId, detail) => INTERACTIVE_RUNTIME.forceStopSession(sessionId, detail),
+    recordInteractiveHealthEnd: (sessionId, outcome, detail) => SESSION_HEALTH_RUNTIME.recordInteractiveEnd(sessionId, outcome, detail),
     diagnoseSessionHealth: (sessionId) => SESSION_HEALTH_RUNTIME.diagnoseSessionHealth(sessionId),
     diagnoseAllActiveSessions: () => SESSION_HEALTH_RUNTIME.diagnoseAllActiveSessions(),
   });

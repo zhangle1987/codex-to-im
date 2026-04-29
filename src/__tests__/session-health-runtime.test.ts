@@ -152,6 +152,103 @@ describe('session-health-runtime', () => {
     assert.match(diagnosis?.healthReason || '', /流式 UI/);
   });
 
+  it('still detects stream UI stalls long after the last execution progress', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Long Stream UI Stall', 'test-model', undefined, 'D:\\workspace\\health-long-stream-ui', 'code');
+    store.updateSession(session.id, { runtime_status: 'running' });
+
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => new Date().toISOString(),
+    });
+
+    runtime.recordInteractiveStart(session.id);
+    runtime.recordStructuredStreamUi(session.id, {
+      active: true,
+      lastAttemptAt: Date.now() - (2 * 60 * 1000),
+      lastUpdateAt: Date.now() - (12 * 60 * 1000),
+      lastErrorAt: Date.now() - (2 * 60 * 1000),
+      lastError: 'timeout after 15000ms',
+      consecutiveFailures: 3,
+      flushInFlight: false,
+    });
+    store.updateSession(session.id, {
+      last_progress_at: new Date(Date.now() - (15 * 60 * 1000)).toISOString(),
+      last_progress_type: 'tool_running',
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+
+    assert.ok(diagnosis);
+    assert.equal(diagnosis?.healthStatus, 'suspected_stream_ui_stall');
+    assert.match(diagnosis?.healthReason || '', /流式 UI/);
+    assert.match(diagnosis?.healthReason || '', /连续失败 3 次/);
+  });
+
+  it('detects stopped stream UI heartbeat before the long-task observation window', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Early Stream UI Heartbeat Stop', 'test-model', undefined, 'D:\\workspace\\health-early-stream-ui-heartbeat', 'code');
+    store.updateSession(session.id, { runtime_status: 'running' });
+
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => new Date().toISOString(),
+    });
+
+    runtime.recordInteractiveStart(session.id);
+    runtime.recordStructuredStreamUi(session.id, {
+      active: true,
+      lastAttemptAt: Date.now() - (2 * 60 * 1000),
+      lastUpdateAt: Date.now() - (2 * 60 * 1000),
+      lastErrorAt: null,
+      lastError: null,
+      consecutiveFailures: 0,
+      flushInFlight: false,
+    });
+    store.updateSession(session.id, {
+      last_progress_at: new Date(Date.now() - (5 * 60 * 1000)).toISOString(),
+      last_progress_type: 'tool_running',
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+
+    assert.ok(diagnosis);
+    assert.equal(diagnosis?.healthStatus, 'suspected_stream_ui_stall');
+    assert.match(diagnosis?.healthReason || '', /状态刷新已停止/);
+  });
+
+  it('detects a stopped stream UI heartbeat during long-running tasks', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Long Stream UI Heartbeat Stop', 'test-model', undefined, 'D:\\workspace\\health-long-stream-ui-heartbeat', 'code');
+    store.updateSession(session.id, { runtime_status: 'running' });
+
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => new Date().toISOString(),
+    });
+
+    runtime.recordInteractiveStart(session.id);
+    runtime.recordStructuredStreamUi(session.id, {
+      active: true,
+      lastAttemptAt: Date.now() - (2 * 60 * 1000),
+      lastUpdateAt: Date.now() - (2 * 60 * 1000),
+      lastErrorAt: null,
+      lastError: null,
+      consecutiveFailures: 0,
+      flushInFlight: false,
+    });
+    store.updateSession(session.id, {
+      last_progress_at: new Date(Date.now() - (15 * 60 * 1000)).toISOString(),
+      last_progress_type: 'tool_running',
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+
+    assert.ok(diagnosis);
+    assert.equal(diagnosis?.healthStatus, 'suspected_stream_ui_stall');
+    assert.match(diagnosis?.healthReason || '', /状态刷新已停止/);
+  });
+
   it('clears stream UI runtime fields when the session reaches a terminal state', () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createSession('Health Stream UI End', 'test-model', undefined, 'D:\\workspace\\health-stream-ui-end', 'code');
@@ -295,6 +392,104 @@ describe('session-health-runtime', () => {
     assert.equal(refreshed?.health_status, 'aborted');
     assert.equal(refreshed?.last_progress_type, 'task_aborted');
     assert.match(refreshed?.health_reason || '', /已停止/);
+  });
+
+  it('does not let late non-start progress overwrite a terminal idle session', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Terminal Guard', 'test-model', undefined, 'D:\\workspace\\health-terminal-guard', 'code');
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:30:00.000Z',
+    });
+
+    store.updateSession(session.id, {
+      runtime_status: 'idle',
+      health_status: 'completed',
+      health_reason: '任务已完成。',
+      last_progress_at: '2026-04-13T12:00:00.000Z',
+      last_progress_type: 'task_completed',
+    });
+
+    runtime.recordInteractiveProgress(session.id, 'text');
+    runtime.recordToolState(session.id, 'call-late', 'shell_command', 'running');
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.health_status, 'completed');
+    assert.equal(refreshed?.health_reason, '任务已完成。');
+    assert.equal(refreshed?.last_progress_type, 'task_completed');
+    assert.equal(refreshed?.active_tool_name, undefined);
+  });
+
+  it('does not let late non-start progress overwrite a terminal running session before runtime release', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Terminal Running Guard', 'test-model', undefined, 'D:\\workspace\\health-terminal-running-guard', 'code');
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:30:00.000Z',
+    });
+
+    store.updateSession(session.id, {
+      runtime_status: 'running',
+      health_status: 'completed',
+      health_reason: '检测到桌面线程已完成当前任务。',
+      last_progress_at: '2026-04-13T12:00:00.000Z',
+      last_progress_type: 'task_completed',
+    });
+
+    runtime.recordInteractiveProgress(session.id, 'message');
+    runtime.recordToolState(session.id, 'call-late', 'shell_command', 'running');
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.health_status, 'completed');
+    assert.equal(refreshed?.health_reason, '检测到桌面线程已完成当前任务。');
+    assert.equal(refreshed?.last_progress_type, 'task_completed');
+    assert.equal(refreshed?.active_tool_name, undefined);
+  });
+
+  it('allows a new task start to reopen a terminal session', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Terminal Reopen', 'test-model', undefined, 'D:\\workspace\\health-terminal-reopen', 'code');
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:30:00.000Z',
+    });
+
+    store.updateSession(session.id, {
+      runtime_status: 'running',
+      health_status: 'completed',
+      health_reason: '任务已完成。',
+      last_progress_at: '2026-04-13T12:00:00.000Z',
+      last_progress_type: 'task_completed',
+    });
+
+    runtime.recordInteractiveStart(session.id);
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(refreshed?.health_status, 'running_active');
+    assert.equal(refreshed?.last_progress_type, 'task_started');
+  });
+
+  it('diagnoses stale idle sessions with running health as idle without persisting changes', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Stale Running', 'test-model', undefined, 'D:\\workspace\\health-stale-running', 'code');
+    store.updateSession(session.id, {
+      runtime_status: 'idle',
+      health_status: 'running_active',
+      health_reason: '任务正在运行。',
+      last_progress_at: '2026-04-13T12:00:00.000Z',
+      last_progress_type: 'text',
+    });
+    const before = store.getSession(session.id);
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => '2026-04-13T12:30:00.000Z',
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+
+    assert.equal(diagnosis?.healthStatus, 'idle');
+    assert.equal(diagnosis?.healthReason, '当前没有运行中的任务。');
+    assert.deepEqual(store.getSession(session.id), before);
   });
 
   it('keeps waiting_tool while another active tool is still running', () => {

@@ -97,15 +97,33 @@ export function htmlToFeishuMarkdown(html: string): string {
  * do not flood the card. The icon reflects the highest-priority live state:
  * running > error > complete.
  */
-export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
+export type FinalCardTerminalStatus = 'completed' | 'interrupted' | 'error';
+
+interface ProgressRenderOptions {
+  terminalStatus?: FinalCardTerminalStatus | null;
+}
+
+function normalizeToolStatusForRender(
+  status: ToolCallInfo['status'],
+  options: ProgressRenderOptions,
+): ToolCallInfo['status'] {
+  if (status !== 'running' || !options.terminalStatus) return status;
+  return options.terminalStatus === 'completed' ? 'complete' : 'error';
+}
+
+export function buildToolProgressMarkdown(
+  tools: ToolCallInfo[],
+  options: ProgressRenderOptions = {},
+): string {
   if (tools.length === 0) return '';
   const grouped = new Map<string, { running: number; complete: number; error: number }>();
 
   for (const tool of tools) {
     const key = tool.name || 'tool';
     const bucket = grouped.get(key) || { running: 0, complete: 0, error: 0 };
-    if (tool.status === 'running') bucket.running += 1;
-    else if (tool.status === 'error') bucket.error += 1;
+    const status = normalizeToolStatusForRender(tool.status, options);
+    if (status === 'running') bucket.running += 1;
+    else if (status === 'error') bucket.error += 1;
     else bucket.complete += 1;
     grouped.set(key, bucket);
   }
@@ -127,20 +145,43 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   return lines.join('\n');
 }
 
-export function buildTaskProgressMarkdown(tasks: TaskProgressInfo[]): string {
+function getTaskProgressPresentation(
+  task: TaskProgressInfo,
+  options: ProgressRenderOptions,
+): { icon: string; label: string } {
+  if (!options.terminalStatus) {
+    return task.status === 'completed'
+      ? { icon: '✅', label: '已完成' }
+      : task.status === 'in_progress'
+        ? { icon: '🔄', label: '执行中' }
+        : { icon: '⏳', label: '等待中' };
+  }
+
+  if (task.status === 'completed') {
+    return { icon: '✅', label: '已完成' };
+  }
+
+  if (options.terminalStatus === 'completed') {
+    return { icon: '✅', label: '已结束' };
+  }
+  if (options.terminalStatus === 'interrupted') {
+    return task.status === 'pending'
+      ? { icon: '⚠️', label: '未执行' }
+      : { icon: '⚠️', label: '已停止' };
+  }
+  return task.status === 'pending'
+    ? { icon: '❌', label: '未执行' }
+    : { icon: '❌', label: '已中断' };
+}
+
+export function buildTaskProgressMarkdown(
+  tasks: TaskProgressInfo[],
+  options: ProgressRenderOptions = {},
+): string {
   if (tasks.length === 0) return '';
   return tasks
     .map((task) => {
-      const icon = task.status === 'completed'
-        ? '✅'
-        : task.status === 'in_progress'
-          ? '🔄'
-          : '⏳';
-      const label = task.status === 'completed'
-        ? '已完成'
-        : task.status === 'in_progress'
-          ? '执行中'
-          : '等待中';
+      const { icon, label } = getTaskProgressPresentation(task, options);
       return `${icon} ${task.text}（${label}）`;
     })
     .join('\n');
@@ -184,13 +225,15 @@ export function buildFinalCardJson(
   tasks: TaskProgressInfo[],
   tools: ToolCallInfo[],
   footer: { status: string; elapsed: string } | null,
+  terminalStatus?: FinalCardTerminalStatus,
 ): string {
   const elements: Array<Record<string, unknown>> = [];
 
   // Main text content
   const content = preprocessFeishuMarkdown(text);
-  const taskMd = buildTaskProgressMarkdown(tasks);
-  const toolMd = buildToolProgressMarkdown(tools);
+  const renderOptions = { terminalStatus };
+  const taskMd = buildTaskProgressMarkdown(tasks, renderOptions);
+  const toolMd = buildToolProgressMarkdown(tools, renderOptions);
 
   if (content) {
     elements.push({

@@ -180,4 +180,96 @@ describe('interactive-runtime', () => {
     assert.equal(running?.runtime_status, 'running');
     assert.equal(state.activeTasks.has(session.id), true);
   });
+
+  it('force-stops a session task and clears runtime bookkeeping', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initTestBridgeContext(store);
+    const session = store.createSession('Runtime Force Stop', 'test-model', undefined, 'D:\\workspace\\runtime-force-stop', 'code');
+    const state = {
+      activeTasks: new Map(),
+      queuedCounts: new Map(),
+      sessionLocks: new Map(),
+    };
+    const runtime = createInteractiveRuntime(() => state, {
+      getStore: () => store,
+      nowIso: () => '2026-04-20T16:10:00.000Z',
+    });
+    const abortController = new AbortController();
+    let forceStopDetail: string | undefined;
+
+    runtime.registerInteractiveTask({
+      id: 'task-force-stop',
+      abortController,
+      adapter: { channelType: 'feishu', provider: 'feishu' } as never,
+      address: { channelType: 'feishu', chatId: 'chat-force-stop' },
+      requestMessageId: 'msg-force-stop',
+      streamKey: 'stream-force-stop',
+      sessionId: session.id,
+      hasStreamingCards: false,
+      structuredStreamUiActive: false,
+      lastActivityAt: Date.now(),
+      streamFinalized: false,
+      uiEnded: false,
+      mirrorSuppressionId: null,
+      forceStop: async (detail) => {
+        forceStopDetail = detail;
+        abortController.abort();
+        return true;
+      },
+    });
+    state.queuedCounts.set(session.id, 2);
+    state.sessionLocks.set(session.id, Promise.resolve());
+    store.updateSession(session.id, {
+      runtime_status: 'queued',
+      queued_count: 2,
+    });
+
+    const handled = await runtime.forceStopSession(session.id, '用户执行 /stop，已停止当前任务。');
+
+    const refreshed = store.getSession(session.id);
+    assert.equal(handled, true);
+    assert.equal(forceStopDetail, '用户执行 /stop，已停止当前任务。');
+    assert.equal(abortController.signal.aborted, true);
+    assert.equal(state.activeTasks.has(session.id), false);
+    assert.equal(state.queuedCounts.has(session.id), false);
+    assert.equal(state.sessionLocks.has(session.id), false);
+    assert.equal(refreshed?.runtime_status, 'idle');
+    assert.equal(refreshed?.queued_count || 0, 0);
+  });
+
+  it('skips stale queued work after a force stop invalidates the session lock', async () => {
+    const store = new JsonFileStore(makeSettings());
+    initTestBridgeContext(store);
+    const session = store.createSession('Runtime Force Stop Queue', 'test-model', undefined, 'D:\\workspace\\runtime-force-stop-queue', 'code');
+    const state = {
+      activeTasks: new Map(),
+      queuedCounts: new Map(),
+      sessionLocks: new Map(),
+    };
+    const runtime = createInteractiveRuntime(() => state, {
+      getStore: () => store,
+      nowIso: () => '2026-04-20T16:11:00.000Z',
+    });
+    let releaseFirstLock: (() => void) | undefined;
+    let staleQueuedRan = false;
+
+    const first = runtime.processWithSessionLock(session.id, async () => {
+      await new Promise<void>((resolve) => {
+        releaseFirstLock = resolve;
+      });
+    });
+    const staleQueued = runtime.processWithSessionLock(session.id, async () => {
+      staleQueuedRan = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await runtime.forceStopSession(session.id, 'force stop');
+    assert.ok(releaseFirstLock);
+    releaseFirstLock();
+    await Promise.all([first, staleQueued]);
+
+    assert.equal(staleQueuedRan, false);
+    assert.equal(state.sessionLocks.has(session.id), false);
+    assert.equal(state.queuedCounts.has(session.id), false);
+  });
 });

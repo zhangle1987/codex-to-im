@@ -1,0 +1,10 @@
+==== restart scheduled at 2026-04-28 21:42:39 +08:00 ====
+Stopping bridge PID 41936 (process only, not tree)
+Stopped PID 41936
+Starting bridge
+Bridge started. PID: 21628
+Status after restart
+UI: running (http://127.0.0.1:4781)
+Bridge: running
+Bridge Autostart: enabled
+==== restart finished at 2026-04-28 21:42:46 +08:00 ====

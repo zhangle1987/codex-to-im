@@ -18,10 +18,15 @@
 
 ## 当前进度
 
-更新时间：2026-04-27
+更新时间：2026-04-28
 
 已完成：
 
+- 追加恢复任务已完成代码实现：`/stop` 改为线程级强制恢复，不重启 bridge。
+- 追加恢复任务已完成代码实现：强制停止会释放 active task、queued count、session lock，并让旧队列任务失效。
+- 追加恢复任务已完成代码实现：飞书卡片 finalize 不再无限等待卡住的流式 flush。
+- 追加恢复任务已完成代码实现：终态 session 不会再被迟到的正文/工具进展覆盖回 running。
+- 追加恢复任务已完成代码实现：健康诊断对 `runtime_status=idle` 但 `health_status=running_*` 的陈旧状态按 idle 展示，仍保持只读。
 - 阶段 1 已完成：新增 turn 类型与 turn 分类器。
 - 阶段 2 已完成主路径：新增 `TurnCoordinator` 与 Desktop terminal router，并接入 mirror runtime。
 - 阶段 3 已完成主路径：新增 `ResponseAssembler` 与 `DeliveryPipeline`，并接入 interactive final 和 mirror final。
@@ -63,9 +68,35 @@
 
 下一步：
 
-- 阶段 5 已完成；当前不建议继续大拆。
-- 后续建议进入上线前审查、全量验证、提交发布准备。
+- 运行 `npm run typecheck`、`npm test`、必要时 `npm run build`。
+- 验证通过后进入上线前审查、提交发布准备。
 - 后续任何清理仍必须保持 health/status 查询只读，不能把诊断命令当作运行态修复入口。
+
+## 追加开发任务：线程级停止与卡住恢复
+
+状态：已完成（2026-04-28）
+
+任务清单：
+
+- `/stop` 不重启 bridge，只针对当前绑定 session 执行强制停止。
+- `/stop` 对内存中没有 active task、但持久化 health 仍显示 running/stall 的 session 也能恢复。
+- 强制停止需要释放 `activeTasks`、`queuedCounts`、`sessionLocks`，并让停止前排队的旧 work 不再继续执行。
+- 强制停止需要写入 `health_status=aborted`，避免出现 `runtime_status=idle` 但 health 仍是 running/stall。
+- 飞书流式卡片收尾前等待 in-flight flush，但等待必须有上限；超时后继续 finalize，避免 IM 卡片永久不结束。
+- 健康检查和线程状态查询继续保持只读，不承担任何修复动作。
+
+测试清单：
+
+- `session-health-runtime.test.ts`：终态 session 不被迟到 progress/tool 覆盖；陈旧 idle+running health 诊断为 idle 且不落盘。
+- `interactive-runtime.test.ts`：`forceStopSession` 清理运行态；旧排队 work 在 force stop 后不再执行。
+- `command-dispatch.test.ts`：`/stop` 能恢复没有 active task 的疑似卡住 session。
+- `feishu-adapter.test.ts`：卡片 finalize 不会被卡住的 flush 永久阻塞。
+
+验证结果：
+
+- `npm run typecheck` 通过。
+- `npm test -- --test-name-pattern="session-health-runtime|interactive-runtime|command-dispatch|feishu-adapter|bridge-manager stop handling"` 实际执行全量 359 个测试，全部通过。
+- `npm run build` 通过。
 
 ## 目标
 

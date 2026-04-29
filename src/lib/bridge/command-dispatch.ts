@@ -116,6 +116,8 @@ function auditCommandBindingChange(
 
 export interface BridgeCommandDispatchDeps {
   getActiveTask(sessionId: string): { abortController: AbortController } | undefined;
+  forceStopSession?(sessionId: string, detail?: string): Promise<boolean>;
+  recordInteractiveHealthEnd?(sessionId: string, outcome: 'completed' | 'failed' | 'aborted', detail?: string): void;
   diagnoseSessionHealth(sessionId: string): Promise<import('./session-health-runtime.js').SessionHealthDiagnosis | null>;
   diagnoseAllActiveSessions(): Promise<import('./session-health-runtime.js').SessionHealthDiagnosis[]>;
 }
@@ -721,10 +723,29 @@ export async function handleBridgeCommand(
 
     case '/stop': {
       const binding = router.resolve(msg.address);
+      const session = store.getSession(binding.codepilotSessionId);
       const task = deps.getActiveTask(binding.codepilotSessionId);
-      if (task) {
-        task.abortController.abort();
-        response = '正在停止当前任务...';
+      const runningHealthStatuses = new Set([
+        'running_active',
+        'waiting_tool',
+        'slow_observed',
+        'suspected_stall',
+        'suspected_stream_ui_stall',
+        'suspected_detached',
+      ]);
+      const looksRunning = session?.runtime_status === 'running'
+        || session?.runtime_status === 'queued'
+        || runningHealthStatuses.has(session?.health_status || '');
+      if (task || looksRunning) {
+        const taskName = getSessionDisplayName(session, binding.workingDirectory);
+        const detail = '用户执行 /stop，已停止当前任务。';
+        if (deps.forceStopSession) {
+          await deps.forceStopSession(binding.codepilotSessionId, detail);
+        } else if (task) {
+          task.abortController.abort();
+        }
+        deps.recordInteractiveHealthEnd?.(binding.codepilotSessionId, 'aborted', detail);
+        response = `旧会话「${taskName}」任务已停止，可继续发送消息恢复该线程。`;
       } else {
         response = '当前没有正在运行的任务。';
       }

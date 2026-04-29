@@ -165,6 +165,7 @@ export interface InteractiveTaskState {
     detail?: string,
     finalText?: string,
   ): Promise<boolean>;
+  forceStop?(detail?: string): Promise<boolean>;
 }
 
 export interface RunInteractiveMessageDeps {
@@ -587,6 +588,24 @@ export async function runInteractiveMessage(
   let finalOutcome: 'completed' | 'failed' | 'aborted' = 'failed';
   let finalOutcomeDetail: string | undefined;
   let shouldRecordHealthEnd = true;
+  let forceStopStarted = false;
+
+  taskState.forceStop = async (detail = '任务已收到停止请求。') => {
+    if (forceStopStarted) return true;
+    forceStopStarted = true;
+    finalOutcome = 'aborted';
+    finalOutcomeDetail = detail;
+    taskAbort.abort();
+    stopStructuredStreamStatusUpdates();
+    endPreviewOnce();
+    try {
+      await finalizeStreamUiOnce('interrupted', detail);
+    } catch {
+      // Force stop must release the session even if remote UI cleanup fails.
+    }
+    endMessageUiOnce();
+    return true;
+  };
 
   try {
     const promptText = text || (attachments && attachments.length > 0 ? 'Describe this image.' : '');
@@ -780,7 +799,7 @@ export async function runInteractiveMessage(
     if (shouldRecordHealthEnd) {
       if (taskAbort.signal.aborted && !externalTerminalRequest) {
         finalOutcome = 'aborted';
-        finalOutcomeDetail = '任务已收到停止请求。';
+        finalOutcomeDetail = finalOutcomeDetail || '任务已收到停止请求。';
       }
       deps.recordInteractiveHealthEnd(binding.codepilotSessionId, finalOutcome, finalOutcomeDetail);
     }

@@ -201,6 +201,129 @@ describe('feishu-adapter structured streaming regions', () => {
       && update.path?.element_id !== 'streaming_tools'));
   });
 
+  it('periodically refreshes the whole streaming card without sending a new message', async () => {
+    const elementUpdates: Array<Record<string, any>> = [];
+    const cardUpdateCalls: Array<Record<string, any>> = [];
+    const replyCalls: Array<Record<string, any>> = [];
+    const adapter = new FeishuAdapter({
+      id: 'feishu-default',
+      provider: 'feishu',
+      enabled: true,
+      alias: '飞书',
+      config: {
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        streamingEnabled: true,
+      },
+    });
+
+    (adapter as any).cardFullRefreshIntervalMs = 1;
+    (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => ({}),
+            update: async (payload: Record<string, any>) => {
+              cardUpdateCalls.push(payload);
+              return {};
+            },
+          },
+          cardElement: {
+            content: async (payload: Record<string, any>) => {
+              elementUpdates.push(payload);
+              return {};
+            },
+          },
+        },
+      },
+      im: {
+        message: {
+          create: async () => ({ data: { message_id: 'msg-1' } }),
+          reply: async (payload: Record<string, any>) => {
+            replyCalls.push(payload);
+            return { data: { message_id: 'msg-1' } };
+          },
+        },
+      },
+    };
+
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    const state = (adapter as any).activeCards.get('stream-1');
+    state.lastFullRefreshAttemptAt = Date.now() - 10;
+
+    adapter.onStreamStatus('chat-1', '已运行 5分，上次响应距今 2分', 'stream-1');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(replyCalls.length, 1);
+    assert.equal(cardUpdateCalls.length, 1);
+    assert.equal(elementUpdates.length, 0);
+
+    const body = JSON.parse(cardUpdateCalls[0]?.data?.card?.data || '{}');
+    const elements = body.body?.elements || [];
+    assert.equal(body.config?.streaming_mode, true);
+    assert.equal(elements[3]?.element_id, 'streaming_status');
+    assert.equal(elements[3]?.content, '已运行 5分，上次响应距今 2分');
+    assert.equal(state.renderedStatusText, '已运行 5分，上次响应距今 2分');
+  });
+
+  it('falls back to element updates when periodic whole-card refresh fails', async () => {
+    const elementUpdates: Array<Record<string, any>> = [];
+    const cardUpdateCalls: Array<Record<string, any>> = [];
+    const adapter = new FeishuAdapter({
+      id: 'feishu-default',
+      provider: 'feishu',
+      enabled: true,
+      alias: '飞书',
+      config: {
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        streamingEnabled: true,
+      },
+    });
+
+    (adapter as any).cardFullRefreshIntervalMs = 1;
+    (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => ({}),
+            update: async (payload: Record<string, any>) => {
+              cardUpdateCalls.push(payload);
+              throw new Error('whole-card refresh failed');
+            },
+          },
+          cardElement: {
+            content: async (payload: Record<string, any>) => {
+              elementUpdates.push(payload);
+              return {};
+            },
+          },
+        },
+      },
+      im: {
+        message: {
+          create: async () => ({ data: { message_id: 'msg-1' } }),
+          reply: async () => ({ data: { message_id: 'msg-1' } }),
+        },
+      },
+    };
+
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    const state = (adapter as any).activeCards.get('stream-1');
+    state.lastFullRefreshAttemptAt = Date.now() - 10;
+
+    adapter.onStreamStatus('chat-1', '已运行 5分，上次响应距今 2分', 'stream-1');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(cardUpdateCalls.length, 1);
+    assert.ok(elementUpdates.some((update) =>
+      update.path?.element_id === 'streaming_status'
+      && update.data?.content === '已运行 5分，上次响应距今 2分'));
+    assert.equal(state.renderedStatusText, '已运行 5分，上次响应距今 2分');
+  });
+
   it('updates tool calls in the dedicated tools region instead of the main content area', async () => {
     const elementUpdates: Array<Record<string, any>> = [];
     const adapter = new FeishuAdapter({
@@ -421,6 +544,122 @@ describe('feishu-adapter structured streaming regions', () => {
     assert.equal(state.consecutiveFlushFailures, 0);
 
     blocked.resolve({});
+  });
+
+  it('finalizes a streaming card instead of hanging behind a stuck flush', async () => {
+    const blocked = createDeferred<Record<string, any>>();
+    const cardSettingsCalls: Array<Record<string, any>> = [];
+    const cardUpdateCalls: Array<Record<string, any>> = [];
+    const adapter = new FeishuAdapter({
+      id: 'feishu-default',
+      provider: 'feishu',
+      enabled: true,
+      alias: '飞书',
+      config: {
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        streamingEnabled: true,
+      },
+    });
+
+    (adapter as any).cardRequestTimeoutMs = 5;
+    (adapter as any).cardFinalizeFlushWaitExtraMs = 5;
+    (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async (payload: Record<string, any>) => {
+              cardSettingsCalls.push(payload);
+              return {};
+            },
+            update: async (payload: Record<string, any>) => {
+              cardUpdateCalls.push(payload);
+              return {};
+            },
+          },
+          cardElement: {
+            content: async () => ({}),
+          },
+        },
+      },
+      im: {
+        message: {
+          create: async () => ({ data: { message_id: 'msg-1' } }),
+          reply: async () => ({ data: { message_id: 'msg-1' } }),
+        },
+      },
+    };
+
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    const state = (adapter as any).activeCards.get('stream-1');
+    state.flushInFlight = blocked.promise;
+    state.flushQueued = true;
+
+    const finalized = await adapter.onStreamEnd('chat-1', 'interrupted', '用户执行 /stop，已停止当前任务。', 'stream-1');
+
+    assert.equal(finalized, true);
+    assert.equal(cardSettingsCalls.length, 1);
+    assert.equal(cardUpdateCalls.length, 1);
+    assert.equal((adapter as any).activeCards.has('stream-1'), false);
+
+    blocked.resolve({});
+  });
+
+  it('renders final cards without waiting tasks or running tools after completion', async () => {
+    const cardUpdateCalls: Array<Record<string, any>> = [];
+    const adapter = new FeishuAdapter({
+      id: 'feishu-default',
+      provider: 'feishu',
+      enabled: true,
+      alias: '飞书',
+      config: {
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        streamingEnabled: true,
+      },
+    });
+
+    (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => ({}),
+            update: async (payload: Record<string, any>) => {
+              cardUpdateCalls.push(payload);
+              return {};
+            },
+          },
+          cardElement: {
+            content: async () => ({}),
+          },
+        },
+      },
+      im: {
+        message: {
+          create: async () => ({ data: { message_id: 'msg-1' } }),
+          reply: async () => ({ data: { message_id: 'msg-1' } }),
+        },
+      },
+    };
+
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    adapter.onTaskEvent('chat-1', [
+      { text: '读取日志', status: 'completed' },
+      { text: '补测试', status: 'pending' },
+    ], 'stream-1');
+    adapter.onToolEvent('chat-1', [
+      { id: 'tool-1', name: 'shell_command', status: 'running' },
+    ], 'stream-1');
+
+    const finalized = await adapter.onStreamEnd('chat-1', 'completed', '最终回复', 'stream-1');
+    const finalCardJson = String(cardUpdateCalls[0]?.data?.card?.data || '');
+
+    assert.equal(finalized, true);
+    assert.doesNotMatch(finalCardJson, /等待中|运行中/);
+    assert.match(finalCardJson, /补测试（已结束）/);
+    assert.match(finalCardJson, /`shell_command`/);
   });
 
   it('releases a timed-out card creation attempt so a later retry can recreate the stream card', async () => {

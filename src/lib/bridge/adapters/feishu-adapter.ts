@@ -90,6 +90,8 @@ interface FeishuCardState {
   lastFlushErrorAt: number | null;
   lastFlushError: string | null;
   consecutiveFlushFailures: number;
+  lastFullRefreshAttemptAt: number;
+  lastSuccessfulFullRefreshAt: number | null;
 }
 
 interface TypingReactionState {
@@ -100,9 +102,59 @@ interface TypingReactionState {
 /** Streaming card throttle interval (ms). */
 const CARD_THROTTLE_MS = 1000;
 const CARD_REQUEST_TIMEOUT_MS = 15_000;
+const CARD_FINALIZE_FLUSH_WAIT_EXTRA_MS = 1_000;
+const CARD_FULL_REFRESH_INTERVAL_MS = 5 * 60_000;
 const INITIAL_STREAMING_STATUS = '处理中';
 const EMPTY_STREAMING_TASKS = '';
 const EMPTY_STREAMING_TOOLS = '';
+
+function buildStreamingCardBody(
+  content: string,
+  tasksText: string,
+  toolsText: string,
+  statusText: string,
+): Record<string, unknown> {
+  return {
+    schema: '2.0',
+    config: {
+      streaming_mode: true,
+      wide_screen_mode: true,
+      summary: { content: '思考中...' },
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content,
+          text_align: 'left',
+          text_size: 'normal',
+          element_id: 'streaming_content',
+        },
+        {
+          tag: 'markdown',
+          content: tasksText,
+          text_align: 'left',
+          text_size: 'normal',
+          element_id: 'streaming_tasks',
+        },
+        {
+          tag: 'markdown',
+          content: toolsText,
+          text_align: 'left',
+          text_size: 'normal',
+          element_id: 'streaming_tools',
+        },
+        {
+          tag: 'markdown',
+          content: statusText,
+          text_align: 'left',
+          text_size: 'notation',
+          element_id: 'streaming_status',
+        },
+      ],
+    },
+  };
+}
 
 /** Shape of the SDK's im.message.receive_v1 event data. */
 type FeishuMessageEventData = {
@@ -170,6 +222,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     | { token: string; expiresAt: number; appId: string; appSecret: string; domain: string }
     | null = null;
   private cardRequestTimeoutMs = CARD_REQUEST_TIMEOUT_MS;
+  private cardFinalizeFlushWaitExtraMs = CARD_FINALIZE_FLUSH_WAIT_EXTRA_MS;
+  private cardFullRefreshIntervalMs = CARD_FULL_REFRESH_INTERVAL_MS;
 
   constructor(instance?: AdapterRuntimeInstance) {
     super();
@@ -469,46 +523,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     try {
       // Step 1: Create card via CardKit v1
-      const cardBody = {
-        schema: '2.0',
-        config: {
-          streaming_mode: true,
-          wide_screen_mode: true,
-          summary: { content: '思考中...' },
-        },
-        body: {
-          elements: [
-            {
-              tag: 'markdown',
-              content: '💭 Thinking...',
-              text_align: 'left',
-              text_size: 'normal',
-              element_id: 'streaming_content',
-            },
-            {
-              tag: 'markdown',
-              content: EMPTY_STREAMING_TASKS,
-              text_align: 'left',
-              text_size: 'normal',
-              element_id: 'streaming_tasks',
-            },
-            {
-              tag: 'markdown',
-              content: EMPTY_STREAMING_TOOLS,
-              text_align: 'left',
-              text_size: 'normal',
-              element_id: 'streaming_tools',
-            },
-            {
-              tag: 'markdown',
-              content: INITIAL_STREAMING_STATUS,
-              text_align: 'left',
-              text_size: 'notation',
-              element_id: 'streaming_status',
-            },
-          ],
-        },
-      };
+      const cardBody = buildStreamingCardBody(
+        '💭 Thinking...',
+        EMPTY_STREAMING_TASKS,
+        EMPTY_STREAMING_TOOLS,
+        INITIAL_STREAMING_STATUS,
+      );
 
       const createResp = await this.withFeishuRequestTimeout<{ data?: { card_id?: string } }>(cardKey, 'card.create', () => cardkit.card.create({
         data: { type: 'card_json', data: JSON.stringify(cardBody) },
@@ -545,12 +565,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
 
       // Store card state
+      const now = Date.now();
       this.activeCards.set(cardKey, {
         chatId,
         cardId,
         messageId,
         sequence: 0,
-        startTime: Date.now(),
+        startTime: now,
         taskItems: [],
         toolCalls: [],
         thinking: true,
@@ -570,6 +591,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
         lastFlushErrorAt: null,
         lastFlushError: null,
         consecutiveFlushFailures: 0,
+        lastFullRefreshAttemptAt: now,
+        lastSuccessfulFullRefreshAt: null,
       });
 
       console.log(`[feishu-adapter] Streaming card created: streamKey=${cardKey}, cardId=${cardId}, msgId=${messageId}`);
@@ -676,6 +699,18 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const statusText = state.pendingStatusText || INITIAL_STREAMING_STATUS;
     const updates: Array<{ elementId: string; content: string; onSuccess: () => void }> = [];
 
+    if (this.shouldFullRefreshCard(state, Date.now())) {
+      const refreshed = await this.flushFullCardRefresh(
+        streamKey,
+        state,
+        content,
+        tasksText,
+        toolsText,
+        statusText,
+      );
+      if (refreshed) return;
+    }
+
     if (content !== state.renderedText) {
       updates.push({
         elementId: 'streaming_content',
@@ -745,25 +780,37 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.scheduleCardFlush(cardKey);
   }
 
-  private async awaitCardFlushCompletion(streamKey: string): Promise<void> {
+  private async awaitCardFlushCompletion(
+    streamKey: string,
+    timeoutMs = this.getCardRequestTimeoutMs() + Math.max(0, this.cardFinalizeFlushWaitExtraMs),
+  ): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
     while (true) {
       const state = this.activeCards.get(streamKey);
-      if (!state) return;
+      if (!state) return true;
       const inFlight = state.flushInFlight;
       if (inFlight) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) return false;
+        const timedOut = Symbol('flush-timeout');
         try {
-          await inFlight;
+          const result = await Promise.race([
+            inFlight.then(() => null),
+            new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), remainingMs)),
+          ]);
+          if (result === timedOut) return false;
         } catch {
           // best effort only
         }
         continue;
       }
+      if (Date.now() >= deadline) return false;
       if (state.flushQueued) {
         state.flushQueued = false;
         this.enqueueCardFlush(streamKey);
         continue;
       }
-      return;
+      return true;
     }
   }
 
@@ -793,7 +840,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       clearTimeout(state.throttleTimer);
       state.throttleTimer = null;
     }
-    await this.awaitCardFlushCompletion(cardKey);
+    const flushed = await this.awaitCardFlushCompletion(cardKey);
+    if (!flushed) {
+      console.warn(`[feishu-adapter] Card finalize proceeding after flush wait timeout: streamKey=${cardKey}`);
+      state.flushInFlight = null;
+      state.flushQueued = false;
+    }
 
     try {
       // Step 1: Close streaming mode
@@ -832,7 +884,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         finalText = `${trimmedExisting}\n\n${trimmedResponse}`;
       }
 
-      const finalCardJson = buildFinalCardJson(finalText, state.taskItems, state.toolCalls, footer);
+      const finalCardJson = buildFinalCardJson(finalText, state.taskItems, state.toolCalls, footer, status);
 
       state.sequence++;
       await this.withFeishuRequestTimeout(cardKey, 'card.update', () => cardkit.card.update({
@@ -891,6 +943,54 @@ export class FeishuAdapter extends BaseChannelAdapter {
       flushInFlightSince: state.flushInFlight ? state.lastFlushStartedAt : null,
       consecutiveFailures: state.consecutiveFlushFailures,
     };
+  }
+
+  private shouldFullRefreshCard(state: FeishuCardState, now: number): boolean {
+    const interval = Math.max(0, this.cardFullRefreshIntervalMs);
+    if (interval <= 0) return false;
+    if (!Number.isFinite(now)) return false;
+    return now - state.lastFullRefreshAttemptAt >= interval;
+  }
+
+  private async flushFullCardRefresh(
+    streamKey: string,
+    state: FeishuCardState,
+    content: string,
+    tasksText: string,
+    toolsText: string,
+    statusText: string,
+  ): Promise<boolean> {
+    state.lastFullRefreshAttemptAt = Date.now();
+    const cardkit = (this.restClient as any)?.cardkit?.v1;
+    if (!cardkit?.card?.update) return false;
+
+    try {
+      state.sequence++;
+      await this.withFeishuRequestTimeout(streamKey, 'card.update:streaming_refresh', () => cardkit.card.update({
+        path: { card_id: state.cardId },
+        data: {
+          card: {
+            type: 'card_json',
+            data: JSON.stringify(buildStreamingCardBody(content, tasksText, toolsText, statusText)),
+          },
+          sequence: state.sequence,
+        },
+      }));
+      state.renderedText = content;
+      state.renderedTasksText = tasksText;
+      state.renderedToolsText = toolsText;
+      state.renderedStatusText = statusText;
+      state.lastSuccessfulFullRefreshAt = Date.now();
+      this.markCardFlushSuccess(state);
+      return true;
+    } catch (err) {
+      this.markCardFlushFailure(state, err);
+      console.warn(
+        '[feishu-adapter] card.update streaming refresh failed:',
+        err instanceof Error ? err.message : err,
+      );
+      return false;
+    }
   }
 
   private getCardRequestTimeoutMs(): number {

@@ -26,6 +26,7 @@ export interface InteractiveRuntime {
     detail?: string,
     finalText?: string,
   ): Promise<boolean>;
+  forceStopSession(sessionId: string, detail?: string): Promise<boolean>;
   reconcileTerminalSessionRuntimeState(): Promise<void>;
   resetPersistedInteractiveRuntimeState(): void;
   processWithSessionLock(sessionId: string, fn: () => Promise<void>): Promise<void>;
@@ -45,6 +46,16 @@ export function createInteractiveRuntime(
   getState: () => BridgeInteractiveRuntimeState,
   deps: CreateInteractiveRuntimeDeps,
 ): InteractiveRuntime {
+  const sessionLockVersions = new Map<string, number>();
+
+  function getSessionLockVersion(sessionId: string): number {
+    return sessionLockVersions.get(sessionId) || 0;
+  }
+
+  function invalidateSessionLockQueue(sessionId: string): void {
+    sessionLockVersions.set(sessionId, getSessionLockVersion(sessionId) + 1);
+  }
+
   function getQueuedCount(sessionId: string): number {
     return getState().queuedCounts.get(sessionId) || 0;
   }
@@ -114,6 +125,25 @@ export function createInteractiveRuntime(
     return task.finalizeFromExternalTerminal(outcome, detail, finalText);
   }
 
+  async function forceStopSession(sessionId: string, detail?: string): Promise<boolean> {
+    const state = getState();
+    const task = state.activeTasks.get(sessionId);
+    let handled = false;
+    if (task?.forceStop) {
+      handled = await task.forceStop(detail);
+    } else if (task) {
+      task.abortController.abort();
+      handled = true;
+    }
+
+    state.activeTasks.delete(sessionId);
+    state.queuedCounts.delete(sessionId);
+    state.sessionLocks.delete(sessionId);
+    invalidateSessionLockQueue(sessionId);
+    syncSessionRuntimeState(sessionId);
+    return handled;
+  }
+
   async function reconcileTerminalSessionRuntimeState(): Promise<void> {
     const store = deps.getStore();
     for (const session of store.listSessions()) {
@@ -175,6 +205,7 @@ export function createInteractiveRuntime(
     const state = getState();
     const prev = state.sessionLocks.get(sessionId) || Promise.resolve();
     const queued = state.sessionLocks.has(sessionId);
+    const lockVersion = getSessionLockVersion(sessionId);
     if (queued) {
       incrementQueuedCount(sessionId);
     }
@@ -182,6 +213,7 @@ export function createInteractiveRuntime(
       if (queued) {
         decrementQueuedCount(sessionId);
       }
+      if (getSessionLockVersion(sessionId) !== lockVersion) return;
       await fn();
     };
     const current = prev.then(wrapped, wrapped);
@@ -203,6 +235,7 @@ export function createInteractiveRuntime(
     releaseInteractiveTask,
     syncSessionRuntimeState,
     finalizeTerminalActiveTask,
+    forceStopSession,
     reconcileTerminalSessionRuntimeState,
     resetPersistedInteractiveRuntimeState,
     processWithSessionLock,

@@ -52,6 +52,14 @@ export function createSessionHealthRuntime(
 ): SessionHealthRuntime {
   const lastProgressPersistAt = new Map<string, number>();
 
+  function isTerminalHealthStatus(status: BridgeSession['health_status'] | undefined): boolean {
+    return status === 'completed' || status === 'failed' || status === 'aborted';
+  }
+
+  function shouldIgnoreNonStartProgress(session: BridgeSession): boolean {
+    return isTerminalHealthStatus(session.health_status);
+  }
+
   function summarizePlanUpdate(tasks: DesktopMirrorRecord['tasks']): string {
     if (!Array.isArray(tasks) || tasks.length === 0) {
       return '检测到桌面线程更新了任务计划。';
@@ -142,6 +150,8 @@ export function createSessionHealthRuntime(
 
   function recordInteractiveProgress(sessionId: string, type: SessionProgressType, detail?: string): void {
     const nowIso = deps.nowIso();
+    const session = deps.getStore().getSession(sessionId);
+    if (!session || shouldIgnoreNonStartProgress(session)) return;
     maybePersistProgress(sessionId, {
       health_status: type === 'permission_wait' ? 'waiting_tool' : 'running_active',
       health_reason: buildProgressReason(type, detail),
@@ -155,6 +165,7 @@ export function createSessionHealthRuntime(
     const store = deps.getStore();
     const session = store.getSession(sessionId);
     if (!session) return;
+    if (shouldIgnoreNonStartProgress(session)) return;
 
     const activeTools = new Map(
       parseActiveToolsJson(session.active_tools_json).map((tool) => [tool.id, tool]),

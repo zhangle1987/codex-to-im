@@ -1,6 +1,8 @@
 import type { BridgeSession, BridgeSessionHealthStatus } from './host.js';
 import type { ThreadProcessProbeResult } from './session-health-process.js';
 
+// Diagnostic-only recent-progress window. Stream UI stall detection must not
+// depend on this label threshold; otherwise long tasks can form a time cliff.
 export const HEALTH_RECENT_PROGRESS_MS = 10 * 60 * 1000;
 export const HEALTH_SLOW_OBSERVED_MS = 30 * 60 * 1000;
 export const HEALTH_PROGRESS_PERSIST_THROTTLE_MS = 15 * 1000;
@@ -221,6 +223,28 @@ export function computeBaseDiagnosis(
   const lastProgressMs = parseIsoMs(lastProgressAt || undefined);
   const previousStatus = session.health_status || 'idle';
 
+  if (!isRunningRuntimeStatus(runtimeStatus) && isRunningHealthStatus(previousStatus)) {
+    return {
+      sessionId: session.id,
+      checkedAt: null,
+      runtimeStatus,
+      healthStatus: 'idle',
+      healthReason: '当前没有运行中的任务。',
+      lastProgressAt,
+      lastProgressType,
+      activeToolName,
+      activeToolStartedAt,
+      lastToolFinishedAt,
+      lastStreamUiAttemptAt,
+      lastStreamUiUpdateAt,
+      streamUiFlushStartedAt,
+      lastStreamUiErrorAt,
+      lastStreamUiError,
+      streamUiConsecutiveFailures,
+      sdkSessionId,
+    };
+  }
+
   if (!lastProgressMs) {
     const fallbackStatus = isRunningRuntimeStatus(runtimeStatus) ? 'running_active' : previousStatus;
     return {
@@ -265,12 +289,12 @@ export function computeBaseDiagnosis(
     healthStatus = activeToolName ? 'waiting_tool' : 'running_active';
     healthReason = activeToolName
       ? `当前正在等待工具 ${activeToolName}。`
-      : '最近 10 分钟内仍有新进展。';
+      : '近期仍有新进展。';
   } else if (idleMs <= HEALTH_SLOW_OBSERVED_MS) {
     healthStatus = activeToolName ? 'waiting_tool' : 'slow_observed';
     healthReason = activeToolName
       ? `工具 ${activeToolName} 已运行较久，但仍在观察窗口内。`
-      : '最近 10 到 30 分钟内没有新进展，先标记为待观察。';
+      : '近期没有新的执行进展，先标记为待观察。';
   } else {
     healthStatus = 'suspected_stall';
     healthReason = activeToolName
@@ -355,10 +379,6 @@ export function applyStreamUiDiagnosis(
   }
 
   const lastProgressMs = parseIsoMs(diagnosis.lastProgressAt || undefined);
-  if (!lastProgressMs || nowMs - lastProgressMs > HEALTH_RECENT_PROGRESS_MS) {
-    return diagnosis;
-  }
-
   const lastStreamUiUpdateMs = parseIsoMs(diagnosis.lastStreamUiUpdateAt || undefined);
   const lastStreamUiAttemptMs = parseIsoMs(diagnosis.lastStreamUiAttemptAt || undefined);
   const streamUiFlushStartedMs = parseIsoMs(diagnosis.streamUiFlushStartedAt || undefined);
@@ -379,7 +399,28 @@ export function applyStreamUiDiagnosis(
     };
   }
 
-  if (lastStreamUiUpdateMs && lastProgressMs - lastStreamUiUpdateMs >= HEALTH_STREAM_UI_STALL_MS) {
+  if (
+    lastStreamUiAttemptMs
+    && (
+      !lastStreamUiUpdateMs
+      || lastStreamUiAttemptMs - lastStreamUiUpdateMs >= HEALTH_STREAM_UI_STALL_MS
+    )
+  ) {
+    const details = ['任务仍在继续，但流式 UI 有刷新尝试未成功跟进，疑似停更。'];
+    if (diagnosis.streamUiConsecutiveFailures > 0) {
+      details.push(`最近连续失败 ${diagnosis.streamUiConsecutiveFailures} 次。`);
+    }
+    if (lastStreamUiErrorText) {
+      details.push(`最近错误：${lastStreamUiErrorText}`);
+    }
+    return {
+      ...diagnosis,
+      healthStatus: 'suspected_stream_ui_stall',
+      healthReason: details.join(' '),
+    };
+  }
+
+  if (lastProgressMs && lastStreamUiUpdateMs && lastProgressMs - lastStreamUiUpdateMs >= HEALTH_STREAM_UI_STALL_MS) {
     const details = ['任务仍在继续，但流式 UI 已长时间没有跟上最新执行进展，疑似停更。'];
     if (lastStreamUiErrorText) {
       details.push(`最近错误：${lastStreamUiErrorText}`);
@@ -391,7 +432,7 @@ export function applyStreamUiDiagnosis(
     };
   }
 
-  if (!lastStreamUiUpdateMs && lastStreamUiAttemptMs && lastProgressMs - lastStreamUiAttemptMs >= HEALTH_STREAM_UI_STALL_MS) {
+  if (lastProgressMs && !lastStreamUiUpdateMs && lastStreamUiAttemptMs && lastProgressMs - lastStreamUiAttemptMs >= HEALTH_STREAM_UI_STALL_MS) {
     const details = ['任务仍在继续，但流式 UI 只有发送尝试、没有成功刷新记录，疑似停更。'];
     if (lastStreamUiErrorText) {
       details.push(`最近错误：${lastStreamUiErrorText}`);
@@ -400,6 +441,22 @@ export function applyStreamUiDiagnosis(
       ...diagnosis,
       healthStatus: 'suspected_stream_ui_stall',
       healthReason: details.join(' '),
+    };
+  }
+
+  const lastStreamUiActivityMs = Math.max(
+    lastStreamUiAttemptMs || 0,
+    lastStreamUiUpdateMs || 0,
+    streamUiFlushStartedMs || 0,
+  );
+  if (
+    lastStreamUiActivityMs > 0
+    && nowMs - lastStreamUiActivityMs >= HEALTH_STREAM_UI_STALL_MS
+  ) {
+    return {
+      ...diagnosis,
+      healthStatus: 'suspected_stream_ui_stall',
+      healthReason: '任务仍在继续，但流式 UI 状态刷新已停止，疑似停更。',
     };
   }
 

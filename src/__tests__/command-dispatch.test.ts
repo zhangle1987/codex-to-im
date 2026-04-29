@@ -152,7 +152,7 @@ describe('command-dispatch', () => {
           checkedAt: null,
           runtimeStatus: 'running',
           healthStatus: 'slow_observed',
-          healthReason: '最近 10 到 30 分钟内没有新进展，先标记为待观察。',
+          healthReason: '近期没有新的执行进展，先标记为待观察。',
           lastProgressAt: '2026-04-13T12:00:00.000Z',
           lastProgressType: 'tool_running',
           activeToolName: 'shell_command',
@@ -405,6 +405,60 @@ describe('command-dispatch', () => {
       summary.includes('Binding change: action=switch_draft')
       && summary.includes('reason=forced')
     )));
+  });
+
+  it('force-stops a stale running session even when no active task remains in memory', async () => {
+    const store = initTestContext();
+    const sent: string[] = [];
+    const forcedStops: Array<{ sessionId: string; detail?: string }> = [];
+    const healthEnds: Array<{ sessionId: string; outcome: string; detail?: string }> = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: 'reply-stop-stale' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-stop-stale' } as const;
+    const binding = router.createBinding(address, 'D:\\workspace\\stop-stale');
+    store.updateSession(binding.codepilotSessionId, {
+      runtime_status: 'idle',
+      health_status: 'suspected_stream_ui_stall',
+      health_reason: '任务仍在继续，但流式 UI 刷新请求已长时间未完成，疑似卡住。',
+    });
+
+    await handleBridgeCommand(
+      adapter,
+      {
+        address,
+        text: '/stop',
+        messageId: 'incoming-stop-stale',
+      } as any,
+      '/stop',
+      {
+        getActiveTask: () => undefined,
+        forceStopSession: async (sessionId, detail) => {
+          forcedStops.push({ sessionId, detail });
+          return false;
+        },
+        recordInteractiveHealthEnd: (sessionId, outcome, detail) => {
+          healthEnds.push({ sessionId, outcome, detail });
+        },
+        diagnoseSessionHealth: async () => null,
+        diagnoseAllActiveSessions: async () => [],
+      },
+    );
+
+    assert.deepEqual(forcedStops, [{
+      sessionId: binding.codepilotSessionId,
+      detail: '用户执行 /stop，已停止当前任务。',
+    }]);
+    assert.deepEqual(healthEnds, [{
+      sessionId: binding.codepilotSessionId,
+      outcome: 'aborted',
+      detail: '用户执行 /stop，已停止当前任务。',
+    }]);
+    assert.match(sent[0] || '', /旧会话「Bridge: chat-stop-stale」任务已停止/);
   });
 
   it('removes the current binding on /unbind', async () => {

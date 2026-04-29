@@ -14,6 +14,8 @@ import {
   hasPendingMirrorWork,
 } from '../lib/bridge/mirror-turns.js';
 
+const MIRROR_TEST_BUFFER_TIMEOUT_MS = 10 * 60_000;
+
 const noopLlm = {
   streamChat() {
     return new ReadableStream({
@@ -102,9 +104,9 @@ describe('mirror-runtime pending deliveries', () => {
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
-      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, 600_000, Date.now()),
+      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
-      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, 600_000, Date.now()),
+      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       stopMirrorStreaming: () => {},
       deliverMirrorTurns: async (_subscription, turns) => {
         deliveryCalls.push(turns.map((turn) => turn.signature));
@@ -229,9 +231,9 @@ describe('mirror-runtime pending deliveries', () => {
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
-      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, 600_000, Date.now()),
+      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
-      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, 600_000, Date.now()),
+      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       stopMirrorStreaming: () => {},
       deliverMirrorTurns: async (_subscription, turns) => {
         deliveryCalls.push(turns.map((turn) => turn.signature));
@@ -356,9 +358,9 @@ describe('mirror-runtime pending deliveries', () => {
       },
       observeSessionHealthRecords: () => {},
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
-      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, 600_000, Date.now()),
+      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
-      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, 600_000, Date.now()),
+      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       stopMirrorStreaming: () => {},
       deliverMirrorTurns: async (_subscription, turns) => {
         deliveryCalls.push(turns.map((turn) => turn.signature));
@@ -477,9 +479,9 @@ describe('mirror-runtime pending deliveries', () => {
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
-      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, 600_000, Date.now()),
+      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
-      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, 600_000, Date.now()),
+      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       stopMirrorStreaming: () => {},
       deliverMirrorTurns: async () => ({ deliveredCount: 0 }),
     });
