@@ -36,6 +36,7 @@ import {
 import {
   formatStreamRuntimeStatus,
   getStreamLastContentResponseAgeMs,
+  getVisibleStreamLastContentResponseAgeMs,
   shouldShowStreamLastContentResponseAge,
 } from './turns/stream-state.js';
 
@@ -47,6 +48,7 @@ export interface MirrorStructuredStreamStatusConfig {
 export interface MirrorFeedbackControllerDeps {
   getAdapter(channelType: string): BaseChannelAdapter | null | undefined;
   getThreadTitle(threadId: string): string | null | undefined;
+  getStructuredStreamStatusConfig?(): MirrorStructuredStreamStatusConfig;
   nowIso(): string;
   eventBatchLimit: number;
   deliverResponse: DeliverResponseImpl;
@@ -163,9 +165,24 @@ export function createMirrorFeedbackController(
       return;
     }
 
+    const lastContentResponseAtMs = turnState.lastContentResponseAt
+      ? Date.parse(turnState.lastContentResponseAt)
+      : turnState.lastResponseAt
+        ? Date.parse(turnState.lastResponseAt)
+        : null;
+    const streamState = {
+      startedAtMs,
+      lastContentResponseAtMs: Number.isFinite(lastContentResponseAtMs) ? lastContentResponseAtMs : null,
+    };
+    const statusConfig = deps.getStructuredStreamStatusConfig?.();
+    const effectiveLastResponseAgeMs = Object.prototype.hasOwnProperty.call(options, 'lastResponseAgeMs')
+      ? options.lastResponseAgeMs
+      : statusConfig
+        ? getVisibleStreamLastContentResponseAgeMs(streamState, nowMs, statusConfig)
+        : null;
     const statusText = formatStreamRuntimeStatus(
       Math.max(0, nowMs - startedAtMs),
-      options.lastResponseAgeMs,
+      effectiveLastResponseAgeMs,
       turnState.statusNote,
     );
     if (turnState.lastStatusText === statusText) return;

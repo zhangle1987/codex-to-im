@@ -461,6 +461,45 @@ describe('readDesktopSessionEventStreamByFilePath', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('reads agent_message event records without duplicating the matching response_item message', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-events-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'agent_message',
+            message: '正在检查新版格式',
+            phase: 'commentary',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:00.001Z',
+          type: 'response_item',
+          payload: {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{ type: 'output_text', text: '正在检查新版格式' }],
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const events = readDesktopSessionEventStreamByFilePath(filePath);
+
+    assert.deepEqual(
+      events.map((event) => ({ role: event.role, content: event.content })),
+      [{ role: 'commentary', content: '正在检查新版格式' }],
+    );
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('reads only appended complete lines and preserves trailing partial text', () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-events-'));
     const filePath = path.join(tempRoot, 'rollout.jsonl');
@@ -911,6 +950,283 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('parses current Codex desktop tool and reasoning events into mirror records', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'task_started',
+            turn_id: 'turn-current',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:01.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: '先检查新版 Codex 事件格式' }],
+            content: null,
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:02.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'exec_command_end',
+            call_id: 'call-shell',
+            turn_id: 'turn-current',
+            command: ['pwsh', '-Command', 'npm test'],
+            aggregated_output: 'tests passed',
+            exit_code: 0,
+            status: 'completed',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:03.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'patch_apply_end',
+            call_id: 'call-patch',
+            turn_id: 'turn-current',
+            success: true,
+            status: 'completed',
+            changes: {
+              'D:\\codex\\Claude-to-IM-skill\\src\\desktop-sessions.ts': {
+                type: 'update',
+              },
+            },
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:04.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'tool_search_call',
+            call_id: 'call-tool-search',
+            status: 'completed',
+            execution: 'client',
+            arguments: { query: 'browser inspect' },
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:05.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'tool_search_output',
+            call_id: 'call-tool-search',
+            status: 'completed',
+            execution: 'client',
+            tools: [{ name: 'mcp__playwright__', tools: [{ name: 'browser_snapshot' }] }],
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:06.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'dynamic_tool_call_request',
+            callId: 'call-dynamic',
+            turnId: 'turn-current',
+            tool: 'read_thread_terminal',
+            arguments: {},
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:07.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'dynamic_tool_call_response',
+            call_id: 'call-dynamic',
+            turn_id: 'turn-current',
+            tool: 'read_thread_terminal',
+            content_items: [{ type: 'inputText', text: 'terminal output' }],
+            success: false,
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const records = readDesktopSessionMirrorRecordStreamByFilePath(filePath);
+
+    assert.deepEqual(
+      records.map((record) => ({
+        type: record.type,
+        content: record.content,
+        turnId: record.turnId,
+        toolId: record.toolId,
+        toolName: record.toolName,
+        isError: record.isError,
+      })),
+      [
+        {
+          type: 'task_started',
+          content: '',
+          turnId: 'turn-current',
+          toolId: undefined,
+          toolName: undefined,
+          isError: undefined,
+        },
+        {
+          type: 'reasoning',
+          content: '先检查新版 Codex 事件格式',
+          turnId: 'turn-current',
+          toolId: undefined,
+          toolName: undefined,
+          isError: undefined,
+        },
+        {
+          type: 'tool_finished',
+          content: 'tests passed',
+          turnId: 'turn-current',
+          toolId: 'call-shell',
+          toolName: 'Bash',
+          isError: false,
+        },
+        {
+          type: 'tool_finished',
+          content: 'update: D:\\codex\\Claude-to-IM-skill\\src\\desktop-sessions.ts',
+          turnId: 'turn-current',
+          toolId: 'call-patch',
+          toolName: 'apply_patch',
+          isError: false,
+        },
+        {
+          type: 'tool_started',
+          content: '',
+          turnId: 'turn-current',
+          toolId: 'call-tool-search',
+          toolName: 'tool_search',
+          isError: undefined,
+        },
+        {
+          type: 'tool_finished',
+          content: 'Found 1 tools: mcp__playwright__',
+          turnId: 'turn-current',
+          toolId: 'call-tool-search',
+          toolName: 'tool_search',
+          isError: false,
+        },
+        {
+          type: 'tool_started',
+          content: '',
+          turnId: 'turn-current',
+          toolId: 'call-dynamic',
+          toolName: 'read_thread_terminal',
+          isError: undefined,
+        },
+        {
+          type: 'tool_finished',
+          content: 'terminal output',
+          turnId: 'turn-current',
+          toolId: 'call-dynamic',
+          toolName: 'read_thread_terminal',
+          isError: true,
+        },
+      ],
+    );
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('preserves namespaced desktop tool names', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'task_started',
+            turn_id: 'turn-tool-namespace',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:01.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            namespace: 'mcp__playwright__',
+            name: 'browser_resize',
+            call_id: 'call-namespaced',
+            arguments: '{"width":1280,"height":720}',
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const records = readDesktopSessionMirrorRecordStreamByFilePath(filePath);
+
+    assert.deepEqual(
+      records.map((record) => ({
+        type: record.type,
+        toolId: record.toolId,
+        toolName: record.toolName,
+      })),
+      [
+        {
+          type: 'task_started',
+          toolId: undefined,
+          toolName: undefined,
+        },
+        {
+          type: 'tool_started',
+          toolId: 'call-namespaced',
+          toolName: 'mcp__playwright__browser_resize',
+        },
+      ],
+    );
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('falls back to reasoning content when summary is empty', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'task_started',
+            turn_id: 'turn-reasoning-fallback',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:01.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'reasoning',
+            summary: [],
+            content: [{ type: 'summary_text', text: 'fallback reasoning content' }],
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const records = readDesktopSessionMirrorRecordStreamByFilePath(filePath);
+
+    assert.deepEqual(
+      records.map((record) => ({ type: record.type, content: record.content })),
+      [
+        { type: 'task_started', content: '' },
+        { type: 'reasoning', content: 'fallback reasoning content' },
+      ],
+    );
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('parses custom tool output and clears turn context after turn_aborted', () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
     const filePath = path.join(tempRoot, 'rollout.jsonl');
@@ -1125,6 +1441,48 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
       'event_msg:approval_request_started',
       'response_item:approval_request',
     ]);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('ignores known Codex desktop bookkeeping events without reporting unknown kinds', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:00.000Z',
+          type: 'event_msg',
+          payload: { type: 'token_count', info: {}, rate_limits: {} },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:01.000Z',
+          type: 'event_msg',
+          payload: { type: 'context_compacted' },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:02.000Z',
+          type: 'event_msg',
+          payload: { type: 'thread_name_updated', thread_name: '新标题' },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:03.000Z',
+          type: 'event_msg',
+          payload: { type: 'thread_rolled_back', num_turns: 1 },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:04.000Z',
+          type: 'response_item',
+          payload: { type: 'web_search_call', status: 'completed' },
+        }),
+      ].join('\n') + '\n',
+      'utf-8',
+    );
+
+    const delta = readDesktopSessionMirrorRecordDeltaByFilePath(filePath, 0, fs.statSync(filePath).size);
+    assert.deepEqual(delta.records, []);
+    assert.deepEqual(delta.unknownKinds, []);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });

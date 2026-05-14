@@ -387,6 +387,7 @@ function getMirrorStructuredStreamStatusConfig(): {
 const MIRROR_FEEDBACK = createMirrorFeedbackController({
   getAdapter: (channelType) => getState().adapters.get(channelType) || null,
   getThreadTitle: (threadId) => getDesktopThreadTitle(threadId),
+  getStructuredStreamStatusConfig: getMirrorStructuredStreamStatusConfig,
   nowIso,
   eventBatchLimit: MIRROR_EVENT_BATCH_LIMIT,
   deliverResponse,

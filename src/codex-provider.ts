@@ -351,6 +351,7 @@ export class CodexProvider implements LLMProvider {
                           input_tokens: usage.input_tokens ?? 0,
                           output_tokens: usage.output_tokens ?? 0,
                           cache_read_input_tokens: usage.cached_input_tokens ?? 0,
+                          reasoning_output_tokens: usage.reasoning_output_tokens ?? 0,
                         } : undefined,
                         ...(threadId ? { session_id: threadId } : {}),
                       }));

@@ -37,6 +37,7 @@ import {
   createStreamState,
   formatStreamRuntimeStatus,
   getStreamLastContentResponseAgeMs,
+  getVisibleStreamLastContentResponseAgeMs,
   recordStreamActivity,
   recordStreamContentResponse,
   shouldShowStreamLastContentResponseAge,
@@ -397,13 +398,24 @@ export async function runInteractiveMessage(
     if (!snapshot) return;
     deps.recordInteractiveStreamUiSnapshot?.(binding.codepilotSessionId, snapshot);
   };
+  const getVisibleLastResponseAgeMs = () => getVisibleStreamLastContentResponseAgeMs(
+    streamState,
+    nowMs(),
+    {
+      idleStartMs: streamStatusIdleDetectionStartMs,
+      heartbeatMs: streamStatusHeartbeatMs,
+    },
+  );
   const pushRunningStatus = (lastResponseAgeMs?: number | null) => {
     if (!supportsStructuredStreamUi || streamStatusUpdatesClosed) return;
+    const effectiveLastResponseAgeMs = lastResponseAgeMs === undefined
+      ? getVisibleLastResponseAgeMs()
+      : lastResponseAgeMs;
     pushStreamFeedbackStatus(
       streamFeedbackTarget,
-      lastResponseAgeMs == null
+      effectiveLastResponseAgeMs == null
         ? buildStreamRuntimeStatus(streamState, nowMs())
-        : formatStreamRuntimeStatus(nowMs() - taskStartedAt, lastResponseAgeMs, streamState.statusNote),
+        : formatStreamRuntimeStatus(nowMs() - taskStartedAt, effectiveLastResponseAgeMs, streamState.statusNote),
     );
     syncStructuredStreamUiSnapshot();
   };
@@ -496,7 +508,7 @@ export async function runInteractiveMessage(
     if (hasStreamingCards) {
       pushStreamFeedbackTools(streamFeedbackTarget, Array.from(toolCallTracker.values()));
     }
-    pushRunningStatus(null);
+    pushRunningStatus();
     syncStructuredStreamUiSnapshot();
   };
 
@@ -507,7 +519,7 @@ export async function runInteractiveMessage(
     if (hasStreamingCards) {
       pushStreamFeedbackTasks(streamFeedbackTarget, latestTasks);
     }
-    pushRunningStatus(null);
+    pushRunningStatus();
     syncStructuredStreamUiSnapshot();
   };
 
@@ -515,7 +527,7 @@ export async function runInteractiveMessage(
     if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) return;
     updateStreamStatusNote(streamState, note, nowMs());
     if (streamState.statusNote) markActivity();
-    pushRunningStatus(null);
+    pushRunningStatus();
     syncStructuredStreamUiSnapshot();
   };
 
@@ -527,7 +539,7 @@ export async function runInteractiveMessage(
     deps.recordInteractiveHealthProgress(binding.codepilotSessionId, 'text');
     previewOnPartialText?.(fullText);
     onStreamCardText?.(fullText);
-    pushRunningStatus(null);
+    pushRunningStatus();
     syncStructuredStreamUiSnapshot();
   };
 
@@ -630,7 +642,7 @@ export async function runInteractiveMessage(
           `当前正在等待工具 ${perm.toolName} 的权限确认。`,
         );
         markActivity();
-        pushRunningStatus(null);
+        pushRunningStatus();
         syncStructuredStreamUiSnapshot();
       },
       taskAbort.signal,

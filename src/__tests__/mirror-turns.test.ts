@@ -184,4 +184,74 @@ describe('mirror-turns pending delivery queue', () => {
     assert.equal(subscription.pendingTurn?.lastContentResponseAt, '2026-04-21T10:00:01.000Z');
     assert.equal(subscription.pendingTurn?.lastResponseAt, '2026-04-21T10:00:01.000Z');
   });
+
+  it('deduplicates matching agent_message and response_item mirror text', () => {
+    const streamSnapshots: string[] = [];
+    const subscription = {
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+      pendingTurn: null,
+    } as any;
+
+    consumeMirrorRecords(subscription, [
+      {
+        signature: 'commentary-event',
+        type: 'message',
+        role: 'commentary',
+        content: '正在检查新版格式',
+        timestamp: '2026-04-21T10:00:01.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'commentary-response',
+        type: 'message',
+        role: 'commentary',
+        content: '正在检查新版格式',
+        timestamp: '2026-04-21T10:00:01.001Z',
+        turnId: 'turn-1',
+      },
+    ], {
+      onStreamText: (_subscription, turnState) => {
+        streamSnapshots.push(turnState.streamedText);
+      },
+    });
+
+    assert.deepEqual(streamSnapshots, ['正在检查新版格式']);
+    assert.equal(subscription.pendingTurn?.streamedText, '正在检查新版格式');
+  });
+
+  it('keeps repeated mirror text when it is not an immediate duplicate', () => {
+    const streamSnapshots: string[] = [];
+    const subscription = {
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+      pendingTurn: null,
+    } as any;
+
+    consumeMirrorRecords(subscription, [
+      {
+        signature: 'assistant-1',
+        type: 'message',
+        role: 'assistant',
+        content: 'OK',
+        timestamp: '2026-04-21T10:00:01.000Z',
+        turnId: 'turn-1',
+      },
+      {
+        signature: 'assistant-2',
+        type: 'message',
+        role: 'assistant',
+        content: 'OK',
+        timestamp: '2026-04-21T10:00:05.000Z',
+        turnId: 'turn-1',
+      },
+    ], {
+      onStreamText: (_subscription, turnState) => {
+        streamSnapshots.push(turnState.streamedText);
+      },
+    });
+
+    assert.deepEqual(streamSnapshots, ['OK', 'OK\n\nOK']);
+    assert.equal(subscription.pendingTurn?.streamedText, 'OK\n\nOK');
+  });
 });

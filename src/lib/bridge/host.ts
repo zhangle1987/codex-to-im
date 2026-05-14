@@ -55,6 +55,7 @@ export interface TokenUsage {
   output_tokens: number;
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;
+  reasoning_output_tokens?: number;
   cost_usd?: number;
 }
 

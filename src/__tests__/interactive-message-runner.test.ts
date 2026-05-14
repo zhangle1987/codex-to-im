@@ -260,6 +260,86 @@ describe('interactive-message-runner', () => {
     assert.equal(adapter.messageEnds.length, 1);
   });
 
+  it('keeps last response age visible when tool progress updates the status area', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-tool-status-age',
+      userId: 'user-tool-status-age',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\tool-status-age');
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const clock = createManualIntervalClock();
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-tool-status-age-1',
+        address,
+        text: 'hello',
+        timestamp: clock.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask(sessionId, taskId) {
+          const task = taskStateMap.get(sessionId);
+          if (task?.id !== taskId) return;
+          task.lastActivityAt = clock.now();
+        },
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-tool-status-age'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse() {},
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText, onToolEvent) => {
+          onPartialText?.('第一段输出');
+          clock.advance(10_000);
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 10秒，上次响应距今 10秒');
+
+          clock.advance(5_000);
+          onToolEvent?.('tool-1', 'Bash', 'running');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 15秒，上次响应距今 15秒');
+
+          return {
+            responseText: '最终回复',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: false,
+            errorMessage: '',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+        nowMs: () => clock.now(),
+        setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
+        clearIntervalFn: (handle) => clock.clearInterval(handle),
+        streamStatusIdleDetectionStartMs: 10_000,
+        streamStatusHeartbeatMs: 10_000,
+      },
+    );
+
+    assert.equal(clock.activeCount(), 0);
+  });
+
   it('finalizes a hanging task from an external terminal desktop event', async () => {
     const adapter = new FakeFeishuStreamingAdapter();
     const address = {
@@ -738,7 +818,7 @@ describe('interactive-message-runner', () => {
           onPartialText?.('第一段输出');
           clock.advance(180_000);
           onToolEvent?.('tool-1', 'shell_command', 'running');
-          assert.equal(adapter.streamedStatuses.at(-1), '已运行 3分');
+          assert.equal(adapter.streamedStatuses.at(-1), '已运行 3分，上次响应距今 3分');
 
           clock.advance(10_000);
           assert.equal(adapter.streamedStatuses.at(-1), '已运行 3分10秒，上次响应距今 3分10秒');

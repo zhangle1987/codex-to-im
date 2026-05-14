@@ -96,6 +96,15 @@ export function shouldShowStreamLastContentResponseAge(
   return ageMs != null && ageMs >= Math.max(1_000, config.heartbeatMs);
 }
 
+export function getVisibleStreamLastContentResponseAgeMs(
+  state: Pick<StreamState, 'startedAtMs' | 'lastContentResponseAtMs'>,
+  nowMs: number,
+  config: StreamStatusTimingConfig,
+): number | null {
+  if (!shouldShowStreamLastContentResponseAge(state, nowMs, config)) return null;
+  return getStreamLastContentResponseAgeMs(state, nowMs);
+}
+
 export function buildStreamRuntimeStatus(
   state: Pick<StreamState, 'startedAtMs' | 'lastContentResponseAtMs' | 'statusNote'>,
   nowMs: number,

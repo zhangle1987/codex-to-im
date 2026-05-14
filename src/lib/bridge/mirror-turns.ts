@@ -6,6 +6,8 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+const MIRROR_DUPLICATE_TEXT_WINDOW_MS = 2_000;
+
 export interface DesktopMirrorTurnState {
   turnId: string | null;
   streamKey: string;
@@ -19,7 +21,9 @@ export interface DesktopMirrorTurnState {
   statusNote: string | null;
   userText: string | null;
   lastAssistantText: string | null;
+  lastAssistantTextAt?: string | null;
   lastCommentaryText: string | null;
+  lastCommentaryTextAt?: string | null;
   streamedText: string;
   streamStarted: boolean;
   taskItems: TaskProgressInfo[];
@@ -145,6 +149,20 @@ function markMirrorContentResponse(
   turnState.lastResponseAt = responseAt;
 }
 
+function isNearDuplicateMirrorText(
+  previousText: string | null,
+  nextText: string,
+  previousTimestamp: string | null,
+  nextTimestamp: string,
+): boolean {
+  if (previousText !== nextText) return false;
+  if (!previousTimestamp || !nextTimestamp) return true;
+  const previousMs = Date.parse(previousTimestamp);
+  const nextMs = Date.parse(nextTimestamp);
+  if (!Number.isFinite(previousMs) || !Number.isFinite(nextMs)) return true;
+  return Math.abs(nextMs - previousMs) <= MIRROR_DUPLICATE_TEXT_WINDOW_MS;
+}
+
 export function finalizeMirrorTurn<TSubscription extends MirrorTurnStateHolder>(
   subscription: TSubscription,
   signature: string,
@@ -238,7 +256,14 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
       if (record.role === 'assistant') {
         const text = record.content.trim();
         if (text) {
+          if (isNearDuplicateMirrorText(
+            pendingTurn.lastAssistantText,
+            text,
+            pendingTurn.lastAssistantTextAt ?? null,
+            record.timestamp,
+          )) continue;
           pendingTurn.lastAssistantText = text;
+          pendingTurn.lastAssistantTextAt = record.timestamp || nowIso();
           appendMirrorStreamText(pendingTurn, text);
           markMirrorContentResponse(pendingTurn, record.timestamp);
           hooks.onStreamText?.(subscription, pendingTurn);
@@ -246,7 +271,14 @@ export function consumeMirrorRecords<TSubscription extends MirrorTurnStateHolder
       } else if (record.role === 'commentary') {
         const text = record.content.trim();
         if (text) {
+          if (isNearDuplicateMirrorText(
+            pendingTurn.lastCommentaryText,
+            text,
+            pendingTurn.lastCommentaryTextAt ?? null,
+            record.timestamp,
+          )) continue;
           pendingTurn.lastCommentaryText = text;
+          pendingTurn.lastCommentaryTextAt = record.timestamp || nowIso();
           appendMirrorStreamText(pendingTurn, text);
           markMirrorContentResponse(pendingTurn, record.timestamp);
           hooks.onStreamText?.(subscription, pendingTurn);

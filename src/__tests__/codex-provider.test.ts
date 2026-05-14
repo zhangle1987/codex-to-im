@@ -428,6 +428,47 @@ describe('CodexProvider', () => {
     assert.ok(!Object.prototype.hasOwnProperty.call(capturedResumeOptions!, 'model'), 'Model should not be forwarded by default');
   });
 
+  it('maps reasoning output token usage from turn.completed events', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield {
+            type: 'turn.completed',
+            usage: {
+              input_tokens: 3,
+              output_tokens: 5,
+              cached_input_tokens: 1,
+              reasoning_output_tokens: 2,
+            },
+          };
+        })(),
+      }),
+    };
+
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: () => mockThread,
+    };
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: 'usage',
+      sessionId: 'usage-session',
+    }));
+    const result = parseSSEChunks(chunks).find((event) => event.type === 'result');
+
+    assert.ok(result);
+    assert.deepEqual(JSON.parse(result.data).usage, {
+      input_tokens: 3,
+      output_tokens: 5,
+      cache_read_input_tokens: 1,
+      reasoning_output_tokens: 2,
+    });
+  });
+
   it('passes the abort signal to runStreamed so /stop can cancel the active turn', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
@@ -537,6 +578,7 @@ describe('CodexProvider', () => {
       input_tokens: 3,
       output_tokens: 5,
       cache_read_input_tokens: 1,
+      reasoning_output_tokens: 0,
     });
     assert.equal(capturedSignal?.aborted, true);
     } finally {

@@ -75,7 +75,9 @@ interface SessionMessageLine {
     role?: string;
     phase?: string;
     name?: unknown;
+    namespace?: unknown;
     arguments?: string;
+    execution?: unknown;
     call_id?: unknown;
     output?: unknown;
     is_error?: boolean;
@@ -84,6 +86,15 @@ interface SessionMessageLine {
     query?: unknown;
     server?: unknown;
     tool?: unknown;
+    summary?: unknown;
+    aggregated_output?: unknown;
+    formatted_output?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+    exit_code?: unknown;
+    success?: unknown;
+    changes?: unknown;
+    tools?: unknown;
     content?: Array<{
       type?: string;
       text?: unknown;
@@ -98,11 +109,27 @@ interface SessionEventLine {
     type?: string;
     message?: unknown;
     text?: unknown;
+    phase?: unknown;
     last_agent_message?: unknown;
     turn_id?: string;
+    turnId?: string;
     reason?: unknown;
     call_id?: unknown;
+    callId?: unknown;
     query?: unknown;
+    command?: unknown;
+    aggregated_output?: unknown;
+    formatted_output?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+    exit_code?: unknown;
+    status?: unknown;
+    success?: unknown;
+    changes?: unknown;
+    tool?: unknown;
+    arguments?: unknown;
+    content_items?: unknown;
+    error?: unknown;
     invocation?: {
       server?: unknown;
       tool?: unknown;
@@ -605,6 +632,14 @@ function parseUpdatePlanTasks(argumentsJson: string | undefined): TaskProgressIn
   return parseTaskProgressItems(parsed.plan ?? parsed.tasks);
 }
 
+function extractReasoningSummary(payload: { summary?: unknown; content?: unknown; text?: unknown; message?: unknown }): string {
+  for (const value of [payload.summary, payload.content, payload.text, payload.message]) {
+    const text = extractNormalizedStructuredText(value);
+    if (text) return text;
+  }
+  return '';
+}
+
 function extractToolOutputText(value: unknown): string {
   if (typeof value !== 'string') return extractNormalizedFreeText(value);
   const trimmed = value.trim();
@@ -617,6 +652,50 @@ function extractToolOutputText(value: unknown): string {
     }
   }
   return extractNormalizedFreeText(value);
+}
+
+function summarizePatchChanges(value: unknown): string {
+  if (!value || typeof value !== 'object') return '';
+  return Object.entries(value as Record<string, unknown>)
+    .map(([filePath, detail]) => {
+      const kind = detail && typeof detail === 'object'
+        ? extractNormalizedFreeText((detail as { type?: unknown; kind?: unknown }).type ?? (detail as { kind?: unknown }).kind)
+        : '';
+      return kind ? `${kind}: ${filePath}` : filePath;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function summarizeToolSearchOutput(value: unknown): string {
+  if (!Array.isArray(value)) return '';
+  let count = 0;
+  const names: string[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const namespaceName = extractNormalizedFreeText((entry as { name?: unknown }).name);
+    if (namespaceName) names.push(namespaceName);
+    const tools = (entry as { tools?: unknown }).tools;
+    if (Array.isArray(tools)) count += tools.length;
+  }
+  const prefix = count > 0 ? `Found ${count} tools` : '';
+  const suffix = names.length > 0 ? names.slice(0, 5).join(', ') : '';
+  return [prefix, suffix].filter(Boolean).join(': ');
+}
+
+function getDynamicToolCallId(payload: { call_id?: unknown; callId?: unknown }): string {
+  return extractNormalizedFreeText(payload.call_id ?? payload.callId);
+}
+
+function formatDesktopToolName(namespaceValue: unknown, nameValue: unknown): string {
+  const name = extractNormalizedFreeText(nameValue);
+  if (!name) return '';
+  const namespace = extractNormalizedFreeText(namespaceValue);
+  if (!namespace) return name;
+  if (name.startsWith(namespace)) return name;
+  return namespace.endsWith('__') || namespace.endsWith('/') || namespace.endsWith('.')
+    ? `${namespace}${name}`
+    : `${namespace}__${name}`;
 }
 
 function createDesktopEventSignature(rawLine: string): string {
@@ -656,9 +735,33 @@ function isTurnContextLine(line: SessionMessageLine | SessionEventLine | TurnCon
   return line.type === 'turn_context';
 }
 
+const IGNORED_EVENT_MSG_TYPES = new Set([
+  'context_compacted',
+  'thread_name_updated',
+  'thread_rolled_back',
+  'token_count',
+]);
+
+const IGNORED_RESPONSE_ITEM_TYPES = new Set([
+  'web_search_call',
+]);
+
+function isIgnoredMirrorLineKind(line: SessionMessageLine | SessionEventLine | TurnContextLine): boolean {
+  if (isSessionEventLine(line)) {
+    const payloadType = typeof line.payload?.type === 'string' ? line.payload.type.trim() : '';
+    return IGNORED_EVENT_MSG_TYPES.has(payloadType);
+  }
+  if (isSessionMessageLine(line)) {
+    const payloadType = typeof line.payload?.type === 'string' ? line.payload.type.trim() : '';
+    return IGNORED_RESPONSE_ITEM_TYPES.has(payloadType);
+  }
+  return false;
+}
+
 function describeUnhandledMirrorLineKind(
   line: SessionMessageLine | SessionEventLine | TurnContextLine,
 ): string | null {
+  if (isIgnoredMirrorLineKind(line)) return null;
   if (isSessionEventLine(line)) {
     const payloadType = typeof line.payload?.type === 'string' ? line.payload.type.trim() : '';
     return `event_msg:${payloadType || '<unknown>'}`;
@@ -764,6 +867,21 @@ function pushDesktopSessionEvent(
     return;
   }
 
+  if (isSessionEventLine(parsed) && parsed.payload?.type === 'agent_message') {
+    const text = extractNormalizedStructuredText(parsed.payload.message);
+    if (!text) return;
+    const role = parsed.payload.phase === 'commentary' ? 'commentary' : 'assistant';
+    const lastEvent = events[events.length - 1];
+    if (lastEvent?.role === role && lastEvent.content === text) return;
+    events.push({
+      signature: createDesktopEventSignature(rawLine),
+      role,
+      content: text,
+      timestamp: parsed.timestamp || '',
+    });
+    return;
+  }
+
   if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_complete') {
     const text = extractNormalizedStructuredText(parsed.payload.last_agent_message);
     if (!text) return;
@@ -785,10 +903,14 @@ function pushDesktopSessionEvent(
   if (isSessionMessageLine(parsed) && parsed.payload?.type === 'message' && parsed.payload.role === 'assistant') {
     const text = extractDesktopMessageText(parsed);
     if (!text) return;
+    const role = parsed.payload.phase === 'commentary' ? 'commentary' : 'assistant';
+    const content = parsed.payload.phase === 'commentary' ? text.replace(/^\[commentary\]\n/, '') : text;
+    const lastEvent = events[events.length - 1];
+    if (lastEvent?.role === role && lastEvent.content === content) return;
     events.push({
       signature: createDesktopEventSignature(rawLine),
-      role: parsed.payload.phase === 'commentary' ? 'commentary' : 'assistant',
-      content: parsed.payload.phase === 'commentary' ? text.replace(/^\[commentary\]\n/, '') : text,
+      role,
+      content,
       timestamp: parsed.timestamp || '',
     });
   }
@@ -841,6 +963,24 @@ function pushDesktopMirrorEventRecord(
     return true;
   }
 
+  if (isIgnoredMirrorLineKind(parsed)) {
+    return true;
+  }
+
+  if (parsed.payload?.type === 'agent_message') {
+    const text = extractNormalizedStructuredText(parsed.payload.message);
+    if (!text) return true;
+    records.push({
+      signature,
+      type: 'message',
+      role: parsed.payload.phase === 'commentary' ? 'commentary' : 'assistant',
+      content: text,
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+    });
+    return true;
+  }
+
   if (parsed.payload?.type === 'agent_reasoning') {
     const text = extractNormalizedStructuredText(parsed.payload.text);
     if (!text) return true;
@@ -886,6 +1026,77 @@ function pushDesktopMirrorEventRecord(
     return true;
   }
 
+  if (parsed.payload?.type === 'exec_command_end') {
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    const exitCode = typeof parsed.payload.exit_code === 'number' ? parsed.payload.exit_code : null;
+    const status = extractNormalizedFreeText(parsed.payload.status).toLowerCase();
+    records.push({
+      signature,
+      type: 'tool_finished',
+      content: extractToolOutputText(
+        parsed.payload.aggregated_output
+          ?? parsed.payload.formatted_output
+          ?? parsed.payload.stdout
+          ?? parsed.payload.stderr
+          ?? parsed.payload.command,
+      ),
+      timestamp,
+      ...(parsed.payload.turn_id || activeTurnId ? { turnId: parsed.payload.turn_id || activeTurnId || undefined } : {}),
+      toolId,
+      toolName: 'Bash',
+      isError: status === 'failed' || (exitCode != null && exitCode !== 0),
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'patch_apply_end') {
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    const status = extractNormalizedFreeText(parsed.payload.status).toLowerCase();
+    records.push({
+      signature,
+      type: 'tool_finished',
+      content: summarizePatchChanges(parsed.payload.changes)
+        || extractToolOutputText(parsed.payload.stdout ?? parsed.payload.stderr),
+      timestamp,
+      ...(parsed.payload.turn_id || activeTurnId ? { turnId: parsed.payload.turn_id || activeTurnId || undefined } : {}),
+      toolId,
+      toolName: 'apply_patch',
+      isError: parsed.payload.success === false || status === 'failed',
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'dynamic_tool_call_request') {
+    const toolId = getDynamicToolCallId(parsed.payload) || signature;
+    const toolName = extractNormalizedFreeText(parsed.payload.tool) || 'tool';
+    records.push({
+      signature,
+      type: 'tool_started',
+      content: '',
+      timestamp,
+      ...(parsed.payload.turnId || activeTurnId ? { turnId: parsed.payload.turnId || activeTurnId || undefined } : {}),
+      toolId,
+      toolName,
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'dynamic_tool_call_response') {
+    const toolId = getDynamicToolCallId(parsed.payload) || signature;
+    const toolName = extractNormalizedFreeText(parsed.payload.tool) || 'tool';
+    records.push({
+      signature,
+      type: 'tool_finished',
+      content: extractToolOutputText(parsed.payload.content_items ?? parsed.payload.error),
+      timestamp,
+      ...(parsed.payload.turn_id || activeTurnId ? { turnId: parsed.payload.turn_id || activeTurnId || undefined } : {}),
+      toolId,
+      toolName,
+      isError: parsed.payload.success === false,
+    });
+    return true;
+  }
+
   if (parsed.payload?.type === 'user_message') {
     const text = extractNormalizedStructuredText(parsed.payload.message);
     if (!text) return true;
@@ -925,6 +1136,23 @@ function pushDesktopMirrorResponseRecord(
   const signature = createDesktopEventSignature(rawLine);
   const timestamp = parsed.timestamp || '';
 
+  if (isIgnoredMirrorLineKind(parsed)) {
+    return true;
+  }
+
+  if (parsed.payload?.type === 'reasoning') {
+    const text = extractReasoningSummary(parsed.payload);
+    if (!text) return true;
+    records.push({
+      signature,
+      type: 'reasoning',
+      content: text,
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+    });
+    return true;
+  }
+
   if (parsed.payload?.type === 'message' && parsed.payload.role === 'assistant') {
     const text = extractDesktopMessageText(parsed);
     if (!text) return true;
@@ -939,8 +1167,38 @@ function pushDesktopMirrorResponseRecord(
     return true;
   }
 
+  if (parsed.payload?.type === 'tool_search_call') {
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    records.push({
+      signature,
+      type: 'tool_started',
+      content: '',
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+      toolId,
+      toolName: 'tool_search',
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'tool_search_output') {
+    const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
+    const status = extractNormalizedFreeText(parsed.payload.status).toLowerCase();
+    records.push({
+      signature,
+      type: 'tool_finished',
+      content: summarizeToolSearchOutput(parsed.payload.tools),
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+      toolId,
+      toolName: 'tool_search',
+      isError: status === 'failed',
+    });
+    return true;
+  }
+
   if (parsed.payload?.type === 'function_call') {
-    const toolName = extractNormalizedFreeText(parsed.payload.name);
+    const toolName = formatDesktopToolName(parsed.payload.namespace, parsed.payload.name);
     const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
     if (!toolName) return true;
     if (toolName === 'update_plan') {
@@ -969,7 +1227,7 @@ function pushDesktopMirrorResponseRecord(
   }
 
   if (parsed.payload?.type === 'custom_tool_call') {
-    const toolName = extractNormalizedFreeText(parsed.payload.name);
+    const toolName = formatDesktopToolName(parsed.payload.namespace, parsed.payload.name);
     const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
     if (!toolName) return true;
     if (toolName === 'update_plan') {
