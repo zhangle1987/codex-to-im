@@ -102,6 +102,15 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
+function isWindowsProcessTerminationParseNoise(message: string): boolean {
+  const normalized = message.replace(/\s+/g, ' ').trim().toLowerCase();
+  return (
+    normalized.startsWith('failed to parse item: success:')
+    && normalized.includes('the process with pid')
+    && normalized.includes('has been terminated')
+  );
+}
+
 function normalizeTaskText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -272,6 +281,7 @@ export class CodexProvider implements LLMProvider {
 
               let sawAnyEvent = false;
               let sawTerminalEvent = false;
+              let sawCompletedAssistantContent = false;
               const runAbortController = new AbortController();
               let terminalDrainTimer: NodeJS.Timeout | null = null;
               const clearTerminalDrainTimer = () => {
@@ -328,14 +338,23 @@ export class CodexProvider implements LLMProvider {
                     case 'item.updated':
                     case 'item.completed': {
                       const item = event.item as ThreadItem;
+                      const phase = event.type === 'item.started'
+                        ? 'started'
+                        : event.type === 'item.updated'
+                          ? 'updated'
+                          : 'completed';
+                      if (
+                        phase === 'completed'
+                        && item.type === 'agent_message'
+                        && typeof item.text === 'string'
+                        && item.text.trim()
+                      ) {
+                        sawCompletedAssistantContent = true;
+                      }
                       self.handleItemEvent(
                         controller,
                         item,
-                        event.type === 'item.started'
-                          ? 'started'
-                          : event.type === 'item.updated'
-                            ? 'updated'
-                            : 'completed',
+                        phase,
                         params.sessionId,
                         emittedToolStarts,
                       );
@@ -403,6 +422,13 @@ export class CodexProvider implements LLMProvider {
                   break;
                 }
                 if (sawTerminalEvent && (runAbortController.signal.aborted || isAbortError(err)) && !userAborted) {
+                  break;
+                }
+                if (
+                  (sawTerminalEvent || sawCompletedAssistantContent)
+                  && isWindowsProcessTerminationParseNoise(message)
+                ) {
+                  console.warn('[codex-provider] Suppressed Codex SDK Windows process cleanup parse noise:', message);
                   break;
                 }
                 if (savedThreadId && !retryFresh && !sawAnyEvent && shouldRetryFreshThread(message)) {

@@ -1170,6 +1170,80 @@ describe('CodexProvider error events', () => {
     }
   });
 
+  it('suppresses Windows process cleanup parse noise after completed assistant content', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'thread.started', thread_id: 'cleanup-thread' };
+          yield {
+            type: 'item.completed',
+            item: {
+              type: 'agent_message',
+              id: 'msg-cleanup',
+              text: '最终回复',
+            },
+          };
+          throw new Error('Failed to parse item: SUCCESS: The process with PID 27224 (child process of PID 46152) has been terminated.');
+        })(),
+      }),
+    };
+
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: () => mockThread,
+    };
+
+    const stream = provider.streamChat({
+      prompt: 'test',
+      sessionId: 'windows-cleanup-session',
+    });
+
+    const chunks = await collectStream(stream);
+    const events = parseSSEChunks(chunks);
+    const textEvent = events.find(e => e.type === 'text');
+    const errorEvent = events.find(e => e.type === 'error');
+
+    assert.equal(textEvent?.data, '最终回复');
+    assert.equal(errorEvent, undefined, 'cleanup parse noise must not downgrade a completed reply to error');
+    assert.equal((provider as any).threadIds.get('windows-cleanup-session'), 'cleanup-thread');
+  });
+
+  it('keeps Windows process cleanup parse noise as an error before completed assistant content', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'thread.started', thread_id: 'early-cleanup-thread' };
+          throw new Error('Failed to parse item: SUCCESS: The process with PID 27224 (child process of PID 46152) has been terminated.');
+        })(),
+      }),
+    };
+
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      startThread: () => mockThread,
+    };
+
+    const stream = provider.streamChat({
+      prompt: 'test',
+      sessionId: 'early-windows-cleanup-session',
+    });
+
+    const chunks = await collectStream(stream);
+    const events = parseSSEChunks(chunks);
+    const errorEvent = events.find(e => e.type === 'error');
+
+    assert.match(errorEvent?.data || '', /Failed to parse item: SUCCESS/);
+    assert.equal((provider as any).threadIds.has('early-windows-cleanup-session'), false);
+  });
+
   it('reads message field from error event', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
