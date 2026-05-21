@@ -15,9 +15,9 @@ function createDeferred<T = void>() {
 }
 
 describe('feishu-adapter structured streaming regions', () => {
-  it('creates and removes the typing reaction idempotently per stream', async () => {
-    const createCalls: Array<Record<string, any>> = [];
-    const deleteCalls: Array<Record<string, any>> = [];
+  it('does not add typing reactions while starting or ending a stream', async () => {
+    const reactionCreateCalls: Array<Record<string, any>> = [];
+    const reactionDeleteCalls: Array<Record<string, any>> = [];
     const adapter = new FeishuAdapter({
       id: 'feishu-default',
       provider: 'feishu',
@@ -32,14 +32,29 @@ describe('feishu-adapter structured streaming regions', () => {
 
     (adapter as any).lastIncomingMessageId.set('chat-1', 'incoming-1');
     (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => ({}),
+            update: async () => ({}),
+          },
+          cardElement: {
+            content: async () => ({}),
+          },
+        },
+      },
       im: {
+        message: {
+          reply: async () => ({ data: { message_id: 'card-message-1' } }),
+        },
         messageReaction: {
           create: async (payload: Record<string, any>) => {
-            createCalls.push(payload);
-            return { data: { reaction_id: `reaction-${createCalls.length}` } };
+            reactionCreateCalls.push(payload);
+            return { data: { reaction_id: `reaction-${reactionCreateCalls.length}` } };
           },
           delete: async (payload: Record<string, any>) => {
-            deleteCalls.push(payload);
+            reactionDeleteCalls.push(payload);
             return {};
           },
         },
@@ -50,19 +65,65 @@ describe('feishu-adapter structured streaming regions', () => {
     adapter.onMessageStart('chat-1', 'stream-1');
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    assert.equal(createCalls.length, 1);
-
     adapter.onMessageEnd('chat-1', 'stream-1');
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    assert.deepEqual(deleteCalls, [{
-      path: { message_id: 'incoming-1', reaction_id: 'reaction-1' },
+    assert.equal(reactionCreateCalls.length, 0);
+    assert.equal(reactionDeleteCalls.length, 0);
+  });
+
+  it('adds a completed reaction to the finalized streaming card message', async () => {
+    const reactionCreateCalls: Array<Record<string, any>> = [];
+    const adapter = new FeishuAdapter({
+      id: 'feishu-default',
+      provider: 'feishu',
+      enabled: true,
+      alias: '飞书',
+      config: {
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        streamingEnabled: true,
+      },
+    });
+
+    (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => ({}),
+            update: async () => ({}),
+          },
+          cardElement: {
+            content: async () => ({}),
+          },
+        },
+      },
+      im: {
+        message: {
+          reply: async () => ({ data: { message_id: 'card-message-1' } }),
+        },
+        messageReaction: {
+          create: async (payload: Record<string, any>) => {
+            reactionCreateCalls.push(payload);
+            return {};
+          },
+        },
+      },
+    };
+
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    const finalized = await adapter.onStreamEnd('chat-1', 'completed', '最终回复', 'stream-1');
+
+    assert.equal(finalized, true);
+    assert.deepEqual(reactionCreateCalls, [{
+      path: { message_id: 'card-message-1' },
+      data: { reaction_type: { emoji_type: 'DONE' } },
     }]);
   });
 
-  it('cleans up the typing reaction when the stream ends before reaction creation resolves', async () => {
-    const createBlocked = createDeferred<Record<string, any>>();
-    const deleteCalls: Array<Record<string, any>> = [];
+  it('adds an error reaction to the finalized streaming card message on failure', async () => {
+    const reactionCreateCalls: Array<Record<string, any>> = [];
     const adapter = new FeishuAdapter({
       id: 'feishu-default',
       provider: 'feishu',
@@ -75,26 +136,39 @@ describe('feishu-adapter structured streaming regions', () => {
       },
     });
 
-    (adapter as any).lastIncomingMessageId.set('chat-1', 'incoming-1');
     (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => ({}),
+            update: async () => ({}),
+          },
+          cardElement: {
+            content: async () => ({}),
+          },
+        },
+      },
       im: {
+        message: {
+          reply: async () => ({ data: { message_id: 'card-message-1' } }),
+        },
         messageReaction: {
-          create: async () => createBlocked.promise,
-          delete: async (payload: Record<string, any>) => {
-            deleteCalls.push(payload);
+          create: async (payload: Record<string, any>) => {
+            reactionCreateCalls.push(payload);
             return {};
           },
         },
       },
     };
 
-    adapter.onMessageStart('chat-1', 'stream-1');
-    adapter.onMessageEnd('chat-1', 'stream-1');
-    createBlocked.resolve({ data: { reaction_id: 'reaction-1' } });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    const finalized = await adapter.onStreamEnd('chat-1', 'error', '执行失败', 'stream-1');
 
-    assert.deepEqual(deleteCalls, [{
-      path: { message_id: 'incoming-1', reaction_id: 'reaction-1' },
+    assert.equal(finalized, true);
+    assert.deepEqual(reactionCreateCalls, [{
+      path: { message_id: 'card-message-1' },
+      data: { reaction_type: { emoji_type: 'ERROR' } },
     }]);
   });
 

@@ -61,8 +61,10 @@ const DEDUP_MAX = 1000;
 /** Max file download size (20 MB). */
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 
-/** Feishu emoji type for typing indicator (same as Openclaw). */
-const TYPING_EMOJI = 'Typing';
+/** Feishu emoji type for completed tasks. */
+const COMPLETED_EMOJI = 'DONE';
+/** Feishu emoji type for failed tasks. */
+const ERROR_EMOJI = 'ERROR';
 
 /** State for an active CardKit v2 streaming card. */
 interface FeishuCardState {
@@ -92,11 +94,6 @@ interface FeishuCardState {
   consecutiveFlushFailures: number;
   lastFullRefreshAttemptAt: number;
   lastSuccessfulFullRefreshAt: number | null;
-}
-
-interface TypingReactionState {
-  messageId: string;
-  reactionId: string;
 }
 
 /** Streaming card throttle interval (ms). */
@@ -205,14 +202,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private botOpenId: string | null = null;
   /** All known bot IDs (open_id, user_id, union_id) for mention matching. */
   private botIds = new Set<string>();
-  /** Track last incoming message ID per chat for typing indicator. */
+  /** Track last incoming message ID per chat for replying with streaming cards. */
   private lastIncomingMessageId = new Map<string, string>();
-  /** Track active typing reaction IDs per stream key for cleanup. */
-  private typingReactions = new Map<string, TypingReactionState>();
-  /** Track in-flight typing reaction creates so repeated status updates stay idempotent. */
-  private typingReactionCreatePromises = new Map<string, Promise<void>>();
-  /** Track streams that ended before the async reaction create finished. */
-  private typingReactionCleanupRequested = new Set<string>();
   /** Active streaming card state per stream key. */
   private activeCards = new Map<string, FeishuCardState>();
   /** In-flight card creation promises per stream key — prevents duplicate creation. */
@@ -358,9 +349,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Clear state
     this.seenMessageIds.clear();
     this.lastIncomingMessageId.clear();
-    this.typingReactions.clear();
-    this.typingReactionCreatePromises.clear();
-    this.typingReactionCleanupRequested.clear();
 
     console.log('[feishu-adapter] Stopped');
   }
@@ -375,75 +363,28 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return this.consumeInboundMessage(this.running);
   }
 
-  // ── Typing indicator (Openclaw-style reaction) ─────────────
+  // ── Streaming lifecycle hooks ──────────────────────────────
 
   /**
-   * Add a "Typing" emoji reaction to the user's message and create streaming card.
+   * Create the streaming card as early as possible.
    * Called by bridge-manager via onMessageStart().
    */
   onMessageStart(chatId: string, streamKey?: string): void {
     const messageId = this.lastIncomingMessageId.get(chatId);
-    const reactionKey = this.resolveStreamKey(chatId, streamKey);
 
     // Create streaming card (fire-and-forget — fallback to traditional if fails)
     if (messageId && this.isStreamingEnabled()) {
       this.createStreamingCard(chatId, messageId, streamKey).catch(() => {});
     }
-
-    // Typing indicator, idempotent per stream.
-    if (!messageId || !this.restClient) return;
-    if (this.typingReactions.has(reactionKey) || this.typingReactionCreatePromises.has(reactionKey)) {
-      return;
-    }
-
-    const createPromise = this.restClient.im.messageReaction.create({
-      path: { message_id: messageId },
-      data: { reaction_type: { emoji_type: TYPING_EMOJI } },
-    }).then((res) => {
-      const reactionId = (res as any)?.data?.reaction_id;
-      if (reactionId) {
-        this.typingReactions.set(reactionKey, { messageId, reactionId });
-        if (this.typingReactionCleanupRequested.delete(reactionKey)) {
-          this.removeTypingReaction(reactionKey);
-        }
-      }
-    }).catch((err) => {
-      const code = (err as { code?: number })?.code;
-      if (code !== 99991400 && code !== 99991403) {
-        console.warn('[feishu-adapter] Typing indicator failed:', err instanceof Error ? err.message : err);
-      }
-    }).finally(() => {
-      this.typingReactionCreatePromises.delete(reactionKey);
-      if (!this.typingReactions.has(reactionKey)) {
-        this.typingReactionCleanupRequested.delete(reactionKey);
-      }
-    });
-    this.typingReactionCreatePromises.set(reactionKey, createPromise);
   }
 
   /**
-   * Remove the "Typing" emoji reaction and clean up card state.
+   * Clean up card state.
    * Called by bridge-manager via onMessageEnd().
    */
   onMessageEnd(chatId: string, streamKey?: string): void {
     // Clean up any orphaned card state (normally cleaned by finalizeCard)
     this.cleanupCard(chatId, streamKey);
-
-    const reactionKey = this.resolveStreamKey(chatId, streamKey);
-    if (this.typingReactionCreatePromises.has(reactionKey) && !this.typingReactions.has(reactionKey)) {
-      this.typingReactionCleanupRequested.add(reactionKey);
-      return;
-    }
-    this.removeTypingReaction(reactionKey);
-  }
-
-  private removeTypingReaction(reactionKey: string): void {
-    const reaction = this.typingReactions.get(reactionKey);
-    if (!reaction || !this.restClient) return;
-    this.typingReactions.delete(reactionKey);
-    this.restClient.im.messageReaction.delete({
-      path: { message_id: reaction.messageId, reaction_id: reaction.reactionId },
-    }).catch(() => { /* ignore */ });
   }
 
   // ── Card Action Handler ─────────────────────────────────────
@@ -895,6 +836,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
       }));
 
+      const terminalReactionEmoji = status === 'completed'
+        ? COMPLETED_EMOJI
+        : status === 'error'
+          ? ERROR_EMOJI
+          : null;
+      if (terminalReactionEmoji) {
+        await this.addTerminalReaction(cardKey, state.messageId, terminalReactionEmoji);
+      }
+
       console.log(`[feishu-adapter] Card finalized: streamKey=${cardKey}, cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
       return true;
     } catch (err) {
@@ -902,6 +852,23 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return false;
     } finally {
       this.activeCards.delete(cardKey);
+    }
+  }
+
+  private async addTerminalReaction(streamKey: string, messageId: string, emojiType: string): Promise<void> {
+    const messageReaction = (this.restClient as any)?.im?.messageReaction;
+    if (typeof messageReaction?.create !== 'function') return;
+
+    try {
+      await this.withFeishuRequestTimeout(streamKey, `im.messageReaction.create:${emojiType}`, () => messageReaction.create({
+        path: { message_id: messageId },
+        data: { reaction_type: { emoji_type: emojiType } },
+      }));
+    } catch (err) {
+      const code = (err as { code?: number })?.code;
+      if (code !== 99991400 && code !== 99991403) {
+        console.warn('[feishu-adapter] Terminal reaction failed:', err instanceof Error ? err.message : err);
+      }
     }
   }
 
