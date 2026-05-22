@@ -395,6 +395,39 @@ describe('readDesktopSessionEventStreamByFilePath', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('falls back to turn.completed messages for final answers', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-events-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-05-22T00:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'turn.completed',
+            turn_id: 'turn-completed',
+            message: [
+              { type: 'output_text', text: 'final answer' },
+            ],
+          },
+        }),
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const events = readDesktopSessionEventStreamByFilePath(filePath);
+
+    assert.deepEqual(
+      events.map((event) => ({ role: event.role, content: event.content })),
+      [
+        { role: 'assistant', content: 'final answer' },
+      ],
+    );
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('preserves markdown-style line breaks from task_complete.last_agent_message', () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-events-'));
     const filePath = path.join(tempRoot, 'rollout.jsonl');
@@ -629,6 +662,74 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
         { type: 'message', role: 'commentary', content: 'thinking', turnId: 'turn-1' },
         { type: 'message', role: 'assistant', content: 'final answer', turnId: 'turn-1' },
         { type: 'task_complete', role: 'assistant', content: 'final answer', turnId: 'turn-1' },
+      ],
+    );
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('treats turn.completed as a terminal task_complete mirror record', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-05-22T00:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'task_started',
+            turn_id: 'turn-completed',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-22T00:00:01.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'streamed answer' }],
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-22T00:00:02.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'turn.completed',
+            turnId: 'turn-completed',
+            message: [
+              { type: 'output_text', text: 'final answer' },
+            ],
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-22T00:00:03.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'next turn output' }],
+          },
+        }),
+      ].join('\n') + '\n',
+      'utf-8',
+    );
+
+    const delta = readDesktopSessionMirrorRecordDeltaByFilePath(filePath, 0, fs.statSync(filePath).size);
+
+    assert.deepEqual(delta.unknownKinds, []);
+    assert.deepEqual(
+      delta.records.map((record) => ({
+        type: record.type,
+        role: record.role,
+        content: record.content,
+        turnId: record.turnId,
+      })),
+      [
+        { type: 'task_started', role: undefined, content: '', turnId: 'turn-completed' },
+        { type: 'message', role: 'assistant', content: 'streamed answer', turnId: 'turn-completed' },
+        { type: 'task_complete', role: 'assistant', content: 'final answer', turnId: 'turn-completed' },
+        { type: 'message', role: 'assistant', content: 'next turn output', turnId: undefined },
       ],
     );
 

@@ -109,6 +109,8 @@ interface SessionEventLine {
     type?: string;
     message?: unknown;
     text?: unknown;
+    final_response?: unknown;
+    response?: unknown;
     phase?: unknown;
     last_agent_message?: unknown;
     turn_id?: string;
@@ -746,6 +748,35 @@ const IGNORED_RESPONSE_ITEM_TYPES = new Set([
   'web_search_call',
 ]);
 
+const TERMINAL_COMPLETION_EVENT_TYPES = new Set([
+  'task_complete',
+  'turn.completed',
+  'turn_completed',
+]);
+
+function isTerminalCompletionEventType(value: unknown): boolean {
+  return typeof value === 'string' && TERMINAL_COMPLETION_EVENT_TYPES.has(value.trim());
+}
+
+function getEventTurnId(payload: SessionEventLine['payload']): string {
+  return payload?.turn_id || payload?.turnId || '';
+}
+
+function extractTerminalCompletionText(payload: SessionEventLine['payload']): string {
+  if (!payload) return '';
+  for (const value of [
+    payload.last_agent_message,
+    payload.message,
+    payload.text,
+    payload.final_response,
+    payload.response,
+  ]) {
+    const text = extractNormalizedStructuredText(value);
+    if (text) return text;
+  }
+  return '';
+}
+
 function isIgnoredMirrorLineKind(line: SessionMessageLine | SessionEventLine | TurnContextLine): boolean {
   if (isSessionEventLine(line)) {
     const payloadType = typeof line.payload?.type === 'string' ? line.payload.type.trim() : '';
@@ -882,8 +913,8 @@ function pushDesktopSessionEvent(
     return;
   }
 
-  if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_complete') {
-    const text = extractNormalizedStructuredText(parsed.payload.last_agent_message);
+  if (isSessionEventLine(parsed) && isTerminalCompletionEventType(parsed.payload?.type)) {
+    const text = extractTerminalCompletionText(parsed.payload);
     if (!text) return;
 
     const lastEvent = events[events.length - 1];
@@ -947,7 +978,7 @@ function pushDesktopMirrorEventRecord(
       type: 'task_started',
       content: '',
       timestamp,
-      turnId: parsed.payload.turn_id || '',
+      turnId: getEventTurnId(parsed.payload),
     });
     return true;
   }
@@ -1111,14 +1142,14 @@ function pushDesktopMirrorEventRecord(
     return true;
   }
 
-  if (parsed.payload?.type === 'task_complete') {
+  if (isTerminalCompletionEventType(parsed.payload?.type)) {
     records.push({
       signature,
       type: 'task_complete',
       role: 'assistant',
-      content: extractNormalizedStructuredText(parsed.payload.last_agent_message),
+      content: extractTerminalCompletionText(parsed.payload),
       timestamp,
-      turnId: parsed.payload.turn_id || '',
+      turnId: getEventTurnId(parsed.payload),
     });
     return true;
   }
@@ -1387,7 +1418,7 @@ function parseDesktopMirrorRecordText(
 
     if (isSessionEventLine(parsed) && parsed.payload?.type === 'task_started') {
       const eventPayload = parsed.payload as SessionEventLine['payload'];
-      activeTurnId = eventPayload?.turn_id || activeTurnId;
+      activeTurnId = getEventTurnId(eventPayload) || activeTurnId;
     }
 
     const handled = pushDesktopMirrorRecord(records, parsed, trimmed, activeTurnId, activeSpecialCallIds);
@@ -1398,10 +1429,10 @@ function parseDesktopMirrorRecordText(
 
     if (
       isSessionEventLine(parsed)
-      && (parsed.payload?.type === 'task_complete' || parsed.payload?.type === 'turn_aborted')
+      && (isTerminalCompletionEventType(parsed.payload?.type) || parsed.payload?.type === 'turn_aborted')
     ) {
       const eventPayload = parsed.payload as SessionEventLine['payload'];
-      const completedTurnId = eventPayload?.turn_id || activeTurnId;
+      const completedTurnId = getEventTurnId(eventPayload) || activeTurnId;
       if (!completedTurnId || completedTurnId === activeTurnId) {
         activeTurnId = null;
       }
