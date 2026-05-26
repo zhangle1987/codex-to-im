@@ -65,6 +65,8 @@ const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const COMPLETED_EMOJI = 'DONE';
 /** Feishu emoji type for failed tasks. */
 const ERROR_EMOJI = 'ERROR';
+/** Delay terminal reactions so clients can render the final non-streaming card first. */
+const CARD_TERMINAL_REACTION_DELAY_MS = 2_000;
 
 /** State for an active CardKit v2 streaming card. */
 interface FeishuCardState {
@@ -215,6 +217,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private cardRequestTimeoutMs = CARD_REQUEST_TIMEOUT_MS;
   private cardFinalizeFlushWaitExtraMs = CARD_FINALIZE_FLUSH_WAIT_EXTRA_MS;
   private cardFullRefreshIntervalMs = CARD_FULL_REFRESH_INTERVAL_MS;
+  private cardTerminalReactionDelayMs = CARD_TERMINAL_REACTION_DELAY_MS;
 
   constructor(instance?: AdapterRuntimeInstance) {
     super();
@@ -836,16 +839,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
       }));
 
+      this.activeCards.delete(cardKey);
+      console.log(`[feishu-adapter] Card finalized: streamKey=${cardKey}, cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
+
       const terminalReactionEmoji = status === 'completed'
         ? COMPLETED_EMOJI
         : status === 'error'
           ? ERROR_EMOJI
           : null;
-      if (terminalReactionEmoji) {
+      if (terminalReactionEmoji && this.hasTerminalReactionApi()) {
+        await this.waitBeforeTerminalReaction();
         await this.addTerminalReaction(cardKey, state.messageId, terminalReactionEmoji);
       }
 
-      console.log(`[feishu-adapter] Card finalized: streamKey=${cardKey}, cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
       return true;
     } catch (err) {
       console.warn('[feishu-adapter] Card finalize failed:', err instanceof Error ? err.message : err);
@@ -853,6 +859,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
     } finally {
       this.activeCards.delete(cardKey);
     }
+  }
+
+  private hasTerminalReactionApi(): boolean {
+    const messageReaction = (this.restClient as any)?.im?.messageReaction;
+    return typeof messageReaction?.create === 'function';
+  }
+
+  private async waitBeforeTerminalReaction(): Promise<void> {
+    const delayMs = Math.max(0, this.cardTerminalReactionDelayMs);
+    if (delayMs <= 0) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
   }
 
   private async addTerminalReaction(streamKey: string, messageId: string, emojiType: string): Promise<void> {

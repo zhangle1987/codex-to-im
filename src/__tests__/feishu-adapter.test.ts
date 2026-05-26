@@ -85,6 +85,7 @@ describe('feishu-adapter structured streaming regions', () => {
         streamingEnabled: true,
       },
     });
+    (adapter as any).cardTerminalReactionDelayMs = 0;
 
     (adapter as any).restClient = {
       cardkit: {
@@ -135,6 +136,7 @@ describe('feishu-adapter structured streaming regions', () => {
         streamingEnabled: true,
       },
     });
+    (adapter as any).cardTerminalReactionDelayMs = 0;
 
     (adapter as any).restClient = {
       cardkit: {
@@ -170,6 +172,63 @@ describe('feishu-adapter structured streaming regions', () => {
       path: { message_id: 'card-message-1' },
       data: { reaction_type: { emoji_type: 'ERROR' } },
     }]);
+  });
+
+  it('waits briefly after final card update before adding a terminal reaction', async () => {
+    const calls: string[] = [];
+    const adapter = new FeishuAdapter({
+      id: 'feishu-default',
+      provider: 'feishu',
+      enabled: true,
+      alias: '飞书',
+      config: {
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        streamingEnabled: true,
+      },
+    });
+    (adapter as any).cardTerminalReactionDelayMs = 20;
+
+    (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => {
+              calls.push('card.settings');
+              return {};
+            },
+            update: async () => {
+              calls.push('card.update');
+              return {};
+            },
+          },
+          cardElement: {
+            content: async () => ({}),
+          },
+        },
+      },
+      im: {
+        message: {
+          reply: async () => ({ data: { message_id: 'card-message-1' } }),
+        },
+        messageReaction: {
+          create: async () => {
+            calls.push('reaction');
+            return {};
+          },
+        },
+      },
+    };
+
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    const finalized = adapter.onStreamEnd('chat-1', 'completed', '最终回复', 'stream-1');
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(calls, ['card.settings', 'card.update']);
+    assert.equal(await finalized, true);
+    assert.deepEqual(calls, ['card.settings', 'card.update', 'reaction']);
   });
 
   it('creates the streaming card with dedicated content, tasks, tools, and status elements', async () => {
