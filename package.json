@@ -1,6 +1,6 @@
 {
   "name": "codex-to-im",
-  "version": "1.0.52",
+  "version": "1.0.53",
   "description": "Installable Codex-to-IM bridge with local setup UI and background service",
   "license": "MIT",
   "homepage": "https://github.com/zhangle1987/codex-to-im#readme",
@@ -40,23 +40,24 @@
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.65.0",
-    "@openai/codex-sdk": "^0.133.0",
-    "markdown-it": "^14.1.1",
+    "@larksuiteoapi/node-sdk": "^1.66.0",
+    "@openai/codex-sdk": "^0.135.0",
+    "markdown-it": "^14.2.0",
     "qrcode": "^1.5.4",
-    "ws": "^8.20.1"
+    "ws": "^8.21.0"
   },
   "overrides": {
     "axios": "1.16.1",
     "follow-redirects": "1.16.0",
-    "protobufjs": "7.5.9"
+    "protobufjs": "7.5.9",
+    "qs": "6.15.2"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22",
     "@types/ws": "^8.5.0",
     "esbuild": "^0.25.0",
-    "tsx": "^4.21.0",
+    "tsx": "^4.22.3",
     "typescript": "^5"
   },
   "engines": {

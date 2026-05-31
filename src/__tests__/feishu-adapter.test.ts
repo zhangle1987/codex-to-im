@@ -788,11 +788,78 @@ describe('feishu-adapter structured streaming regions', () => {
 
     const finalized = await adapter.onStreamEnd('chat-1', 'completed', '最终回复', 'stream-1');
     const finalCardJson = String(cardUpdateCalls[0]?.data?.card?.data || '');
+    const finalCard = JSON.parse(finalCardJson);
 
     assert.equal(finalized, true);
+    assert.equal(finalCard.config?.streaming_mode, false);
+    assert.match(finalCard.config?.summary?.content || '', /^已完成/);
     assert.doesNotMatch(finalCardJson, /等待中|运行中/);
     assert.match(finalCardJson, /补测试（已结束）/);
     assert.match(finalCardJson, /`shell_command`/);
+  });
+
+  it('keeps long final responses out of the terminal card and lets delivery send the full text', async () => {
+    const cardUpdateCalls: Array<Record<string, any>> = [];
+    const reactionCreateCalls: Array<Record<string, any>> = [];
+    const adapter = new FeishuAdapter({
+      id: 'feishu-default',
+      provider: 'feishu',
+      enabled: true,
+      alias: '飞书',
+      config: {
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        streamingEnabled: true,
+      },
+    });
+    (adapter as any).cardTerminalReactionDelayMs = 0;
+
+    (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => ({}),
+            update: async (payload: Record<string, any>) => {
+              cardUpdateCalls.push(payload);
+              return {};
+            },
+          },
+          cardElement: {
+            content: async () => ({}),
+          },
+        },
+      },
+      im: {
+        message: {
+          create: async () => ({ data: { message_id: 'msg-1' } }),
+          reply: async () => ({ data: { message_id: 'card-message-1' } }),
+        },
+        messageReaction: {
+          create: async (payload: Record<string, any>) => {
+            reactionCreateCalls.push(payload);
+            return {};
+          },
+        },
+      },
+    };
+
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    const longText = `${'长回复正文'.repeat(2500)}\nTAIL_MARKER_SHOULD_NOT_BE_IN_CARD`;
+    const finalized = await adapter.onStreamEnd('chat-1', 'completed', longText, 'stream-1');
+    const finalCard = JSON.parse(String(cardUpdateCalls[0]?.data?.card?.data || '{}'));
+    const cardText = String(finalCard.body?.elements?.[0]?.content || '');
+
+    assert.equal(finalized, false);
+    assert.equal(finalCard.config?.streaming_mode, false);
+    assert.match(finalCard.config?.summary?.content || '', /^已完成/);
+    assert.match(cardText, /完整内容将继续以普通消息发送/);
+    assert.doesNotMatch(cardText, /TAIL_MARKER_SHOULD_NOT_BE_IN_CARD/);
+    assert.ok(cardText.length < longText.length);
+    assert.deepEqual(reactionCreateCalls, [{
+      path: { message_id: 'card-message-1' },
+      data: { reaction_type: { emoji_type: 'DONE' } },
+    }]);
   });
 
   it('releases a timed-out card creation attempt so a later retry can recreate the stream card', async () => {

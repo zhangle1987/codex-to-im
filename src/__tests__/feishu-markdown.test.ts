@@ -70,8 +70,33 @@ describe('buildFinalCardJson', () => {
       'completed',
     );
 
+    const parsed = JSON.parse(cardJson);
+    assert.equal(parsed.config?.streaming_mode, false);
+    assert.equal(parsed.config?.summary?.content, '已完成 · 1m 0s');
     assert.doesNotMatch(cardJson, /等待中|运行中/);
     assert.match(cardJson, /补测试（已结束）/);
     assert.match(cardJson, /`shell_command`/);
+  });
+
+  it('marks interrupted and error final cards with terminal summaries', () => {
+    const interrupted = JSON.parse(buildFinalCardJson(
+      '已停止',
+      [],
+      [],
+      { status: '⚠️ Interrupted', elapsed: '2s' },
+      'interrupted',
+    ));
+    const error = JSON.parse(buildFinalCardJson(
+      '执行失败',
+      [],
+      [],
+      { status: '❌ Error', elapsed: '3s' },
+      'error',
+    ));
+
+    assert.equal(interrupted.config?.streaming_mode, false);
+    assert.equal(interrupted.config?.summary?.content, '已中断 · 2s');
+    assert.equal(error.config?.streaming_mode, false);
+    assert.equal(error.config?.summary?.content, '执行失败 · 3s');
   });
 });

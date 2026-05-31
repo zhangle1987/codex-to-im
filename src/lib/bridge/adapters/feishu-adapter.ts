@@ -103,9 +103,22 @@ const CARD_THROTTLE_MS = 1000;
 const CARD_REQUEST_TIMEOUT_MS = 15_000;
 const CARD_FINALIZE_FLUSH_WAIT_EXTRA_MS = 1_000;
 const CARD_FULL_REFRESH_INTERVAL_MS = 5 * 60_000;
+const FINAL_CARD_FULL_TEXT_MAX_CHARS = 12_000;
+const FINAL_CARD_PREVIEW_CHARS = 4_000;
 const INITIAL_STREAMING_STATUS = '处理中';
 const EMPTY_STREAMING_TASKS = '';
 const EMPTY_STREAMING_TOOLS = '';
+
+function shouldDeliverFinalTextSeparately(text: string): boolean {
+  return text.trim().length > FINAL_CARD_FULL_TEXT_MAX_CHARS;
+}
+
+function buildFinalCardTextPreview(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+  const preview = trimmed.slice(0, FINAL_CARD_PREVIEW_CHARS).trimEnd();
+  return `${preview}\n\n---\n\n回复较长，完整内容将继续以普通消息发送。`;
+}
 
 function buildStreamingCardBody(
   content: string,
@@ -828,7 +841,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
         finalText = `${trimmedExisting}\n\n${trimmedResponse}`;
       }
 
-      const finalCardJson = buildFinalCardJson(finalText, state.taskItems, state.toolCalls, footer, status);
+      const deliverTextSeparately = shouldDeliverFinalTextSeparately(finalText);
+      const cardText = deliverTextSeparately ? buildFinalCardTextPreview(finalText) : finalText;
+      const finalCardJson = buildFinalCardJson(cardText, state.taskItems, state.toolCalls, footer, status);
 
       state.sequence++;
       await this.withFeishuRequestTimeout(cardKey, 'card.update', () => cardkit.card.update({
@@ -852,7 +867,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         await this.addTerminalReaction(cardKey, state.messageId, terminalReactionEmoji);
       }
 
-      return true;
+      return !deliverTextSeparately;
     } catch (err) {
       console.warn('[feishu-adapter] Card finalize failed:', err instanceof Error ? err.message : err);
       return false;

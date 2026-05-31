@@ -99,6 +99,19 @@ export function htmlToFeishuMarkdown(html: string): string {
  */
 export type FinalCardTerminalStatus = 'completed' | 'interrupted' | 'error';
 
+function buildFinalCardSummary(
+  terminalStatus?: FinalCardTerminalStatus,
+  footer?: { status: string; elapsed: string } | null,
+): string {
+  const label = terminalStatus === 'error'
+    ? '执行失败'
+    : terminalStatus === 'interrupted'
+      ? '已中断'
+      : '已完成';
+  const elapsed = footer?.elapsed?.trim();
+  return elapsed ? `${label} · ${elapsed}` : label;
+}
+
 interface ProgressRenderOptions {
   terminalStatus?: FinalCardTerminalStatus | null;
 }
@@ -287,7 +300,11 @@ export function buildFinalCardJson(
 
   return JSON.stringify({
     schema: '2.0',
-    config: { wide_screen_mode: true },
+    config: {
+      streaming_mode: false,
+      wide_screen_mode: true,
+      summary: { content: buildFinalCardSummary(terminalStatus, footer) },
+    },
     body: { elements },
   });
 }
