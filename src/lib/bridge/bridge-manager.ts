@@ -898,14 +898,21 @@ async function handleCommand(
 export function computeSdkSessionUpdate(
   sdkSessionId: string | null | undefined,
   hasError: boolean,
+  options: { preserveOnError?: boolean } = {},
 ): string | null {
   if (sdkSessionId && !hasError) {
     return sdkSessionId;
   }
   if (hasError) {
+    if (options.preserveOnError) return null;
     return '';
   }
   return null;
+}
+
+function shouldPreserveSdkSessionOnError(session: BridgeSession | null): boolean {
+  if (session?.thread_origin !== 'desktop') return false;
+  return Boolean(session.desktop_thread_id || session.sdk_session_id || session.codex_thread_id);
 }
 
 function persistSdkSessionUpdate(
@@ -913,11 +920,15 @@ function persistSdkSessionUpdate(
   sdkSessionId: string | null | undefined,
   hasError: boolean,
 ): void {
-  const update = computeSdkSessionUpdate(sdkSessionId, hasError);
+  const store = getBridgeContext().store;
+  const session = store.getSession(sessionId);
+  const update = computeSdkSessionUpdate(sdkSessionId, hasError, {
+    preserveOnError: shouldPreserveSdkSessionOnError(session),
+  });
   if (update === null) {
     return;
   }
-  getBridgeContext().store.updateSdkSessionId(sessionId, update);
+  store.updateSdkSessionId(sessionId, update);
 }
 
 function resetStateForTests(): void {

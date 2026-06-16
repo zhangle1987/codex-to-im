@@ -353,15 +353,8 @@ describe('interactive-message-runner', () => {
     const taskStateMap = new Map<string, InteractiveTaskState>();
     const clock = createManualIntervalClock();
     const processStarted = createDeferred<void>();
-    const neverFinish = createDeferred<{
-      responseText: string;
-      outboundAttachments: [];
-      tokenUsage: null;
-      hasError: boolean;
-      errorMessage: string;
-      permissionRequests: [];
-      sdkSessionId: null;
-    }>();
+    const processCleaned = createDeferred<void>();
+    let capturedAbortSignal: AbortSignal | undefined;
     const deliveredTexts: string[] = [];
     const healthEnds: Array<{ outcome: string; detail?: string }> = [];
 
@@ -406,10 +399,28 @@ describe('interactive-message-runner', () => {
           deliveredTexts.push(responseText);
         },
         persistSdkSessionUpdate() {},
-        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
+        processMessageImpl: async (_binding, _text, _onPermission, abortSignal, _files, onPartialText) => {
+          capturedAbortSignal = abortSignal;
           onPartialText?.('第一段输出');
           processStarted.resolve();
-          return neverFinish.promise;
+          await new Promise<void>((resolve) => {
+            const finish = () => setTimeout(resolve, 0);
+            if (abortSignal?.aborted) {
+              finish();
+            } else {
+              abortSignal?.addEventListener('abort', finish, { once: true });
+            }
+          });
+          processCleaned.resolve();
+          return {
+            responseText: '',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: true,
+            errorMessage: 'Task stopped by user',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
         },
         nowMs: () => clock.now(),
         setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
@@ -431,8 +442,10 @@ describe('interactive-message-runner', () => {
       '桌面最终回复',
     );
     await runPromise;
+    await processCleaned.promise;
 
     assert.equal(finalized, false);
+    assert.equal(capturedAbortSignal?.aborted, true);
     assert.deepEqual(adapter.streamEnds, [{ status: 'completed', text: '桌面最终回复' }]);
     assert.deepEqual(deliveredTexts, ['桌面最终回复']);
     assert.deepEqual(healthEnds, [{
@@ -463,15 +476,7 @@ describe('interactive-message-runner', () => {
     const taskStateMap = new Map<string, InteractiveTaskState>();
     const clock = createManualIntervalClock();
     const processStarted = createDeferred<void>();
-    const neverFinish = createDeferred<{
-      responseText: string;
-      outboundAttachments: [];
-      tokenUsage: null;
-      hasError: boolean;
-      errorMessage: string;
-      permissionRequests: [];
-      sdkSessionId: null;
-    }>();
+    const processCleaned = createDeferred<void>();
     const delivered: Array<{ text: string; attachments: OutboundAttachment[] }> = [];
 
     const runPromise = runInteractiveMessage(
@@ -513,10 +518,27 @@ describe('interactive-message-runner', () => {
           delivered.push({ text: responseText, attachments });
         },
         persistSdkSessionUpdate() {},
-        processMessageImpl: async (_binding, _text, _onPermission, _abortSignal, _files, onPartialText) => {
+        processMessageImpl: async (_binding, _text, _onPermission, abortSignal, _files, onPartialText) => {
           onPartialText?.('正在生成截图');
           processStarted.resolve();
-          return neverFinish.promise;
+          await new Promise<void>((resolve) => {
+            const finish = () => setTimeout(resolve, 0);
+            if (abortSignal?.aborted) {
+              finish();
+            } else {
+              abortSignal?.addEventListener('abort', finish, { once: true });
+            }
+          });
+          processCleaned.resolve();
+          return {
+            responseText: '',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: true,
+            errorMessage: 'Task stopped by user',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
         },
         nowMs: () => clock.now(),
         setIntervalFn: (callback, intervalMs) => clock.setInterval(callback, intervalMs),
@@ -542,6 +564,7 @@ describe('interactive-message-runner', () => {
       ].join('\n'),
     );
     await runPromise;
+    await processCleaned.promise;
 
     assert.equal(finalized, true);
     assert.deepEqual(adapter.streamEnds, [{ status: 'completed', text: '桌面最终回复' }]);

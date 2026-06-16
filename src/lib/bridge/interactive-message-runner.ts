@@ -60,6 +60,27 @@ const STREAM_DEFAULTS: Record<string, StreamConfig> = {
 };
 const STREAM_STATUS_IDLE_START_MS = 180_000;
 const STREAM_STATUS_HEARTBEAT_MS = 10_000;
+const EXTERNAL_PROCESS_CLEANUP_TIMEOUT_MS = 5_000;
+
+async function waitForProcessCleanup(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const settled = promise.then(
+    () => true,
+    () => true,
+  );
+  if (timeoutMs <= 0) return settled;
+
+  try {
+    return await Promise.race([
+      settled,
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 function getStreamConfig(channelType = 'default'): StreamConfig {
   const { store } = getBridgeContext();
@@ -206,6 +227,7 @@ export interface RunInteractiveMessageDeps {
   streamStatusIdleDetectionStartMs?: number;
   streamStatusHeartbeatMs?: number;
   desktopTerminalFinalizationTimeoutMs?: number;
+  externalProcessCleanupTimeoutMs?: number;
 }
 
 export async function runInteractiveMessage(
@@ -678,9 +700,20 @@ export async function runInteractiveMessage(
     }
 
     if (raced.kind === 'external') {
-      processPromise.catch(() => {});
       finalOutcome = raced.terminal.outcome;
       finalOutcomeDetail = raced.terminal.detail;
+      if (!taskAbort.signal.aborted) {
+        taskAbort.abort();
+      }
+      processResultSettled = await waitForProcessCleanup(
+        processPromise,
+        Math.max(0, deps.externalProcessCleanupTimeoutMs ?? EXTERNAL_PROCESS_CLEANUP_TIMEOUT_MS),
+      );
+      if (!processResultSettled) {
+        console.warn(
+          `[interactive-message-runner] External terminal finalized session ${binding.codepilotSessionId}, but SDK process cleanup did not finish before timeout.`,
+        );
+      }
       const streamEndStatus = raced.terminal.outcome === 'completed'
         ? 'completed'
         : raced.terminal.outcome === 'aborted'

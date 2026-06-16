@@ -2170,6 +2170,34 @@ describe('bridge-manager new session handling', () => {
     assert.equal(currentBinding?.codepilotSessionId, newSessionId);
     assert.equal(currentBinding?.sdkSessionId || '', '');
   });
+
+  it('preserves desktop session binding after a transient error without a new sdk id', () => {
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: noopLlm,
+      permissions: noopPermissions,
+      lifecycle: noopLifecycle,
+    });
+    _testOnly.resetStateForTests();
+
+    const address = { channelType: 'feishu', chatId: 'chat-desktop-error' } as const;
+    const binding = router.bindToSdkSession(address, 'desktop-thread-preserve', {
+      workingDirectory: path.join(os.tmpdir(), 'cti-desktop-preserve'),
+      displayName: 'Desktop preserve',
+    });
+
+    _testOnly.persistSdkSessionUpdate(binding.codepilotSessionId, null, true);
+    _testOnly.persistSdkSessionUpdate(binding.codepilotSessionId, 'desktop-thread-preserve', true);
+
+    const session = store.getSession(binding.codepilotSessionId);
+    const currentBinding = store.getChannelBinding(address.channelType, address.chatId);
+    assert.equal(session?.thread_origin, 'desktop');
+    assert.equal(session?.desktop_thread_id, 'desktop-thread-preserve');
+    assert.equal(session?.sdk_session_id, 'desktop-thread-preserve');
+    assert.equal(session?.codex_thread_id, 'desktop-thread-preserve');
+    assert.equal(currentBinding?.sdkSessionId, 'desktop-thread-preserve');
+  });
 });
 
 describe('channel-router defaults', () => {
