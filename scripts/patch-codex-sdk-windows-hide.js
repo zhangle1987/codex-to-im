@@ -15,7 +15,7 @@ import path from 'node:path';
  * - If upstream adds `windowsHide` natively, remove this script.
  */
 const PATCH_MARKER = 'windowsHide: process.platform === "win32"';
-const SUPPORTED_SDK_VERSION = /^0\.(11\d|12\d|13\d|140)\.\d+$/;
+const SUPPORTED_SDK_VERSION = /^0\.(11\d|12\d|13\d|14[0-4])\.\d+$/;
 
 function logSkip(message) {
   console.warn(`[postinstall] ${message}`);

@@ -79,6 +79,7 @@ interface SessionMessageLine {
     arguments?: string;
     execution?: unknown;
     call_id?: unknown;
+    id?: unknown;
     output?: unknown;
     is_error?: boolean;
     status?: unknown;
@@ -94,6 +95,8 @@ interface SessionMessageLine {
     exit_code?: unknown;
     success?: unknown;
     changes?: unknown;
+    revised_prompt?: unknown;
+    saved_path?: unknown;
     tools?: unknown;
     content?: Array<{
       type?: string;
@@ -118,6 +121,7 @@ interface SessionEventLine {
     reason?: unknown;
     call_id?: unknown;
     callId?: unknown;
+    id?: unknown;
     query?: unknown;
     command?: unknown;
     aggregated_output?: unknown;
@@ -128,6 +132,8 @@ interface SessionEventLine {
     status?: unknown;
     success?: unknown;
     changes?: unknown;
+    revised_prompt?: unknown;
+    saved_path?: unknown;
     tool?: unknown;
     arguments?: unknown;
     content_items?: unknown;
@@ -689,6 +695,29 @@ function getDynamicToolCallId(payload: { call_id?: unknown; callId?: unknown }):
   return extractNormalizedFreeText(payload.call_id ?? payload.callId);
 }
 
+function getImageGenerationToolId(payload: { call_id?: unknown; callId?: unknown; id?: unknown }): string {
+  return extractNormalizedFreeText(payload.call_id ?? payload.callId ?? payload.id);
+}
+
+function limitDesktopToolContent(value: string, maxChars = 1000): string {
+  const normalized = value.trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars).trimEnd()}\n...`;
+}
+
+function summarizeImageGenerationOutput(payload: { saved_path?: unknown; revised_prompt?: unknown; status?: unknown; error?: unknown }): string {
+  const savedPath = extractNormalizedFreeText(payload.saved_path);
+  const prompt = extractNormalizedStructuredText(payload.revised_prompt);
+  const error = extractNormalizedStructuredText(payload.error);
+  const status = extractNormalizedFreeText(payload.status);
+  const parts: string[] = [];
+  if (savedPath) parts.push(`Saved: ${savedPath}`);
+  if (prompt) parts.push(`Prompt: ${limitDesktopToolContent(prompt)}`);
+  if (error) parts.push(`Error: ${limitDesktopToolContent(error)}`);
+  if (parts.length === 0 && status) parts.push(`Status: ${status}`);
+  return parts.join('\n\n');
+}
+
 function formatDesktopToolName(namespaceValue: unknown, nameValue: unknown): string {
   const name = extractNormalizedFreeText(nameValue);
   if (!name) return '';
@@ -739,12 +768,14 @@ function isTurnContextLine(line: SessionMessageLine | SessionEventLine | TurnCon
 
 const IGNORED_EVENT_MSG_TYPES = new Set([
   'context_compacted',
+  'thread_settings_applied',
   'thread_name_updated',
   'thread_rolled_back',
   'token_count',
 ]);
 
 const IGNORED_RESPONSE_ITEM_TYPES = new Set([
+  'image_generation_call',
   'web_search_call',
 ]);
 
@@ -1093,6 +1124,22 @@ function pushDesktopMirrorEventRecord(
       toolId,
       toolName: 'apply_patch',
       isError: parsed.payload.success === false || status === 'failed',
+    });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'image_generation_end') {
+    const toolId = getImageGenerationToolId(parsed.payload) || signature;
+    const status = extractNormalizedFreeText(parsed.payload.status).toLowerCase();
+    records.push({
+      signature,
+      type: 'tool_finished',
+      content: summarizeImageGenerationOutput(parsed.payload),
+      timestamp,
+      ...(parsed.payload.turn_id || activeTurnId ? { turnId: parsed.payload.turn_id || activeTurnId || undefined } : {}),
+      toolId,
+      toolName: 'image_generation',
+      isError: Boolean(parsed.payload.error) || status === 'failed',
     });
     return true;
   }

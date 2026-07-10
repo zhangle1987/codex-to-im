@@ -1577,6 +1577,22 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
           type: 'response_item',
           payload: { type: 'web_search_call', status: 'completed' },
         }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:05.000Z',
+          type: 'event_msg',
+          payload: { type: 'thread_settings_applied' },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:06.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'image_generation_call',
+            id: 'ig-ignore',
+            status: 'generating',
+            result: 'iVBORw0KGgoAAAANSUhEUgAA',
+            revised_prompt: 'ignored duplicate image payload',
+          },
+        }),
       ].join('\n') + '\n',
       'utf-8',
     );
@@ -1584,6 +1600,52 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
     const delta = readDesktopSessionMirrorRecordDeltaByFilePath(filePath, 0, fs.statSync(filePath).size);
     assert.deepEqual(delta.records, []);
     assert.deepEqual(delta.unknownKinds, []);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('parses Codex desktop image generation completion without mirroring base64 payloads', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: '2026-07-06T09:18:32.624Z',
+          type: 'event_msg',
+          payload: {
+            type: 'image_generation_end',
+            call_id: 'ig_0ac723545eab6ba8016a4b7272b990819aadfa79ffbc080341',
+            status: 'generating',
+            saved_path: 'C:\\Users\\zhangle\\.codex\\generated_images\\thread\\ig_0ac723545eab6ba8016a4b7272b990819aadfa79ffbc080341.png',
+            revised_prompt: 'Use case: ui-mockup',
+            result: 'iVBORw0KGgoAAAANSUhEUgAA'.repeat(200),
+          },
+        }),
+      ].join('\n') + '\n',
+      'utf-8',
+    );
+
+    const delta = readDesktopSessionMirrorRecordDeltaByFilePath(filePath, 0, fs.statSync(filePath).size);
+    assert.deepEqual(delta.unknownKinds, []);
+    assert.equal(delta.records.length, 1);
+    assert.deepEqual(
+      {
+        type: delta.records[0]?.type,
+        content: delta.records[0]?.content,
+        toolId: delta.records[0]?.toolId,
+        toolName: delta.records[0]?.toolName,
+        isError: delta.records[0]?.isError,
+      },
+      {
+        type: 'tool_finished',
+        content: 'Saved: C:\\Users\\zhangle\\.codex\\generated_images\\thread\\ig_0ac723545eab6ba8016a4b7272b990819aadfa79ffbc080341.png\n\nPrompt: Use case: ui-mockup',
+        toolId: 'ig_0ac723545eab6ba8016a4b7272b990819aadfa79ffbc080341',
+        toolName: 'image_generation',
+        isError: false,
+      },
+    );
+    assert.equal(delta.records[0]?.content.includes('iVBOR'), false);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
