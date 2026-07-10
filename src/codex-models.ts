@@ -29,6 +29,56 @@ interface RawModelsCache {
 
 export const DEFAULT_CODEX_MODELS_CACHE_PATH = path.join(os.homedir(), '.codex', 'models_cache.json');
 
+const REASONING_LEVEL_DESCRIPTIONS: Record<string, string> = {
+  low: 'Fast responses with lighter reasoning',
+  medium: 'Balances speed and reasoning depth for everyday tasks',
+  high: 'Greater reasoning depth for complex problems',
+  xhigh: 'Extra high reasoning depth for complex problems',
+  max: 'Maximum reasoning depth for very hard problems',
+  ultra: 'Ultra reasoning depth for the hardest problems',
+};
+
+function buildReasoningLevels(efforts: string[]): CachedCodexModel['supportedReasoningLevels'] {
+  return efforts.map((effort) => ({
+    effort,
+    description: REASONING_LEVEL_DESCRIPTIONS[effort] || '',
+  }));
+}
+
+function cloneCodexModel(model: CachedCodexModel): CachedCodexModel {
+  return {
+    ...model,
+    supportedReasoningLevels: model.supportedReasoningLevels.map((level) => ({ ...level })),
+  };
+}
+
+export const KNOWN_CODEX_MODEL_FALLBACKS: CachedCodexModel[] = [
+  {
+    slug: 'gpt-5.6-sol',
+    displayName: 'GPT-5.6-Sol',
+    visibility: 'list',
+    supportedInApi: true,
+    defaultReasoningLevel: 'low',
+    supportedReasoningLevels: buildReasoningLevels(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
+  },
+  {
+    slug: 'gpt-5.6-terra',
+    displayName: 'GPT-5.6-Terra',
+    visibility: 'list',
+    supportedInApi: true,
+    defaultReasoningLevel: 'medium',
+    supportedReasoningLevels: buildReasoningLevels(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
+  },
+  {
+    slug: 'gpt-5.6-luna',
+    displayName: 'GPT-5.6-Luna',
+    visibility: 'list',
+    supportedInApi: true,
+    defaultReasoningLevel: 'medium',
+    supportedReasoningLevels: buildReasoningLevels(['low', 'medium', 'high', 'xhigh', 'max']),
+  },
+];
+
 export function readConfiguredCodexModel(configPath = DEFAULT_CODEX_CONFIG_PATH): string | null {
   try {
     const raw = fs.readFileSync(configPath, 'utf-8');
@@ -114,6 +164,56 @@ export function listSelectableCodexModels(cachePath = DEFAULT_CODEX_MODELS_CACHE
   return listCachedCodexModels(cachePath).filter((model) => model.visibility !== 'hide');
 }
 
+function buildSyntheticCodexModel(slug: string): CachedCodexModel | null {
+  const normalized = slug.trim();
+  if (!normalized) return null;
+  return {
+    slug: normalized,
+    displayName: normalized,
+    visibility: 'list',
+    supportedInApi: true,
+    supportedReasoningLevels: [],
+  };
+}
+
+export function listAvailableCodexModels(
+  cachePath = DEFAULT_CODEX_MODELS_CACHE_PATH,
+  additionalModelSlugs: string[] = [],
+): CachedCodexModel[] {
+  const cachedModels = listCachedCodexModels(cachePath);
+  const hiddenCachedSlugs = new Set(
+    cachedModels
+      .filter((model) => model.visibility === 'hide')
+      .map((model) => model.slug),
+  );
+  const merged: CachedCodexModel[] = [];
+  const seen = new Set<string>();
+
+  const addModel = (model: CachedCodexModel, force = false) => {
+    if (!force && hiddenCachedSlugs.has(model.slug)) return;
+    if (seen.has(model.slug)) return;
+    seen.add(model.slug);
+    merged.push(cloneCodexModel(model));
+  };
+
+  for (const model of cachedModels) {
+    if (model.visibility !== 'hide') {
+      addModel(model, true);
+    }
+  }
+  for (const model of KNOWN_CODEX_MODEL_FALLBACKS) {
+    addModel(model);
+  }
+  for (const slug of additionalModelSlugs) {
+    const syntheticModel = buildSyntheticCodexModel(slug);
+    if (syntheticModel) {
+      addModel(syntheticModel, true);
+    }
+  }
+
+  return merged;
+}
+
 export function findSelectableCodexModel(
   slug: string,
   cachePath = DEFAULT_CODEX_MODELS_CACHE_PATH,
@@ -121,6 +221,16 @@ export function findSelectableCodexModel(
   const normalized = slug.trim();
   if (!normalized) return null;
   return listSelectableCodexModels(cachePath).find((model) => model.slug === normalized) || null;
+}
+
+export function findAvailableCodexModel(
+  slug: string,
+  cachePath = DEFAULT_CODEX_MODELS_CACHE_PATH,
+  additionalModelSlugs: string[] = [],
+): CachedCodexModel | null {
+  const normalized = slug.trim();
+  if (!normalized) return null;
+  return listAvailableCodexModels(cachePath, additionalModelSlugs).find((model) => model.slug === normalized) || null;
 }
 
 export function isCliOnlyCodexModel(model: Pick<CachedCodexModel, 'supportedInApi'> | null | undefined): boolean {

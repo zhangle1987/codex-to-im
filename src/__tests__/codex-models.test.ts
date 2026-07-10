@@ -6,8 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  findAvailableCodexModel,
   findSelectableCodexModel,
   isCliOnlyCodexModel,
+  listAvailableCodexModels,
   listCachedCodexModels,
   listSelectableCodexModels,
   readConfiguredCodexModel,
@@ -147,6 +149,90 @@ describe('listCachedCodexModels', () => {
           ],
         },
       ]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('adds known GPT-5.6 fallbacks when the cached catalog is stale', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-models-test-'));
+    const cachePath = path.join(tmpDir, 'models_cache.json');
+    try {
+      fs.writeFileSync(cachePath, JSON.stringify({
+        models: [
+          {
+            slug: 'gpt-5.5',
+            display_name: 'GPT-5.5',
+            visibility: 'list',
+            supported_in_api: true,
+            default_reasoning_level: 'medium',
+          },
+        ],
+      }), 'utf-8');
+
+      const available = listAvailableCodexModels(cachePath);
+      assert.deepEqual(
+        available.map((model) => model.slug),
+        ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+      );
+
+      const terra = findAvailableCodexModel('gpt-5.6-terra', cachePath);
+      assert.equal(terra?.displayName, 'GPT-5.6-Terra');
+      assert.equal(terra?.defaultReasoningLevel, 'medium');
+      assert.deepEqual(
+        terra?.supportedReasoningLevels.map((level) => level.effort),
+        ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps cached model metadata ahead of known fallbacks', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-models-test-'));
+    const cachePath = path.join(tmpDir, 'models_cache.json');
+    try {
+      fs.writeFileSync(cachePath, JSON.stringify({
+        models: [
+          {
+            slug: 'gpt-5.6-sol',
+            display_name: 'GPT-5.6-Sol-From-Cache',
+            visibility: 'list',
+            supported_in_api: false,
+            default_reasoning_level: 'max',
+            supported_reasoning_levels: [
+              { effort: 'max', description: 'Cached max' },
+            ],
+          },
+        ],
+      }), 'utf-8');
+
+      const sol = findAvailableCodexModel('gpt-5.6-sol', cachePath);
+      assert.equal(sol?.displayName, 'GPT-5.6-Sol-From-Cache');
+      assert.equal(sol?.supportedInApi, false);
+      assert.equal(sol?.defaultReasoningLevel, 'max');
+      assert.deepEqual(sol?.supportedReasoningLevels, [
+        { effort: 'max', description: 'Cached max' },
+      ]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('adds configured model slugs that are missing from the cache and known fallbacks', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-models-test-'));
+    const cachePath = path.join(tmpDir, 'models_cache.json');
+    try {
+      fs.writeFileSync(cachePath, JSON.stringify({ models: [] }), 'utf-8');
+
+      const custom = findAvailableCodexModel('gpt-5.7-test', cachePath, ['gpt-5.7-test']);
+      assert.deepEqual(custom, {
+        slug: 'gpt-5.7-test',
+        displayName: 'gpt-5.7-test',
+        visibility: 'list',
+        supportedInApi: true,
+        supportedReasoningLevels: [],
+      });
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

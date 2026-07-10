@@ -11,9 +11,9 @@ import {
   resetDraftSession as resetDraftSessionForStore,
 } from '../../internal-sessions.js';
 import {
-  findSelectableCodexModel,
+  findAvailableCodexModel,
   isCliOnlyCodexModel,
-  listSelectableCodexModels,
+  listAvailableCodexModels,
 } from '../../codex-models.js';
 import {
   normalizeReasoningEffort as normalizeStoredReasoningEffort,
@@ -23,7 +23,7 @@ import { getBridgeContext } from './context.js';
 import type { BridgeSession } from './host.js';
 import { validateWorkingDirectory } from './security/validators.js';
 
-const AVAILABLE_CODEX_MODELS = listSelectableCodexModels();
+const AVAILABLE_CODEX_MODELS = listAvailableCodexModels();
 const AVAILABLE_CODEX_MODEL_MAP = new Map(AVAILABLE_CODEX_MODELS.map((model) => [model.slug, model]));
 
 export function getDisplayedDesktopThreads(limit: number): DesktopSessionSummary[] | null {
@@ -95,7 +95,7 @@ export function getAvailableModelChoicesText(): string {
 }
 
 export function getSelectableCodexModel(slug: string) {
-  return AVAILABLE_CODEX_MODEL_MAP.get(slug) || findSelectableCodexModel(slug);
+  return AVAILABLE_CODEX_MODEL_MAP.get(slug) || findAvailableCodexModel(slug);
 }
 
 export function resolveNewWorkingDirectory(rawArgs: string): { ok: true; workDir: string } | { ok: false; message: string } {

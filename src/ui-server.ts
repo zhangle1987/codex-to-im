@@ -54,7 +54,7 @@ import {
   startWeixinLoginWebSession,
 } from './weixin-login.js';
 import { listWeixinAccounts } from './weixin-store.js';
-import { listSelectableCodexModels, readConfiguredCodexModel } from './codex-models.js';
+import { listAvailableCodexModels, readConfiguredCodexModel } from './codex-models.js';
 import type { CachedCodexModel } from './codex-models.js';
 
 let port = 4781;
@@ -77,8 +77,8 @@ function parsePreferredPort(): number {
   return raw;
 }
 
-function getAvailableCodexModels(): CachedCodexModel[] {
-  return listSelectableCodexModels();
+function getAvailableCodexModels(additionalModelSlugs: string[] = []): CachedCodexModel[] {
+  return listAvailableCodexModels(undefined, additionalModelSlugs);
 }
 
 function getAvailableCodexModelSlugs(models = getAvailableCodexModels()): Set<string> {
@@ -381,8 +381,8 @@ function isRemoteAuthenticated(request: IncomingMessage, config: Config): boolea
 }
 
 function configToPayload(config: Config) {
-  const availableModels = getAvailableCodexModels();
   const codexDefaultModel = readConfiguredCodexModel() || '';
+  const availableModels = getAvailableCodexModels([config.defaultModel || '', codexDefaultModel]);
   const effectiveModel = config.defaultModel || codexDefaultModel;
   return {
     runtime: config.runtime,
@@ -408,12 +408,16 @@ function configToPayload(config: Config) {
 
 function mergeConfig(payload: Record<string, unknown>): Config {
   const current = loadConfig();
-  const availableCodexModels = getAvailableCodexModels();
-  const availableCodexModelSlugs = getAvailableCodexModelSlugs(availableCodexModels);
   const codexDefaultModel = readConfiguredCodexModel() || '';
   const rawDefaultModel = typeof payload.defaultModel === 'string'
     ? payload.defaultModel.trim()
     : undefined;
+  const availableCodexModels = getAvailableCodexModels([
+    current.defaultModel || '',
+    codexDefaultModel,
+    rawDefaultModel || '',
+  ]);
+  const availableCodexModelSlugs = getAvailableCodexModelSlugs(availableCodexModels);
   const nextDefaultModel = rawDefaultModel === undefined
     ? current.defaultModel
     : rawDefaultModel === ''
