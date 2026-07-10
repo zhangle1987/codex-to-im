@@ -183,7 +183,7 @@ codex-to-im uninstall
 - `/new`：在当前正式会话目录下新建线程。
 - `/new <路径或项目名>`：按指定目录新建线程。
 - `/mode <ask|code|plan>`：切换运行模式。
-- `/reasoning <1-5>`：切换思考级别。
+- `/reasoning <low|medium|high|xhigh|max|ultra>`：切换思考级别；数字 `1-5` 仍兼容旧映射，`6=max`、`7=ultra` 仅适用于支持这些档位的模型。
 - `/model`：查看当前模型和可选模型。
 - `/model <模型名>`：切换当前 IM 会话模型。
 - `/history`：查看当前线程历史摘要。
@@ -196,7 +196,7 @@ codex-to-im uninstall
 
 - 默认工作空间：用于 `/new my-project` 这类相对路径。
 - Codex 文件系统权限：如 `workspace-write`、`danger-full-access`。
-- Codex 思考级别：`1-5`。
+- Codex 思考级别：按当前模型的 Codex catalog 展示，例如 `low`、`medium`、`high`、`xhigh`，部分新模型支持 `max`、`ultra`。
 - 默认模型：从本机可用模型中选择。
 - 反馈使用 markdown：控制 bridge 发到通道里的文本反馈是否走 markdown。
 - 允许局域网访问 Web 控制台：便于手机或局域网设备访问。

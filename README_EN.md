@@ -182,7 +182,7 @@ You can also specify a directory explicitly:
 - `/new`: create a new thread under the current formal session directory.
 - `/new <path or project name>`: create a new thread under the specified directory.
 - `/mode <ask|code|plan>`: change the runtime mode.
-- `/reasoning <1-5>`: change the reasoning effort.
+- `/reasoning <low|medium|high|xhigh|max|ultra>`: change the reasoning effort; numeric `1-5` aliases remain compatible, while `6=max` and `7=ultra` only apply to models that support them.
 - `/model`: inspect the current model and available models.
 - `/model <model name>`: change the model for the current IM session.
 - `/history`: inspect the current thread history summary.
@@ -195,7 +195,7 @@ Common settings in the workbench include:
 
 - Default workspace root: used for relative paths such as `/new my-project`.
 - Codex filesystem permission: for example `workspace-write` or `danger-full-access`.
-- Codex reasoning effort: `1-5`.
+- Codex reasoning effort: shown from the selected model's Codex catalog, for example `low`, `medium`, `high`, `xhigh`; some newer models also support `max` and `ultra`.
 - Default model: chosen from the models available on the local machine.
 - Use Markdown for feedback: controls whether bridge text feedback is sent through markdown rendering.
 - Allow LAN access to the Web console: useful when opening the workbench from a phone or another device on the same LAN.

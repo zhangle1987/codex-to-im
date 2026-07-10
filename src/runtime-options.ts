@@ -1,5 +1,14 @@
 export type RuntimeSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
-export type RuntimeReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export const RUNTIME_REASONING_EFFORTS = [
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra',
+] as const;
+export type RuntimeReasoningEffort = typeof RUNTIME_REASONING_EFFORTS[number];
 
 export function parseSandboxMode(value: string | null | undefined): RuntimeSandboxMode | undefined {
   if (
@@ -20,16 +29,9 @@ export function normalizeSandboxMode(
 }
 
 export function parseReasoningEffort(value: string | null | undefined): RuntimeReasoningEffort | undefined {
-  if (
-    value === 'minimal'
-    || value === 'low'
-    || value === 'medium'
-    || value === 'high'
-    || value === 'xhigh'
-  ) {
-    return value;
-  }
-  return undefined;
+  return RUNTIME_REASONING_EFFORTS.includes(value as RuntimeReasoningEffort)
+    ? value as RuntimeReasoningEffort
+    : undefined;
 }
 
 export function normalizeReasoningEffort(

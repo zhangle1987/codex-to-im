@@ -7,6 +7,11 @@ export interface CachedCodexModel {
   displayName: string;
   visibility: string;
   supportedInApi: boolean;
+  defaultReasoningLevel?: string;
+  supportedReasoningLevels: Array<{
+    effort: string;
+    description: string;
+  }>;
 }
 
 export const DEFAULT_CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml');
@@ -17,6 +22,8 @@ interface RawModelsCache {
     display_name?: unknown;
     visibility?: unknown;
     supported_in_api?: unknown;
+    default_reasoning_level?: unknown;
+    supported_reasoning_levels?: unknown;
   }>;
 }
 
@@ -45,6 +52,31 @@ export function readConfiguredCodexModel(configPath = DEFAULT_CODEX_CONFIG_PATH)
   }
 }
 
+function parseReasoningLevel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function parseSupportedReasoningLevels(value: unknown): CachedCodexModel['supportedReasoningLevels'] {
+  if (!Array.isArray(value)) return [];
+
+  const seen = new Set<string>();
+  const levels: CachedCodexModel['supportedReasoningLevels'] = [];
+  for (const level of value) {
+    if (!level || typeof level !== 'object') continue;
+    const raw = level as { effort?: unknown; description?: unknown };
+    const effort = parseReasoningLevel(raw.effort);
+    if (!effort || seen.has(effort)) continue;
+    seen.add(effort);
+    levels.push({
+      effort,
+      description: typeof raw.description === 'string' ? raw.description.trim() : '',
+    });
+  }
+  return levels;
+}
+
 export function listCachedCodexModels(cachePath = DEFAULT_CODEX_MODELS_CACHE_PATH): CachedCodexModel[] {
   try {
     const raw = fs.readFileSync(cachePath, 'utf-8');
@@ -58,6 +90,7 @@ export function listCachedCodexModels(cachePath = DEFAULT_CODEX_MODELS_CACHE_PAT
       const slug = model.slug.trim();
       if (seen.has(slug)) continue;
       seen.add(slug);
+      const defaultReasoningLevel = parseReasoningLevel(model.default_reasoning_level);
       models.push({
         slug,
         displayName: typeof model.display_name === 'string' && model.display_name.trim()
@@ -67,6 +100,8 @@ export function listCachedCodexModels(cachePath = DEFAULT_CODEX_MODELS_CACHE_PAT
           ? model.visibility.trim()
           : 'list',
         supportedInApi: model.supported_in_api === true,
+        supportedReasoningLevels: parseSupportedReasoningLevels(model.supported_reasoning_levels),
+        ...(defaultReasoningLevel ? { defaultReasoningLevel } : {}),
       });
     }
     return models;

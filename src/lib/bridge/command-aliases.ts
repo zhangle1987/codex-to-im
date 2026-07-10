@@ -1,4 +1,9 @@
-export const REASONING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+import {
+  parseReasoningEffort as parseRuntimeReasoningEffort,
+  type RuntimeReasoningEffort,
+} from '../../runtime-options.js';
+
+export const REASONING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 export const DEFAULT_DESKTOP_THREAD_LIST_LIMIT = 10;
 export const MAX_DESKTOP_THREAD_LIST_LIMIT = 200;
 
@@ -53,12 +58,11 @@ export function parseDesktopThreadListArgs(args: string): { showAll: boolean; li
   return { showAll: false, limit };
 }
 
-export function normalizeReasoningEffort(raw: string): typeof REASONING_LEVELS[number] | null {
+export function normalizeReasoningEffort(raw: string): RuntimeReasoningEffort | null {
   const token = raw.trim().toLowerCase();
   if (!token) return null;
-  if (REASONING_LEVELS.includes(token as typeof REASONING_LEVELS[number])) {
-    return token as typeof REASONING_LEVELS[number];
-  }
+  const named = parseRuntimeReasoningEffort(token);
+  if (named) return named;
 
   switch (token) {
     case '1':
@@ -71,6 +75,10 @@ export function normalizeReasoningEffort(raw: string): typeof REASONING_LEVELS[n
       return 'high';
     case '5':
       return 'xhigh';
+    case '6':
+      return 'max';
+    case '7':
+      return 'ultra';
     default:
       return null;
   }

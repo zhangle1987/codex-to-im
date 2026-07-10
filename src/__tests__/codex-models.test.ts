@@ -38,12 +38,14 @@ describe('listCachedCodexModels', () => {
           displayName: 'gpt-5.4',
           visibility: 'list',
           supportedInApi: true,
+          supportedReasoningLevels: [],
         },
         {
           slug: 'gpt-5.4-mini',
           displayName: 'GPT-5.4-Mini',
           visibility: 'list',
           supportedInApi: true,
+          supportedReasoningLevels: [],
         },
       ]);
     } finally {
@@ -90,17 +92,61 @@ describe('listCachedCodexModels', () => {
           displayName: 'gpt-5.4',
           visibility: 'list',
           supportedInApi: true,
+          supportedReasoningLevels: [],
         },
         {
           slug: 'gpt-5.3-codex-spark',
           displayName: 'gpt-5.3-codex-spark',
           visibility: 'list',
           supportedInApi: false,
+          supportedReasoningLevels: [],
         },
       ]);
       assert.deepEqual(findSelectableCodexModel('gpt-5-hidden', cachePath), null);
       assert.equal(isCliOnlyCodexModel(findSelectableCodexModel('gpt-5.3-codex-spark', cachePath)), true);
       assert.equal(isCliOnlyCodexModel(findSelectableCodexModel('gpt-5.4', cachePath)), false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('parses model-specific reasoning levels from the Codex model catalog', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-models-test-'));
+    const cachePath = path.join(tmpDir, 'models_cache.json');
+    try {
+      fs.writeFileSync(cachePath, JSON.stringify({
+        models: [
+          {
+            slug: 'gpt-5.6-sol',
+            display_name: 'GPT-5.6-Sol',
+            visibility: 'list',
+            supported_in_api: true,
+            default_reasoning_level: 'low',
+            supported_reasoning_levels: [
+              { effort: 'low', description: 'Fast responses with lighter reasoning' },
+              { effort: 'medium', description: 'Balances speed and reasoning depth' },
+              { effort: 'max', description: 'Maximum reasoning depth' },
+              { effort: 'max', description: 'Duplicate' },
+              { effort: '', description: 'Invalid' },
+            ],
+          },
+        ],
+      }), 'utf-8');
+
+      assert.deepEqual(listCachedCodexModels(cachePath), [
+        {
+          slug: 'gpt-5.6-sol',
+          displayName: 'GPT-5.6-Sol',
+          visibility: 'list',
+          supportedInApi: true,
+          defaultReasoningLevel: 'low',
+          supportedReasoningLevels: [
+            { effort: 'low', description: 'Fast responses with lighter reasoning' },
+            { effort: 'medium', description: 'Balances speed and reasoning depth' },
+            { effort: 'max', description: 'Maximum reasoning depth' },
+          ],
+        },
+      ]);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

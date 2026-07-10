@@ -19,7 +19,11 @@ import {
   type FeishuSite,
   type WeixinChannelConfig,
 } from './config.js';
-import { normalizeChannelId } from './runtime-options.js';
+import {
+  parseReasoningEffort,
+  normalizeChannelId,
+  type RuntimeReasoningEffort,
+} from './runtime-options.js';
 import { getCodexSessionsRoot, listDesktopSessions } from './desktop-sessions.js';
 import {
   type BindingSummary,
@@ -51,12 +55,12 @@ import {
 } from './weixin-login.js';
 import { listWeixinAccounts } from './weixin-store.js';
 import { listSelectableCodexModels, readConfiguredCodexModel } from './codex-models.js';
+import type { CachedCodexModel } from './codex-models.js';
 
 let port = 4781;
 const serverStartTime = new Date().toISOString();
 const AUTH_COOKIE_NAME = 'cti_ui_auth';
-const availableCodexModels = listSelectableCodexModels();
-const availableCodexModelSlugs = new Set(availableCodexModels.map((model) => model.slug));
+const FALLBACK_REASONING_EFFORTS: RuntimeReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
 const FEISHU_CHAT_LABEL_TTL_MS = 5 * 60 * 1000;
 const feishuChatLabelCache = new Map<string, { label: string; userId?: string; expiresAt: number }>();
 const feishuTenantTokenCache = new Map<
@@ -71,6 +75,55 @@ function parsePreferredPort(): number {
   const raw = Number(process.env.CTI_UI_PORT || '4781');
   if (!Number.isInteger(raw) || raw <= 0 || raw > 65535) return 4781;
   return raw;
+}
+
+function getAvailableCodexModels(): CachedCodexModel[] {
+  return listSelectableCodexModels();
+}
+
+function getAvailableCodexModelSlugs(models = getAvailableCodexModels()): Set<string> {
+  return new Set(models.map((model) => model.slug));
+}
+
+function getCodexModelMetadata(
+  modelSlug: string | null | undefined,
+  models = getAvailableCodexModels(),
+): CachedCodexModel | null {
+  if (!modelSlug) return null;
+  return models.find((model) => model.slug === modelSlug) || null;
+}
+
+function getSupportedReasoningEfforts(
+  modelSlug: string | null | undefined,
+  models = getAvailableCodexModels(),
+): RuntimeReasoningEffort[] {
+  const metadata = getCodexModelMetadata(modelSlug, models);
+  const levels = metadata?.supportedReasoningLevels
+    .map((level) => parseReasoningEffort(level.effort))
+    .filter((level): level is RuntimeReasoningEffort => Boolean(level)) || [];
+  return levels.length > 0 ? levels : FALLBACK_REASONING_EFFORTS;
+}
+
+function getDefaultReasoningEffort(
+  modelSlug: string | null | undefined,
+  models = getAvailableCodexModels(),
+): RuntimeReasoningEffort {
+  const metadata = getCodexModelMetadata(modelSlug, models);
+  const supported = getSupportedReasoningEfforts(modelSlug, models);
+  const catalogDefault = parseReasoningEffort(metadata?.defaultReasoningLevel);
+  if (catalogDefault && supported.includes(catalogDefault)) return catalogDefault;
+  if (supported.includes('medium')) return 'medium';
+  return supported[0] || 'medium';
+}
+
+function isReasoningEffortSupportedByModel(
+  value: RuntimeReasoningEffort,
+  modelSlug: string | null | undefined,
+  models = getAvailableCodexModels(),
+): boolean {
+  const metadata = getCodexModelMetadata(modelSlug, models);
+  if (!metadata || metadata.supportedReasoningLevels.length === 0) return true;
+  return getSupportedReasoningEfforts(modelSlug, models).includes(value);
 }
 
 async function canListen(portToCheck: number): Promise<boolean> {
@@ -328,12 +381,16 @@ function isRemoteAuthenticated(request: IncomingMessage, config: Config): boolea
 }
 
 function configToPayload(config: Config) {
+  const availableModels = getAvailableCodexModels();
+  const codexDefaultModel = readConfiguredCodexModel() || '';
+  const effectiveModel = config.defaultModel || codexDefaultModel;
   return {
     runtime: config.runtime,
     defaultWorkspaceRoot: config.defaultWorkspaceRoot || '',
     defaultModel: config.defaultModel || '',
-    codexDefaultModel: readConfiguredCodexModel() || '',
-    availableModels: availableCodexModels,
+    codexDefaultModel,
+    availableModels,
+    availableReasoningEfforts: getSupportedReasoningEfforts(effectiveModel, availableModels),
     defaultMode: config.defaultMode,
     historyMessageLimit: config.historyMessageLimit ?? 8,
     streamStatusIdleStartSeconds: config.streamStatusIdleStartSeconds ?? 180,
@@ -351,9 +408,33 @@ function configToPayload(config: Config) {
 
 function mergeConfig(payload: Record<string, unknown>): Config {
   const current = loadConfig();
+  const availableCodexModels = getAvailableCodexModels();
+  const availableCodexModelSlugs = getAvailableCodexModelSlugs(availableCodexModels);
+  const codexDefaultModel = readConfiguredCodexModel() || '';
   const rawDefaultModel = typeof payload.defaultModel === 'string'
     ? payload.defaultModel.trim()
     : undefined;
+  const nextDefaultModel = rawDefaultModel === undefined
+    ? current.defaultModel
+    : rawDefaultModel === ''
+      ? undefined
+      : availableCodexModelSlugs.has(rawDefaultModel)
+        ? rawDefaultModel
+        : current.defaultModel;
+  const currentEffectiveModel = current.defaultModel || codexDefaultModel;
+  const nextEffectiveModel = nextDefaultModel || codexDefaultModel;
+  const rawReasoningEffort = asString(payload.codexReasoningEffort);
+  const parsedReasoningEffort = parseReasoningEffort(rawReasoningEffort);
+  const preserveCurrentReasoning = parsedReasoningEffort
+    && parsedReasoningEffort === current.codexReasoningEffort
+    && nextEffectiveModel === currentEffectiveModel;
+  const nextReasoningEffort = parsedReasoningEffort
+    && (
+      isReasoningEffortSupportedByModel(parsedReasoningEffort, nextEffectiveModel, availableCodexModels)
+      || preserveCurrentReasoning
+    )
+    ? parsedReasoningEffort
+    : getDefaultReasoningEffort(nextEffectiveModel, availableCodexModels);
   const uiAllowLan = payload.uiAllowLan === true;
   const requestedUiAccessToken = asString(payload.uiAccessToken);
   const uiAccessToken = requestedUiAccessToken
@@ -365,13 +446,7 @@ function mergeConfig(payload: Record<string, unknown>): Config {
     runtime: 'codex',
     enabledChannels: current.enabledChannels,
     defaultWorkspaceRoot: asString(payload.defaultWorkspaceRoot),
-    defaultModel: rawDefaultModel === undefined
-      ? current.defaultModel
-      : rawDefaultModel === ''
-        ? undefined
-        : availableCodexModelSlugs.has(rawDefaultModel)
-          ? rawDefaultModel
-          : current.defaultModel,
+    defaultModel: nextDefaultModel,
     defaultMode: payload.defaultMode === 'plan' || payload.defaultMode === 'ask' ? payload.defaultMode : 'code',
     historyMessageLimit: asPositiveInt(payload.historyMessageLimit) || current.historyMessageLimit || 8,
     streamStatusIdleStartSeconds: asPositiveInt(payload.streamStatusIdleStartSeconds)
@@ -385,12 +460,7 @@ function mergeConfig(payload: Record<string, unknown>): Config {
       || payload.codexSandboxMode === 'danger-full-access'
       ? payload.codexSandboxMode
       : 'workspace-write',
-    codexReasoningEffort: payload.codexReasoningEffort === 'minimal'
-      || payload.codexReasoningEffort === 'low'
-      || payload.codexReasoningEffort === 'high'
-      || payload.codexReasoningEffort === 'xhigh'
-      ? payload.codexReasoningEffort
-      : 'medium',
+    codexReasoningEffort: nextReasoningEffort,
     uiAllowLan,
     uiAccessToken,
     channels: current.channels,
@@ -2320,16 +2390,10 @@ function renderHtml(): string {
                 </label>
                 <label>
                   Codex 思考级别
-                  <select id="codexReasoningEffort">
-                    <option value="medium">medium</option>
-                    <option value="minimal">minimal</option>
-                    <option value="low">low</option>
-                    <option value="high">high</option>
-                    <option value="xhigh">xhigh</option>
-                  </select>
+                  <select id="codexReasoningEffort"></select>
                 </label>
               </div>
-              <div class="small">未绑定的 IM 聊天会先进入临时草稿线程（等同 <code>/t 0</code>）；“默认工作空间”只用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。默认模型候选项来自启动时读取的 Codex 模型缓存：隐藏模型不会展示，CLI only 模型会标成“仅 IM / CLI”。留空则继续跟随 Codex 当前默认模型。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。上次响应距今配置只影响飞书长任务底部“上次响应距今 X”的出现时机。</div>
+              <div class="small">未绑定的 IM 聊天会先进入临时草稿线程（等同 <code>/t 0</code>）；“默认工作空间”只用于 <code>/new proj1</code> 这类相对项目名。留空时会按当前系统自动回退到 <code>~/cx2im</code>。默认模型候选项来自按需读取的 Codex 模型缓存：隐藏模型不会展示，CLI only 模型会标成“仅 IM / CLI”。留空则继续跟随 Codex 当前默认模型。文件系统权限是全局默认值，思考级别可在 IM 会话里再单独覆盖。上次响应距今配置只影响飞书长任务底部“上次响应距今 X”的出现时机。</div>
               <div class="small">当前需要重启 Bridge 的配置：<code>Runtime</code>、<code>允许在未信任 Git 目录运行 Codex</code>。通道实例的接入配置请在“通道”页维护。</div>
               <div class="checkbox-row">
                 <label class="checkbox"><input id="codexSkipGitRepoCheck" type="checkbox" checked /> 允许在未信任 Git 目录运行 Codex</label>
@@ -2404,7 +2468,7 @@ function renderHtml(): string {
                 <div class="command-list">
                   <div class="command-list-head"><div>命令</div><div>原始命令</div><div>说明</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/m</code></div><div class="command-col-original"><code>/mode</code></div><div class="command-col-desc">查看当前模式；可选 <code>code</code>、<code>plan</code>、<code>ask</code>。</div></div>
-                  <div class="command-item"><div class="command-col-command"><code>/r</code></div><div class="command-col-original"><code>/reasoning</code></div><div class="command-col-desc">查看当前思考级别；可选 <code>1=minimal</code>、<code>2=low</code>、<code>3=medium</code>、<code>4=high</code>、<code>5=xhigh</code>。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/r</code></div><div class="command-col-original"><code>/reasoning</code></div><div class="command-col-desc">查看当前思考级别；可选 <code>low</code>、<code>medium</code>、<code>high</code>、<code>xhigh</code>，部分新模型还支持 <code>max</code>、<code>ultra</code>。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/model [slug|default]</code></div><div class="command-col-original"><code>/model [slug|default]</code></div><div class="command-col-desc">查看或切换当前 IM 会话使用的模型；CLI only 模型会标注“仅 IM / CLI”，共享桌面线程只允许查看不允许切换。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0</code></div><div class="command-col-original"><code>/thread 0</code></div><div class="command-col-desc">切换到当前聊天的临时草稿线程。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0 reset</code></div><div class="command-col-original"><code>/thread 0 reset</code></div><div class="command-col-desc">丢弃当前草稿上下文并重建一条新的草稿线程。</div></div>
@@ -2556,6 +2620,89 @@ function renderHtml(): string {
 
         select.innerHTML = items.join('');
         select.value = currentValue;
+      }
+
+      function findAvailableModel(slug) {
+        if (!slug) return null;
+        return (state.availableModels || []).find((model) => model && model.slug === slug) || null;
+      }
+
+      function fallbackReasoningLevels(config) {
+        const efforts = Array.isArray(config && config.availableReasoningEfforts)
+          ? config.availableReasoningEfforts
+          : ['low', 'medium', 'high', 'xhigh'];
+        return efforts
+          .filter((effort) => typeof effort === 'string' && effort)
+          .map((effort) => ({ effort, description: '' }));
+      }
+
+      function reasoningLevelsForModel(config, modelSlug) {
+        const model = findAvailableModel(modelSlug);
+        const levels = model && Array.isArray(model.supportedReasoningLevels)
+          ? model.supportedReasoningLevels
+          : [];
+        if (levels.length === 0) return fallbackReasoningLevels(config);
+        return levels
+          .filter((level) => level && typeof level.effort === 'string' && level.effort)
+          .map((level) => ({
+            effort: level.effort,
+            description: typeof level.description === 'string' ? level.description : '',
+          }));
+      }
+
+      function defaultReasoningForModel(config, modelSlug, levels) {
+        const model = findAvailableModel(modelSlug);
+        const catalogDefault = model && typeof model.defaultReasoningLevel === 'string'
+          ? model.defaultReasoningLevel
+          : '';
+        if (catalogDefault && levels.some((level) => level.effort === catalogDefault)) {
+          return catalogDefault;
+        }
+        if (levels.some((level) => level.effort === 'medium')) return 'medium';
+        return levels[0] ? levels[0].effort : (config.codexReasoningEffort || 'medium');
+      }
+
+      function selectedDefaultModel(config) {
+        const select = document.getElementById('defaultModel');
+        const selected = select ? select.value : '';
+        return selected || (config && config.codexDefaultModel) || '';
+      }
+
+      function renderReasoningEffortOptions(config, options) {
+        const opts = options || {};
+        const select = document.getElementById('codexReasoningEffort');
+        const modelSlug = selectedDefaultModel(config || {});
+        const levels = reasoningLevelsForModel(config || {}, modelSlug);
+        const currentValue = typeof opts.currentValue === 'string'
+          ? opts.currentValue
+          : (config && typeof config.codexReasoningEffort === 'string' ? config.codexReasoningEffort : 'medium');
+        const preserveUnsupported = opts.preserveUnsupported !== false;
+        const modelDefault = defaultReasoningForModel(config || {}, modelSlug, levels);
+        const items = [];
+        const seen = new Set();
+
+        for (const level of levels) {
+          if (seen.has(level.effort)) continue;
+          seen.add(level.effort);
+          const labelParts = [level.effort];
+          if (level.effort === modelDefault) labelParts.push('模型默认');
+          if (level.description) labelParts.push(level.description);
+          items.push(
+            '<option value="' + escapeHtml(level.effort) + '">' + escapeHtml(labelParts.join(' · ')) + '</option>'
+          );
+        }
+
+        if (currentValue && !seen.has(currentValue) && preserveUnsupported) {
+          items.push(
+            '<option value="' + escapeHtml(currentValue) + '">当前配置值（当前模型未列出）：' + escapeHtml(currentValue) + '</option>'
+          );
+        }
+
+        select.innerHTML = items.join('');
+        select.value = seen.has(currentValue) || preserveUnsupported ? currentValue : modelDefault;
+        if (!select.value && items.length > 0) {
+          select.value = modelDefault;
+        }
       }
 
       function shortId(value) {
@@ -3422,9 +3569,9 @@ function renderHtml(): string {
         document.getElementById('streamStatusCheckIntervalSeconds').value = String(config.streamStatusCheckIntervalSeconds || 10);
         document.getElementById('defaultWorkspaceRoot').value = config.defaultWorkspaceRoot || '';
         renderDefaultModelOptions(config);
+        renderReasoningEffortOptions(config);
         document.getElementById('codexSkipGitRepoCheck').checked = config.codexSkipGitRepoCheck === true;
         document.getElementById('codexSandboxMode').value = config.codexSandboxMode || 'workspace-write';
-        document.getElementById('codexReasoningEffort').value = config.codexReasoningEffort || 'medium';
         document.getElementById('uiAllowLan').checked = config.uiAllowLan === true;
         document.getElementById('uiAccessToken').value = config.uiAccessToken || '';
         renderUiAccess();
@@ -3830,6 +3977,13 @@ function renderHtml(): string {
           window.crypto.randomUUID().replaceAll('-', '') + window.crypto.randomUUID().replaceAll('-', '');
         renderUiAccess();
         showMessage('configMessage', 'success', '已生成新的访问 token，点击“保存配置”后生效。');
+      });
+
+      document.getElementById('defaultModel').addEventListener('change', () => {
+        renderReasoningEffortOptions(state.config || {}, {
+          currentValue: document.getElementById('codexReasoningEffort').value,
+          preserveUnsupported: false,
+        });
       });
 
       document.getElementById('saveConfigBtn').addEventListener('click', async () => {

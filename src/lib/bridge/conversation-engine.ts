@@ -25,6 +25,7 @@ import {
 import {
   normalizeReasoningEffort,
   normalizeSandboxMode,
+  type RuntimeReasoningEffort,
 } from '../../runtime-options.js';
 import { consumeSseEvents } from './sse-stream-decoder.js';
 
@@ -72,7 +73,7 @@ export interface ConversationResult {
 function resolveReasoningEffort(
   store: ReturnType<typeof getBridgeContext>['store'],
   session: BridgeSession | null,
-): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' {
+): RuntimeReasoningEffort {
   return normalizeReasoningEffort(
     session?.reasoning_effort || store.getSetting('bridge_codex_reasoning_effort'),
   );
