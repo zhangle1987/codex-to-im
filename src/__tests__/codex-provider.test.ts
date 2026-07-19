@@ -469,6 +469,25 @@ describe('CodexProvider', () => {
     });
   });
 
+  it('maps forward-compatible cache write usage fields', async () => {
+    const { mapCodexUsage } = await import('../codex-provider.js');
+
+    assert.deepEqual(mapCodexUsage({
+      input_tokens: 8,
+      output_tokens: 3,
+      cache_read_input_tokens: 4,
+      cache_write_input_tokens: 2,
+      reasoning_output_tokens: 1,
+    }), {
+      input_tokens: 8,
+      output_tokens: 3,
+      cache_read_input_tokens: 4,
+      cache_creation_input_tokens: 2,
+      reasoning_output_tokens: 1,
+    });
+    assert.equal(mapCodexUsage(null), undefined);
+  });
+
   it('passes the abort signal to runStreamed so /stop can cancel the active turn', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');

@@ -1,6 +1,8 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { CTI_HOME } from './config.js';
+import { withFileLock, withFileLocks } from './file-lock.js';
 
 export interface WeixinAccountRecord {
   accountId: string;
@@ -27,17 +29,22 @@ function ensureDir(dir: string): void {
 }
 
 function atomicWrite(filePath: string, data: string): void {
-  const tmpPath = `${filePath}.tmp`;
-  fs.writeFileSync(tmpPath, data, 'utf-8');
-  fs.renameSync(tmpPath, filePath);
+  const tmpPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmpPath, data, 'utf-8');
+    fs.renameSync(tmpPath, filePath);
+  } finally {
+    try { fs.rmSync(tmpPath, { force: true }); } catch { /* best effort */ }
+  }
 }
 
 function readJson<T>(filePath: string, fallback: T): T {
   try {
     const raw = fs.readFileSync(filePath, 'utf-8');
     return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback;
+    throw new Error(`无法读取微信数据文件 ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -125,71 +132,75 @@ export function upsertWeixinAccount(params: {
   name?: string;
   enabled?: boolean;
 }): WeixinAccountRecord {
-  const accounts = readAccounts();
-  const existing = accounts.find((account) => account.accountId === params.accountId);
-  const timestamp = now();
+  return withFileLock(ACCOUNTS_PATH, () => {
+    const accounts = readAccounts();
+    const existing = accounts.find((account) => account.accountId === params.accountId);
+    const timestamp = now();
 
-  const account: WeixinAccountRecord = existing
-    ? {
-        ...existing,
-        userId: params.userId ?? existing.userId,
-        baseUrl: params.baseUrl ?? existing.baseUrl,
-        cdnBaseUrl: params.cdnBaseUrl ?? existing.cdnBaseUrl,
-        token: params.token ?? existing.token,
-        name: params.name ?? existing.name,
-        enabled: params.enabled ?? existing.enabled,
-        lastLoginAt: timestamp,
-        updatedAt: timestamp,
-      }
-    : {
-        accountId: params.accountId,
-        userId: params.userId ?? '',
-        baseUrl: params.baseUrl ?? DEFAULT_BASE_URL,
-        cdnBaseUrl: params.cdnBaseUrl ?? DEFAULT_CDN_BASE_URL,
-        token: params.token ?? '',
-        name: params.name ?? params.accountId,
-        enabled: params.enabled ?? true,
-        lastLoginAt: timestamp,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      };
+    const account: WeixinAccountRecord = existing
+      ? {
+          ...existing,
+          userId: params.userId ?? existing.userId,
+          baseUrl: params.baseUrl ?? existing.baseUrl,
+          cdnBaseUrl: params.cdnBaseUrl ?? existing.cdnBaseUrl,
+          token: params.token ?? existing.token,
+          name: params.name ?? existing.name,
+          enabled: params.enabled ?? existing.enabled,
+          lastLoginAt: timestamp,
+          updatedAt: timestamp,
+        }
+      : {
+          accountId: params.accountId,
+          userId: params.userId ?? '',
+          baseUrl: params.baseUrl ?? DEFAULT_BASE_URL,
+          cdnBaseUrl: params.cdnBaseUrl ?? DEFAULT_CDN_BASE_URL,
+          token: params.token ?? '',
+          name: params.name ?? params.accountId,
+          enabled: params.enabled ?? true,
+          lastLoginAt: timestamp,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
 
-  const nextAccounts = [
-    account,
-    ...accounts.filter((item) => item.accountId !== account.accountId),
-  ];
-  writeAccounts(nextAccounts);
-  return account;
+    writeAccounts([
+      account,
+      ...accounts.filter((item) => item.accountId !== account.accountId),
+    ]);
+    return account;
+  });
 }
 
 export function deleteWeixinAccount(accountId: string): boolean {
-  const accounts = readAccounts();
-  const nextAccounts = accounts.filter((account) => account.accountId !== accountId);
-  if (nextAccounts.length === accounts.length) {
-    return false;
-  }
-  writeAccounts(nextAccounts);
-  deleteWeixinContextTokensByAccount(accountId);
-  return true;
+  return withFileLocks([ACCOUNTS_PATH, CONTEXT_TOKENS_PATH], () => {
+    const accounts = readAccounts();
+    const nextAccounts = accounts.filter((account) => account.accountId !== accountId);
+    if (nextAccounts.length === accounts.length) return false;
+    writeAccounts(nextAccounts);
+    const tokens = readContextTokens();
+    writeContextTokens(Object.fromEntries(
+      Object.entries(tokens).filter(([key]) => !key.startsWith(`${accountId}::`)),
+    ));
+    return true;
+  });
 }
 
 export function setWeixinAccountEnabled(accountId: string, enabled: boolean): boolean {
-  const accounts = readAccounts();
-  let changed = false;
-  const nextAccounts = accounts.map((account) => {
-    if (account.accountId !== accountId) return account;
-    changed = true;
-    return {
-      ...account,
-      enabled,
-      updatedAt: now(),
-    };
-  });
+  return withFileLock(ACCOUNTS_PATH, () => {
+    const accounts = readAccounts();
+    let changed = false;
+    const nextAccounts = accounts.map((account) => {
+      if (account.accountId !== accountId) return account;
+      changed = true;
+      return {
+        ...account,
+        enabled,
+        updatedAt: now(),
+      };
+    });
 
-  if (changed) {
-    writeAccounts(nextAccounts);
-  }
-  return changed;
+    if (changed) writeAccounts(nextAccounts);
+    return changed;
+  });
 }
 
 export function getWeixinContextToken(accountId: string, peerUserId: string): string | undefined {
@@ -198,17 +209,21 @@ export function getWeixinContextToken(accountId: string, peerUserId: string): st
 }
 
 export function upsertWeixinContextToken(accountId: string, peerUserId: string, contextToken: string): void {
-  const tokens = readContextTokens();
-  tokens[contextKey(accountId, peerUserId)] = contextToken;
-  writeContextTokens(tokens);
+  withFileLock(CONTEXT_TOKENS_PATH, () => {
+    const tokens = readContextTokens();
+    tokens[contextKey(accountId, peerUserId)] = contextToken;
+    writeContextTokens(tokens);
+  });
 }
 
 export function deleteWeixinContextTokensByAccount(accountId: string): void {
-  const tokens = readContextTokens();
-  const nextTokens = Object.fromEntries(
-    Object.entries(tokens).filter(([key]) => !key.startsWith(`${accountId}::`)),
-  );
-  writeContextTokens(nextTokens);
+  withFileLock(CONTEXT_TOKENS_PATH, () => {
+    const tokens = readContextTokens();
+    const nextTokens = Object.fromEntries(
+      Object.entries(tokens).filter(([key]) => !key.startsWith(`${accountId}::`)),
+    );
+    writeContextTokens(nextTokens);
+  });
 }
 
 export function getWeixinAccountsFilePath(): string {

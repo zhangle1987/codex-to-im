@@ -60,6 +60,7 @@ const DEDUP_MAX = 1000;
 
 /** Max file download size (20 MB). */
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
+const ATTACHMENT_REQUEST_TIMEOUT_MS = 60_000;
 
 /** Feishu emoji type for completed tasks. */
 const COMPLETED_EMOJI = 'DONE';
@@ -98,16 +99,54 @@ interface FeishuCardState {
   lastSuccessfulFullRefreshAt: number | null;
 }
 
+interface FeishuCardFinalizationRequest {
+  chatId: string;
+  status: 'completed' | 'interrupted' | 'error';
+  responseText: string;
+  streamKey?: string;
+  retryIndex: number;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+}
+
+interface FeishuCardFinalizationAttemptResult {
+  finalized: boolean;
+  textCovered: boolean;
+  retryable: boolean;
+}
+
 /** Streaming card throttle interval (ms). */
 const CARD_THROTTLE_MS = 1000;
 const CARD_REQUEST_TIMEOUT_MS = 15_000;
 const CARD_FINALIZE_FLUSH_WAIT_EXTRA_MS = 1_000;
+const CARD_FINALIZE_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 30_000];
+const CARD_STOP_FINALIZE_TIMEOUT_MS = 2_000;
 const CARD_FULL_REFRESH_INTERVAL_MS = 5 * 60_000;
 const FINAL_CARD_FULL_TEXT_MAX_CHARS = 12_000;
 const FINAL_CARD_PREVIEW_CHARS = 4_000;
 const INITIAL_STREAMING_STATUS = '处理中';
 const EMPTY_STREAMING_TASKS = '';
 const EMPTY_STREAMING_TOOLS = '';
+
+export function validateFeishuAttachmentPath(
+  filePath: string,
+  maxSize = MAX_FILE_SIZE,
+): string | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return `Attachment not found: ${filePath}`;
+  }
+  if (!stat.isFile()) return `Attachment is not a regular file: ${filePath}`;
+  if (stat.size > maxSize) {
+    return `Attachment is too large: ${stat.size} bytes (max ${maxSize} bytes)`;
+  }
+  return null;
+}
+
+function normalizeAttachmentFileName(value: string): string {
+  return value.replace(/[\r\n"]/g, '_') || 'attachment.bin';
+}
 
 function shouldDeliverFinalTextSeparately(text: string): boolean {
   return text.trim().length > FINAL_CARD_FULL_TEXT_MAX_CHARS;
@@ -223,6 +262,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private activeCards = new Map<string, FeishuCardState>();
   /** In-flight card creation promises per stream key — prevents duplicate creation. */
   private cardCreatePromises = new Map<string, Promise<boolean>>();
+  /** Terminal card updates retained until CardKit confirms finalization. */
+  private pendingCardFinalizations = new Map<string, FeishuCardFinalizationRequest>();
+  private cardFinalizePromises = new Map<string, Promise<FeishuCardFinalizationAttemptResult>>();
   /** Cached tenant token for upload APIs. */
   private tenantTokenCache:
     | { token: string; expiresAt: number; appId: string; appSecret: string; domain: string }
@@ -231,6 +273,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private cardFinalizeFlushWaitExtraMs = CARD_FINALIZE_FLUSH_WAIT_EXTRA_MS;
   private cardFullRefreshIntervalMs = CARD_FULL_REFRESH_INTERVAL_MS;
   private cardTerminalReactionDelayMs = CARD_TERMINAL_REACTION_DELAY_MS;
+  private cardFinalizeRetryDelaysMs = CARD_FINALIZE_RETRY_DELAYS_MS;
+  private cardStopFinalizeTimeoutMs = CARD_STOP_FINALIZE_TIMEOUT_MS;
+  private stopping = false;
 
   constructor(instance?: AdapterRuntimeInstance) {
     super();
@@ -267,6 +312,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   async start(): Promise<void> {
     if (this.running) return;
+    this.stopping = false;
 
     const configError = this.validateConfig();
     if (configError) {
@@ -340,6 +386,30 @@ export class FeishuAdapter extends BaseChannelAdapter {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+    this.stopping = true;
+
+    const finalizations = Array.from(this.activeCards.entries()).map(([cardKey, state]) => {
+      const pending = this.pendingCardFinalizations.get(cardKey);
+      return this.finalizeCard(
+        state.chatId,
+        pending?.status || 'interrupted',
+        pending?.responseText || 'Bridge 服务正在停止，当前任务已中断。',
+        cardKey,
+      );
+    });
+    if (finalizations.length > 0) {
+      let stopTimeout: ReturnType<typeof setTimeout> | null = null;
+      try {
+        await Promise.race([
+          Promise.allSettled(finalizations),
+          new Promise<void>((resolve) => {
+            stopTimeout = setTimeout(resolve, Math.max(0, this.cardStopFinalizeTimeoutMs));
+          }),
+        ]);
+      } finally {
+        if (stopTimeout) clearTimeout(stopTimeout);
+      }
+    }
 
     // Close WebSocket connection (SDK exposes close())
     if (this.wsClient) {
@@ -359,8 +429,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
     for (const [, state] of this.activeCards) {
       if (state.throttleTimer) clearTimeout(state.throttleTimer);
     }
+    for (const request of this.pendingCardFinalizations.values()) {
+      if (request.retryTimer) clearTimeout(request.retryTimer);
+    }
     this.activeCards.clear();
     this.cardCreatePromises.clear();
+    this.pendingCardFinalizations.clear();
+    this.cardFinalizePromises.clear();
 
     // Clear state
     this.seenMessageIds.clear();
@@ -399,7 +474,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Called by bridge-manager via onMessageEnd().
    */
   onMessageEnd(chatId: string, streamKey?: string): void {
-    // Clean up any orphaned card state (normally cleaned by finalizeCard)
+    const cardKey = this.resolveStreamKey(chatId, streamKey);
+    if (this.pendingCardFinalizations.has(cardKey)) return;
     this.cleanupCard(chatId, streamKey);
   }
 
@@ -750,14 +826,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
         const remainingMs = deadline - Date.now();
         if (remainingMs <= 0) return false;
         const timedOut = Symbol('flush-timeout');
+        let flushTimeout: ReturnType<typeof setTimeout> | null = null;
         try {
           const result = await Promise.race([
             inFlight.then(() => null),
-            new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), remainingMs)),
+            new Promise<typeof timedOut>((resolve) => {
+              flushTimeout = setTimeout(() => resolve(timedOut), remainingMs);
+            }),
           ]);
           if (result === timedOut) return false;
         } catch {
           // best effort only
+        } finally {
+          if (flushTimeout) clearTimeout(flushTimeout);
         }
         continue;
       }
@@ -781,18 +862,74 @@ export class FeishuAdapter extends BaseChannelAdapter {
     streamKey?: string,
   ): Promise<boolean> {
     const cardKey = this.resolveStreamKey(chatId, streamKey);
-    // Wait for in-flight card creation to complete before finalizing
     const pending = this.cardCreatePromises.get(cardKey);
     if (pending) {
       try { await pending; } catch { /* creation failed — no card to finalize */ }
     }
 
-    const state = this.activeCards.get(cardKey);
-    if (!state || !this.restClient) return false;
-    const cardkit = (this.restClient as any).cardkit?.v1;
-    if (!cardkit?.card?.settings || !cardkit?.card?.update) return false;
+    const existingRequest = this.pendingCardFinalizations.get(cardKey);
+    if (existingRequest?.retryTimer) {
+      clearTimeout(existingRequest.retryTimer);
+    }
+    const request: FeishuCardFinalizationRequest = existingRequest || {
+      chatId,
+      status,
+      responseText,
+      streamKey,
+      retryIndex: 0,
+      retryTimer: null,
+    };
+    request.chatId = chatId;
+    request.status = status;
+    request.responseText = responseText;
+    request.streamKey = streamKey;
+    request.retryTimer = null;
+    this.pendingCardFinalizations.set(cardKey, request);
 
-    // Clear any pending throttle timer
+    const result = await this.runCardFinalizationAttempt(cardKey);
+    if (!result.finalized) {
+      if (result.retryable) {
+        this.scheduleCardFinalizationRetry(cardKey);
+      } else {
+        this.clearPendingCardFinalization(cardKey);
+      }
+    }
+    return result.finalized && result.textCovered;
+  }
+
+  private async runCardFinalizationAttempt(
+    cardKey: string,
+  ): Promise<FeishuCardFinalizationAttemptResult> {
+    const existing = this.cardFinalizePromises.get(cardKey);
+    if (existing) return existing;
+
+    const attempt = this.performCardFinalizationAttempt(cardKey);
+    this.cardFinalizePromises.set(cardKey, attempt);
+    try {
+      return await attempt;
+    } finally {
+      if (this.cardFinalizePromises.get(cardKey) === attempt) {
+        this.cardFinalizePromises.delete(cardKey);
+      }
+    }
+  }
+
+  private async performCardFinalizationAttempt(
+    cardKey: string,
+  ): Promise<FeishuCardFinalizationAttemptResult> {
+    const request = this.pendingCardFinalizations.get(cardKey);
+    const state = this.activeCards.get(cardKey);
+    if (!request || !state) {
+      return { finalized: false, textCovered: false, retryable: false };
+    }
+    if (!this.restClient) {
+      return { finalized: false, textCovered: false, retryable: !this.stopping };
+    }
+    const cardkit = (this.restClient as any).cardkit?.v1;
+    if (!cardkit?.card?.settings || !cardkit?.card?.update) {
+      return { finalized: false, textCovered: false, retryable: false };
+    }
+
     if (state.throttleTimer) {
       clearTimeout(state.throttleTimer);
       state.throttleTimer = null;
@@ -805,7 +942,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     try {
-      // Step 1: Close streaming mode
       state.sequence++;
       await this.withFeishuRequestTimeout(cardKey, 'card.settings', () => cardkit.card.settings({
         path: { card_id: state.cardId },
@@ -815,7 +951,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
       }));
 
-      // Step 2: Build and apply final card
       const statusLabels: Record<string, string> = {
         completed: '✅ Completed',
         interrupted: '⚠️ Interrupted',
@@ -823,16 +958,16 @@ export class FeishuAdapter extends BaseChannelAdapter {
       };
       const elapsedMs = Date.now() - state.startTime;
       const footer = {
-        status: statusLabels[status] || status,
+        status: statusLabels[request.status] || request.status,
         elapsed: formatElapsed(elapsedMs),
       };
 
       const existingText = state.pendingText || '';
       const trimmedExisting = existingText.trim();
-      const trimmedResponse = responseText.trim();
+      const trimmedResponse = request.responseText.trim();
       let finalText = trimmedResponse || trimmedExisting;
       if (
-        status === 'interrupted'
+        request.status === 'interrupted'
         && trimmedExisting
         && trimmedResponse
         && trimmedResponse !== trimmedExisting
@@ -843,7 +978,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
       const deliverTextSeparately = shouldDeliverFinalTextSeparately(finalText);
       const cardText = deliverTextSeparately ? buildFinalCardTextPreview(finalText) : finalText;
-      const finalCardJson = buildFinalCardJson(cardText, state.taskItems, state.toolCalls, footer, status);
+      const finalCardJson = buildFinalCardJson(cardText, state.taskItems, state.toolCalls, footer, request.status);
 
       state.sequence++;
       await this.withFeishuRequestTimeout(cardKey, 'card.update', () => cardkit.card.update({
@@ -855,11 +990,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }));
 
       this.activeCards.delete(cardKey);
-      console.log(`[feishu-adapter] Card finalized: streamKey=${cardKey}, cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
+      this.clearPendingCardFinalization(cardKey);
+      console.log(`[feishu-adapter] Card finalized: streamKey=${cardKey}, cardId=${state.cardId}, status=${request.status}, elapsed=${formatElapsed(elapsedMs)}`);
 
-      const terminalReactionEmoji = status === 'completed'
+      const terminalReactionEmoji = request.status === 'completed'
         ? COMPLETED_EMOJI
-        : status === 'error'
+        : request.status === 'error'
           ? ERROR_EMOJI
           : null;
       if (terminalReactionEmoji && this.hasTerminalReactionApi()) {
@@ -867,13 +1003,48 @@ export class FeishuAdapter extends BaseChannelAdapter {
         await this.addTerminalReaction(cardKey, state.messageId, terminalReactionEmoji);
       }
 
-      return !deliverTextSeparately;
+      return { finalized: true, textCovered: !deliverTextSeparately, retryable: false };
     } catch (err) {
       console.warn('[feishu-adapter] Card finalize failed:', err instanceof Error ? err.message : err);
-      return false;
-    } finally {
-      this.activeCards.delete(cardKey);
+      return { finalized: false, textCovered: false, retryable: true };
     }
+  }
+
+  private scheduleCardFinalizationRetry(cardKey: string): void {
+    const request = this.pendingCardFinalizations.get(cardKey);
+    if (!request || request.retryTimer || this.stopping || !this.restClient) return;
+
+    if (request.retryIndex >= this.cardFinalizeRetryDelaysMs.length) {
+      console.warn(`[feishu-adapter] Card finalize retries exhausted: streamKey=${cardKey}`);
+      this.cleanupCard(request.chatId, request.streamKey || cardKey);
+      return;
+    }
+
+    const delayMs = Math.max(0, this.cardFinalizeRetryDelaysMs[request.retryIndex] || 0);
+    request.retryIndex += 1;
+    request.retryTimer = setTimeout(() => {
+      const current = this.pendingCardFinalizations.get(cardKey);
+      if (!current) return;
+      current.retryTimer = null;
+      void this.runCardFinalizationAttempt(cardKey).then((result) => {
+        if (result.finalized) return;
+        if (result.retryable) {
+          this.scheduleCardFinalizationRetry(cardKey);
+        } else {
+          this.cleanupCard(current.chatId, current.streamKey || cardKey);
+        }
+      }).catch((error) => {
+        console.warn('[feishu-adapter] Card finalize retry failed:', error instanceof Error ? error.message : error);
+        this.scheduleCardFinalizationRetry(cardKey);
+      });
+    }, delayMs);
+    request.retryTimer.unref?.();
+  }
+
+  private clearPendingCardFinalization(cardKey: string): void {
+    const request = this.pendingCardFinalizations.get(cardKey);
+    if (request?.retryTimer) clearTimeout(request.retryTimer);
+    this.pendingCardFinalizations.delete(cardKey);
   }
 
   private hasTerminalReactionApi(): boolean {
@@ -910,6 +1081,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private cleanupCard(chatId: string, streamKey?: string): void {
     const cardKey = this.resolveStreamKey(chatId, streamKey);
     this.cardCreatePromises.delete(cardKey);
+    this.clearPendingCardFinalization(cardKey);
     const state = this.activeCards.get(cardKey);
     if (!state) return;
     if (state.throttleTimer) {
@@ -1213,6 +1385,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         app_id: appId,
         app_secret: appSecret,
       }),
+      signal: AbortSignal.timeout(CARD_REQUEST_TIMEOUT_MS),
     });
     const data = await response.json() as {
       code?: number;
@@ -1255,9 +1428,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     attachment: OutboundAttachment,
     replyToMessageId?: string,
   ): Promise<SendResult> {
-    if (!fs.existsSync(attachment.path)) {
-      return { ok: false, error: `Attachment not found: ${attachment.path}` };
-    }
+    const validationError = validateFeishuAttachmentPath(attachment.path);
+    if (validationError) return { ok: false, error: validationError };
 
     try {
       if (attachment.kind === 'image') {
@@ -1284,15 +1456,18 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private async uploadImage(attachment: OutboundAttachment): Promise<string> {
     const token = await this.getTenantAccessToken();
-    const fileName = attachment.name || path.basename(attachment.path) || 'image.png';
+    const fileName = normalizeAttachmentFileName(
+      attachment.name || path.basename(attachment.path) || 'image.png',
+    );
     const form = new FormData();
     form.set('image_type', 'message');
-    form.set('image', new Blob([fs.readFileSync(attachment.path)]), fileName);
+    form.set('image', new Blob([await fs.promises.readFile(attachment.path)]), fileName);
 
     const response = await fetch(`${this.getOpenApiBaseUrl()}/open-apis/im/v1/images`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
       body: form,
+      signal: AbortSignal.timeout(ATTACHMENT_REQUEST_TIMEOUT_MS),
     });
     const data = await response.json() as {
       code?: number;
@@ -1307,16 +1482,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   private async uploadFile(attachment: OutboundAttachment): Promise<string> {
     const token = await this.getTenantAccessToken();
-    const fileName = attachment.name || path.basename(attachment.path) || 'attachment.bin';
+    const fileName = normalizeAttachmentFileName(
+      attachment.name || path.basename(attachment.path) || 'attachment.bin',
+    );
     const form = new FormData();
     form.set('file_type', 'stream');
     form.set('file_name', fileName);
-    form.set('file', new Blob([fs.readFileSync(attachment.path)]), fileName);
+    form.set('file', new Blob([await fs.promises.readFile(attachment.path)]), fileName);
 
     const response = await fetch(`${this.getOpenApiBaseUrl()}/open-apis/im/v1/files`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
       body: form,
+      signal: AbortSignal.timeout(ATTACHMENT_REQUEST_TIMEOUT_MS),
     });
     const data = await response.json() as {
       code?: number;

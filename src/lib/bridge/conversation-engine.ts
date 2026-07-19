@@ -58,16 +58,115 @@ export type OnToolEvent = (toolId: string, toolName: string, status: 'running' |
 export type OnTaskEvent = (tasks: TaskProgressInfo[]) => void;
 export type OnStatusNote = (note: string | null) => void;
 
+export type ConversationErrorCode = 'session_busy';
+
+const MAX_INBOUND_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+const MAX_INBOUND_ATTACHMENTS_TOTAL_BYTES = 120 * 1024 * 1024;
+
+export function validateInboundAttachmentSizes(
+  files: FileAttachment[] | undefined,
+  maxFileBytes = MAX_INBOUND_ATTACHMENT_BYTES,
+  maxTotalBytes = MAX_INBOUND_ATTACHMENTS_TOTAL_BYTES,
+): string | null {
+  if (!files || files.length === 0) return null;
+
+  let totalBytes = 0;
+  for (const file of files) {
+    const encodedSize = typeof file.data === 'string'
+      ? Buffer.byteLength(file.data, 'base64')
+      : 0;
+    const fileSize = Math.max(0, Number(file.size) || 0, encodedSize);
+    if (fileSize > maxFileBytes) {
+      return `Attachment "${file.name}" is too large (${fileSize} bytes; max ${maxFileBytes} bytes).`;
+    }
+    totalBytes += fileSize;
+    if (totalBytes > maxTotalBytes) {
+      return `Attachments are too large in total (${totalBytes} bytes; max ${maxTotalBytes} bytes).`;
+    }
+  }
+  return null;
+}
+
 export interface ConversationResult {
   responseText: string;
   outboundAttachments: OutboundAttachment[];
   tokenUsage: TokenUsage | null;
   hasError: boolean;
   errorMessage: string;
+  errorCode?: ConversationErrorCode;
   /** Permission request events that were forwarded during streaming */
   permissionRequests: PermissionRequestInfo[];
   /** SDK session ID captured from status/result events, for session resume */
   sdkSessionId: string | null;
+}
+
+const DEFAULT_DESKTOP_BUSY_RETRY_DELAYS_MS = [
+  5_000,
+  10_000,
+  15_000,
+  30_000,
+  30_000,
+];
+
+export function isSessionBusyErrorMessage(message: string | null | undefined): boolean {
+  return (message || '').toLowerCase().includes('session is busy processing another request');
+}
+
+function isDesktopBackedSessionForBusyRetry(session: BridgeSession | null): boolean {
+  if (session?.thread_origin !== 'desktop') return false;
+  return Boolean(session.desktop_thread_id || session.sdk_session_id || session.codex_thread_id);
+}
+
+function getDesktopBusyRetryDelaysMs(): number[] {
+  const configured = process.env.CTI_DESKTOP_BUSY_RETRY_DELAYS_MS;
+  if (!configured?.trim()) return DEFAULT_DESKTOP_BUSY_RETRY_DELAYS_MS;
+
+  const delays = configured
+    .split(',')
+    .map((part) => parseInt(part.trim(), 10))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  return delays.length > 0 ? delays : DEFAULT_DESKTOP_BUSY_RETRY_DELAYS_MS;
+}
+
+function isRetryableDesktopBusyResult(result: ConversationResult): boolean {
+  return result.hasError
+    && (result.errorCode === 'session_busy' || isSessionBusyErrorMessage(result.errorMessage))
+    && !result.responseText.trim()
+    && result.outboundAttachments.length === 0
+    && result.permissionRequests.length === 0;
+}
+
+function formatDesktopBusyRetryNote(attempt: number, maxAttempts: number, delayMs: number): string {
+  const delaySeconds = Math.ceil(delayMs / 1000);
+  const delayText = delaySeconds > 0 ? `${delaySeconds} 秒后` : '马上';
+  return `Codex Desktop thread 仍在处理上一轮请求，${delayText}重试（${attempt}/${maxAttempts}）。`;
+}
+
+function buildDesktopBusyExhaustedMessage(originalMessage: string): string {
+  const detail = originalMessage?.trim();
+  return detail
+    ? `Codex Desktop thread 仍在处理上一轮请求，请稍后重试。原始错误：${detail}`
+    : 'Codex Desktop thread 仍在处理上一轮请求，请稍后重试。';
+}
+
+function waitForRetryDelay(delayMs: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  if (delayMs <= 0) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (completed: boolean) => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      signal.removeEventListener('abort', onAbort);
+      resolve(completed);
+    };
+    const onAbort = () => finish(false);
+    timer = setTimeout(() => finish(true), delayMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function resolveReasoningEffort(
@@ -145,6 +244,19 @@ export async function processMessage(
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
 
+  const attachmentValidationError = validateInboundAttachmentSizes(files);
+  if (attachmentValidationError) {
+    return {
+      responseText: '',
+      outboundAttachments: [],
+      tokenUsage: null,
+      hasError: true,
+      errorMessage: attachmentValidationError,
+      permissionRequests: [],
+      sdkSessionId: null,
+    };
+  }
+
   // Acquire session lock
   const lockId = crypto.randomBytes(8).toString('hex');
   const lockAcquired = store.acquireSessionLock(sessionId, lockId, `bridge-${binding.channelType}`, 600);
@@ -155,6 +267,7 @@ export async function processMessage(
       tokenUsage: null,
       hasError: true,
       errorMessage: 'Session is busy processing another request',
+      errorCode: 'session_busy',
       permissionRequests: [],
       sdkSessionId: null,
     };
@@ -181,6 +294,7 @@ export async function processMessage(
     let persistedFileMeta: PersistedAttachmentMeta[] = [];
     if (files && files.length > 0) {
       if (workDir) {
+        const createdFilePaths: string[] = [];
         try {
           const uploadDir = path.join(workDir, '.codepilot-uploads');
           if (!fs.existsSync(uploadDir)) {
@@ -188,9 +302,13 @@ export async function processMessage(
           }
           const fileMeta = files.map((f) => {
             const safeName = path.basename(f.name).replace(/[^a-zA-Z0-9._-]/g, '_');
-            const filePath = path.join(uploadDir, `${Date.now()}-${safeName}`);
+            const filePath = path.join(uploadDir, `${crypto.randomUUID()}-${safeName || 'attachment.bin'}`);
             const buffer = Buffer.from(f.data, 'base64');
+            if (buffer.length > MAX_INBOUND_ATTACHMENT_BYTES) {
+              throw new Error(`Attachment "${f.name}" exceeds the maximum size after decoding`);
+            }
             fs.writeFileSync(filePath, buffer);
+            createdFilePaths.push(filePath);
             return { id: f.id, name: f.name, type: f.type, size: buffer.length, filePath };
           });
           persistedFileMeta = fileMeta;
@@ -200,6 +318,9 @@ export async function processMessage(
           });
           savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${text}`;
         } catch (err) {
+          for (const filePath of createdFilePaths) {
+            try { fs.rmSync(filePath, { force: true }); } catch { /* best effort */ }
+          }
           console.warn('[conversation-engine] Failed to persist file attachments:', err instanceof Error ? err.message : err);
           savedContent = `[${files.length} attachment(s) attached] ${text}`;
         }
@@ -249,38 +370,73 @@ export async function processMessage(
       }
     }
 
-    const stream = llm.streamChat({
-      prompt: promptText,
-      sessionId,
-      sdkSessionId: binding.sdkSessionId || undefined,
-      model: effectiveModel,
-      forceModel: !binding.sdkSessionId && Boolean(effectiveModel),
-      sandboxMode,
-      modelReasoningEffort,
-      systemPrompt: session?.system_prompt || undefined,
-      workingDirectory: workDir || undefined,
-      abortController,
-      permissionMode,
-      provider: resolvedProvider,
-      conversationHistory: historyMsgs,
-      files: llmFiles,
-      onRuntimeStatusChange: (status: string) => {
-        try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
-      },
-    });
+    const desktopBusyRetryDelaysMs = isDesktopBackedSessionForBusyRetry(session)
+      ? getDesktopBusyRetryDelaysMs()
+      : [];
+    let desktopBusyRetryCount = 0;
 
-    // Consume the stream server-side (replicate collectStreamResponse pattern).
-    // Permission requests are forwarded immediately via the callback during streaming
-    // because the stream blocks until permission is resolved — we can't wait until after.
-    return await consumeStream(
-      stream,
-      sessionId,
-      onPermissionRequest,
-      onPartialText,
-      onToolEvent,
-      onTaskEvent,
-      onStatusNote,
-    );
+    while (true) {
+      const stream = llm.streamChat({
+        prompt: promptText,
+        sessionId,
+        sdkSessionId: binding.sdkSessionId || undefined,
+        model: effectiveModel,
+        forceModel: !binding.sdkSessionId && Boolean(effectiveModel),
+        sandboxMode,
+        modelReasoningEffort,
+        systemPrompt: session?.system_prompt || undefined,
+        workingDirectory: workDir || undefined,
+        abortController,
+        permissionMode,
+        provider: resolvedProvider,
+        conversationHistory: historyMsgs,
+        files: llmFiles,
+        onRuntimeStatusChange: (status: string) => {
+          try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
+        },
+      });
+
+      // Consume the stream server-side (replicate collectStreamResponse pattern).
+      // Permission requests are forwarded immediately via the callback during streaming
+      // because the stream blocks until the permission is resolved.
+      const result = await consumeStream(
+        stream,
+        sessionId,
+        onPermissionRequest,
+        onPartialText,
+        onToolEvent,
+        onTaskEvent,
+        onStatusNote,
+      );
+
+      if (!isRetryableDesktopBusyResult(result) || desktopBusyRetryDelaysMs.length === 0) {
+        return result;
+      }
+
+      if (desktopBusyRetryCount >= desktopBusyRetryDelaysMs.length) {
+        return {
+          ...result,
+          errorMessage: buildDesktopBusyExhaustedMessage(result.errorMessage),
+        };
+      }
+
+      const delayMs = desktopBusyRetryDelaysMs[desktopBusyRetryCount];
+      desktopBusyRetryCount += 1;
+      onStatusNote?.(formatDesktopBusyRetryNote(
+        desktopBusyRetryCount,
+        desktopBusyRetryDelaysMs.length,
+        delayMs,
+      ));
+
+      const shouldRetry = await waitForRetryDelay(delayMs, abortController.signal);
+      if (!shouldRetry) {
+        return {
+          ...result,
+          errorMessage: 'Task stopped by user',
+          errorCode: undefined,
+        };
+      }
+    }
   } finally {
     clearInterval(renewalInterval);
     store.releaseSessionLock(sessionId, lockId);
@@ -309,10 +465,54 @@ async function consumeStream(
   let tokenUsage: TokenUsage | null = null;
   let hasError = false;
   let errorMessage = '';
+  let errorCode: ConversationErrorCode | undefined;
   const seenToolResultIds = new Set<string>();
   const permissionRequests: PermissionRequestInfo[] = [];
   let capturedSdkSessionId: string | null = null;
-  const outboundAttachments: OutboundAttachment[] = [];
+
+  const finalizeConsumedContent = (): {
+    responseText: string;
+    outboundAttachments: OutboundAttachment[];
+  } => {
+    if (currentText.trim()) {
+      contentBlocks.push({ type: 'text', text: currentText });
+      currentText = '';
+    }
+
+    const outboundAttachments: OutboundAttachment[] = [];
+    for (const block of contentBlocks) {
+      if (block.type !== 'text') continue;
+      const parsed = collectFinalResponseArtifacts(block.text);
+      block.text = parsed.text;
+      outboundAttachments.push(...parsed.attachments);
+    }
+
+    if (contentBlocks.length > 0) {
+      const hasToolBlocks = contentBlocks.some(
+        (block) => block.type === 'tool_use' || block.type === 'tool_result',
+      );
+      const content = hasToolBlocks
+        ? JSON.stringify(contentBlocks)
+        : contentBlocks
+            .filter((block): block is Extract<MessageContentBlock, { type: 'text' }> => block.type === 'text')
+            .map((block) => block.text)
+            .join('\n\n')
+            .trim();
+
+      if (content) {
+        store.addMessage(sessionId, 'assistant', content, tokenUsage ? JSON.stringify(tokenUsage) : null);
+      }
+    }
+
+    return {
+      responseText: contentBlocks
+        .filter((block): block is Extract<MessageContentBlock, { type: 'text' }> => block.type === 'text')
+        .map((block) => block.text)
+        .join('')
+        .trim(),
+      outboundAttachments: dedupeOutboundAttachments(outboundAttachments),
+    };
+  };
 
   try {
     await consumeSseEvents(stream, async (event: SSEEvent) => {
@@ -431,6 +631,9 @@ async function consumeStream(
         case 'error':
           hasError = true;
           errorMessage = event.data || 'Unknown error';
+          if (isSessionBusyErrorMessage(errorMessage)) {
+            errorCode = 'session_busy';
+          }
           break;
 
         case 'result': {
@@ -450,82 +653,32 @@ async function consumeStream(
       }
     });
 
-    // Flush remaining text
-    if (currentText.trim()) {
-      contentBlocks.push({ type: 'text', text: currentText });
-    }
-
-    // Save assistant message
-    if (contentBlocks.length > 0) {
-      for (const block of contentBlocks) {
-        if (block.type !== 'text') continue;
-        const parsed = collectFinalResponseArtifacts(block.text);
-        block.text = parsed.text;
-        outboundAttachments.push(...parsed.attachments);
-      }
-
-      const hasToolBlocks = contentBlocks.some(
-        (b) => b.type === 'tool_use' || b.type === 'tool_result'
-      );
-      const content = hasToolBlocks
-        ? JSON.stringify(contentBlocks)
-        : contentBlocks
-            .filter((b): b is Extract<MessageContentBlock, { type: 'text' }> => b.type === 'text')
-            .map((b) => b.text)
-            .join('\n\n')
-            .trim();
-
-      if (content) {
-        store.addMessage(sessionId, 'assistant', content, tokenUsage ? JSON.stringify(tokenUsage) : null);
-      }
-    }
-
-    // Extract text-only response for IM delivery
-    const responseText = contentBlocks
-      .filter((b): b is Extract<MessageContentBlock, { type: 'text' }> => b.type === 'text')
-      .map((b) => b.text)
-      .join('')
-      .trim();
+    const finalizedContent = finalizeConsumedContent();
 
     return {
-      responseText,
-      outboundAttachments: dedupeOutboundAttachments(outboundAttachments),
+      responseText: finalizedContent.responseText,
+      outboundAttachments: finalizedContent.outboundAttachments,
       tokenUsage,
       hasError,
       errorMessage,
+      errorCode,
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
     };
   } catch (e) {
-    // Best-effort save on stream error
-    if (currentText.trim()) {
-      contentBlocks.push({ type: 'text', text: currentText });
-    }
-    if (contentBlocks.length > 0) {
-      const hasToolBlocks = contentBlocks.some(
-        (b) => b.type === 'tool_use' || b.type === 'tool_result'
-      );
-      const content = hasToolBlocks
-        ? JSON.stringify(contentBlocks)
-        : contentBlocks
-            .filter((b): b is Extract<MessageContentBlock, { type: 'text' }> => b.type === 'text')
-            .map((b) => b.text)
-            .join('\n\n')
-            .trim();
-      if (content) {
-        store.addMessage(sessionId, 'assistant', content);
-      }
-    }
+    const finalizedContent = finalizeConsumedContent();
 
     const isAbort = e instanceof DOMException && e.name === 'AbortError'
       || e instanceof Error && e.name === 'AbortError';
+    const fallbackErrorMessage = isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error');
 
     return {
-      responseText: '',
-      outboundAttachments: [],
+      responseText: finalizedContent.responseText,
+      outboundAttachments: finalizedContent.outboundAttachments,
       tokenUsage,
       hasError: true,
-      errorMessage: isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error'),
+      errorMessage: fallbackErrorMessage,
+      errorCode: isSessionBusyErrorMessage(fallbackErrorMessage) ? 'session_busy' : undefined,
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
     };

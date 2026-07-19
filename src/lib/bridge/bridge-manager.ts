@@ -11,7 +11,7 @@ import type {
   BridgeStatus,
   InboundMessage,
 } from './types.js';
-import type { BaseChannelAdapter } from './channel-adapter.js';
+import { buildInboundDedupKey, type BaseChannelAdapter } from './channel-adapter.js';
 import type { BridgeSession, PermissionLinkRecord } from './host.js';
 import { inspect } from 'node:util';
 // Side-effect import: triggers self-registration of all adapter factories
@@ -704,13 +704,29 @@ async function handleMessage(
   meta.lastMessageAt = new Date().toISOString();
   adapterState.adapterMeta.set(adapter.channelType, meta);
 
-  // Acknowledge the update offset after processing completes (or fails).
-  // This ensures the adapter only advances its committed offset once the
-  // message has been fully handled, preventing message loss on crash.
-  const ack = () => {
-    if (msg.updateId != null && adapter.acknowledgeUpdate) {
-      adapter.acknowledgeUpdate(msg.updateId);
+  let updateSettled = false;
+  const reject = () => {
+    if (updateSettled) return;
+    updateSettled = true;
+    if (msg.updateId != null) {
+      adapter.rejectUpdate?.(msg.updateId, msg.messageId);
     }
+  };
+
+  // Persist successful handling before advancing the adapter cursor. A replay
+  // after a sibling message fails can then skip work that already completed.
+  const ack = () => {
+    if (updateSettled) return;
+    if (msg.updateId != null) {
+      try {
+        store.insertDedup(buildInboundDedupKey(adapter.channelType, msg.messageId));
+      } catch (error) {
+        reject();
+        throw error;
+      }
+      adapter.acknowledgeUpdate?.(msg.updateId, msg.messageId);
+    }
+    updateSettled = true;
   };
 
   // Handle callback queries (permission buttons)
@@ -837,8 +853,7 @@ async function handleMessage(
 
   if (!text && !hasAttachments) { ack(); return; }
 
-  try {
-    await runInteractiveMessage(adapter, msg, text, hasAttachments ? msg.attachments : undefined, {
+  await runInteractiveMessage(adapter, msg, text, hasAttachments ? msg.attachments : undefined, {
       registerInteractiveTask: (task) => INTERACTIVE_RUNTIME.registerInteractiveTask(task),
       registerBridgeTurn: (turn) => TURN_COORDINATOR.registerInteractiveTurn(turn),
       resetMirrorSessionForInteractiveRun,
@@ -861,10 +876,8 @@ async function handleMessage(
       deliverResponse,
       persistSdkSessionUpdate,
       desktopTerminalFinalizationTimeoutMs: DESKTOP_TERMINAL_FINALIZATION_TIMEOUT_MS,
-    });
-  } finally {
-    ack();
-  }
+  });
+  ack();
 }
 
 /**

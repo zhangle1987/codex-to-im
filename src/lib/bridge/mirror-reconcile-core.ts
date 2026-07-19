@@ -55,8 +55,30 @@ export function isMirrorSnapshotUnchanged(
 ): boolean {
   return !subscription.dirty
     && subscription.fileIdentity === snapshot.identity
+    && subscription.fileOffset === snapshot.size
+    && !subscription.trailingText
     && subscription.fileSize === snapshot.size
     && subscription.fileMtimeMs === snapshot.mtimeMs;
+}
+
+function findLastCompleteLineOffset(filePath: string, fileSize: number): number {
+  if (fileSize <= 0) return 0;
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const chunkSize = 64 * 1024;
+    let end = fileSize;
+    while (end > 0) {
+      const start = Math.max(0, end - chunkSize);
+      const buffer = Buffer.alloc(end - start);
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, start);
+      const newlineIndex = buffer.subarray(0, bytesRead).lastIndexOf(0x0a);
+      if (newlineIndex >= 0) return start + newlineIndex + 1;
+      end = start;
+    }
+    return 0;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 export function readMirrorDeliverableRecords(
@@ -77,6 +99,19 @@ export function readMirrorDeliverableRecords(
       && snapshot.mtimeMs !== subscription.fileMtimeMs
     );
 
+  if (requiresFullRecover && !subscription.cursor.initialized && !subscription.lastDeliveredAt) {
+    subscription.cursor = { initialized: true, lastEventCount: 0 };
+    subscription.trailingText = '';
+    subscription.fileOffset = findLastCompleteLineOffset(subscription.filePath!, snapshot.size);
+    subscription.activeMirrorTurnId = null;
+    subscription.activeSpecialCallIds.clear();
+    subscription.fileSize = snapshot.size;
+    subscription.fileMtimeMs = snapshot.mtimeMs;
+    subscription.fileIdentity = snapshot.identity;
+    subscription.dirty = false;
+    return { records: [], unknownKinds: [] };
+  }
+
   if (requiresFullRecover) {
     const previousCursor = subscription.cursor;
     const fullDelta = readDesktopSessionMirrorRecordDeltaByFilePath(
@@ -90,8 +125,8 @@ export function readMirrorDeliverableRecords(
     const delta = reconcileDesktopMirrorCursor(subscription.cursor, fullDelta.records);
     subscription.cursor = delta.nextCursor;
     deliverableRecords = filterDuplicateAssistantEvents(previousCursor, delta.deliverableRecords);
-    subscription.trailingText = '';
-    subscription.fileOffset = snapshot.size;
+    subscription.trailingText = fullDelta.trailingText;
+    subscription.fileOffset = fullDelta.nextOffset;
     subscription.activeMirrorTurnId = fullDelta.nextTurnId;
     subscription.activeSpecialCallIds = new Set(fullDelta.nextSpecialCallIds);
     unknownKinds = fullDelta.unknownKinds;

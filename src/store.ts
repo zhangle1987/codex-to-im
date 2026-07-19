@@ -21,9 +21,18 @@ import type {
 } from './lib/bridge/host.js';
 import type { ChannelBinding, ChannelType } from './lib/bridge/types.js';
 import { CTI_HOME, configToSettings, findChannelInstance, loadConfig } from './config.js';
+import { withFileLock, withFileLocks } from './file-lock.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
+const SESSIONS_PATH = path.join(DATA_DIR, 'sessions.json');
+const BINDINGS_PATH = path.join(DATA_DIR, 'bindings.json');
+const PERMISSIONS_PATH = path.join(DATA_DIR, 'permissions.json');
+const OFFSETS_PATH = path.join(DATA_DIR, 'offsets.json');
+const DEDUP_PATH = path.join(DATA_DIR, 'dedup.json');
+const AUDIT_PATH = path.join(DATA_DIR, 'audit.json');
+const DEFAULT_DEDUP_TTL_MS = 5 * 60 * 1000;
+const INBOUND_DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
 
 // ── Helpers ──
 
@@ -32,17 +41,26 @@ function ensureDir(dir: string): void {
 }
 
 function atomicWrite(filePath: string, data: string): void {
-  const tmp = filePath + '.tmp';
-  fs.writeFileSync(tmp, data, 'utf-8');
-  fs.renameSync(tmp, filePath);
+  const tmp = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, data, 'utf-8');
+    fs.renameSync(tmp, filePath);
+  } finally {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+  }
+}
+
+function dedupTtlMs(key: string): number {
+  return key.startsWith('inbound:') ? INBOUND_DEDUP_TTL_MS : DEFAULT_DEDUP_TTL_MS;
 }
 
 function readJson<T>(filePath: string, fallback: T): T {
   try {
     const raw = fs.readFileSync(filePath, 'utf-8');
     return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback;
+    throw new Error(`无法读取 JSON 数据文件 ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -149,7 +167,7 @@ export class JsonFileStore implements BridgeStore {
 
     // Permission links
     const perms = readJson<Record<string, PermissionLinkRecord>>(
-      path.join(DATA_DIR, 'permissions.json'),
+      PERMISSIONS_PATH,
       {},
     );
     for (const [id, p] of Object.entries(perms)) {
@@ -158,7 +176,7 @@ export class JsonFileStore implements BridgeStore {
 
     // Offsets
     const offsets = readJson<Record<string, string>>(
-      path.join(DATA_DIR, 'offsets.json'),
+      OFFSETS_PATH,
       {},
     );
     for (const [k, v] of Object.entries(offsets)) {
@@ -167,7 +185,7 @@ export class JsonFileStore implements BridgeStore {
 
     // Dedup
     const dedup = readJson<Record<string, number>>(
-      path.join(DATA_DIR, 'dedup.json'),
+      DEDUP_PATH,
       {},
     );
     for (const [k, v] of Object.entries(dedup)) {
@@ -175,12 +193,12 @@ export class JsonFileStore implements BridgeStore {
     }
 
     // Audit
-    this.auditLog = readJson(path.join(DATA_DIR, 'audit.json'), []);
+    this.auditLog = readJson(AUDIT_PATH, []);
   }
 
   private reloadSessions(): void {
     const sessions = readJson<Record<string, BridgeSession>>(
-      path.join(DATA_DIR, 'sessions.json'),
+      SESSIONS_PATH,
       {},
     );
     this.sessions = new Map(Object.entries(sessions));
@@ -188,7 +206,7 @@ export class JsonFileStore implements BridgeStore {
 
   private reloadBindings(): void {
     const bindings = readJson<Record<string, ChannelBinding>>(
-      path.join(DATA_DIR, 'bindings.json'),
+      BINDINGS_PATH,
       {},
     );
     const normalized = new Map<string, ChannelBinding>();
@@ -205,47 +223,72 @@ export class JsonFileStore implements BridgeStore {
 
     this.bindings = normalized;
     if (changed) {
-      this.persistBindings();
+      withFileLock(BINDINGS_PATH, () => {
+        const latest = readJson<Record<string, ChannelBinding>>(BINDINGS_PATH, {});
+        this.bindings = new Map(Object.values(latest).map((binding) => {
+          const upgraded = upgradeLegacyBinding(binding);
+          return [`${upgraded.channelType}:${upgraded.chatId}`, upgraded];
+        }));
+        this.persistBindings();
+      });
     }
+  }
+
+  private reloadPermissions(): void {
+    this.permissionLinks = new Map(Object.entries(
+      readJson<Record<string, PermissionLinkRecord>>(PERMISSIONS_PATH, {}),
+    ));
+  }
+
+  private reloadOffsets(): void {
+    this.offsets = new Map(Object.entries(readJson<Record<string, string>>(OFFSETS_PATH, {})));
+  }
+
+  private reloadDedup(): void {
+    this.dedupKeys = new Map(Object.entries(readJson<Record<string, number>>(DEDUP_PATH, {})));
+  }
+
+  private reloadAudit(): void {
+    this.auditLog = readJson(AUDIT_PATH, []);
   }
 
   private persistSessions(): void {
     writeJson(
-      path.join(DATA_DIR, 'sessions.json'),
+      SESSIONS_PATH,
       Object.fromEntries(this.sessions),
     );
   }
 
   private persistBindings(): void {
     writeJson(
-      path.join(DATA_DIR, 'bindings.json'),
+      BINDINGS_PATH,
       Object.fromEntries(this.bindings),
     );
   }
 
   private persistPermissions(): void {
     writeJson(
-      path.join(DATA_DIR, 'permissions.json'),
+      PERMISSIONS_PATH,
       Object.fromEntries(this.permissionLinks),
     );
   }
 
   private persistOffsets(): void {
     writeJson(
-      path.join(DATA_DIR, 'offsets.json'),
+      OFFSETS_PATH,
       Object.fromEntries(this.offsets),
     );
   }
 
   private persistDedup(): void {
     writeJson(
-      path.join(DATA_DIR, 'dedup.json'),
+      DEDUP_PATH,
       Object.fromEntries(this.dedupKeys),
     );
   }
 
   private persistAudit(): void {
-    writeJson(path.join(DATA_DIR, 'audit.json'), this.auditLog);
+    writeJson(AUDIT_PATH, this.auditLog);
   }
 
   private persistMessages(sessionId: string): void {
@@ -263,6 +306,35 @@ export class JsonFileStore implements BridgeStore {
     );
     this.messages.set(sessionId, msgs);
     return msgs;
+  }
+
+  private mutateBindings<T>(mutation: () => T): T {
+    return withFileLock(BINDINGS_PATH, () => {
+      this.reloadBindings();
+      const result = mutation();
+      this.persistBindings();
+      return result;
+    });
+  }
+
+  private mutateSessions<T>(mutation: () => T): T {
+    return withFileLock(SESSIONS_PATH, () => {
+      this.reloadSessions();
+      const result = mutation();
+      this.persistSessions();
+      return result;
+    });
+  }
+
+  private mutateMessages<T>(sessionId: string, mutation: (messages: BridgeMessage[]) => T): T {
+    const messagePath = path.join(MESSAGES_DIR, `${sessionId}.json`);
+    return withFileLock(messagePath, () => {
+      const messages = readJson<BridgeMessage[]>(messagePath, []);
+      this.messages.set(sessionId, messages);
+      const result = mutation(messages);
+      this.persistMessages(sessionId);
+      return result;
+    });
   }
 
   // ── Settings ──
@@ -293,27 +365,26 @@ export class JsonFileStore implements BridgeStore {
   }
 
   upsertChannelBinding(data: UpsertChannelBindingInput): ChannelBinding {
-    this.reloadBindings();
-    const key = `${data.channelType}:${data.chatId}`;
-    const existing = this.bindings.get(key);
-    if (existing) {
-      const updated: ChannelBinding = {
-        ...existing,
-        codepilotSessionId: data.codepilotSessionId,
-        sdkSessionId: data.sdkSessionId ?? existing.sdkSessionId,
-        channelProvider: data.channelProvider ?? existing.channelProvider,
-        channelAlias: data.channelAlias ?? existing.channelAlias,
-        chatUserId: data.chatUserId ?? existing.chatUserId,
-        chatDisplayName: data.chatDisplayName ?? existing.chatDisplayName,
-        workingDirectory: data.workingDirectory,
-        model: data.model,
-        mode: (data.mode as ChannelBinding['mode']) ?? existing.mode,
-        updatedAt: now(),
-      };
-      this.bindings.set(key, updated);
-      this.persistBindings();
-      return updated;
-    }
+    return this.mutateBindings(() => {
+      const key = `${data.channelType}:${data.chatId}`;
+      const existing = this.bindings.get(key);
+      if (existing) {
+        const updated: ChannelBinding = {
+          ...existing,
+          codepilotSessionId: data.codepilotSessionId,
+          sdkSessionId: data.sdkSessionId ?? existing.sdkSessionId,
+          channelProvider: data.channelProvider ?? existing.channelProvider,
+          channelAlias: data.channelAlias ?? existing.channelAlias,
+          chatUserId: data.chatUserId ?? existing.chatUserId,
+          chatDisplayName: data.chatDisplayName ?? existing.chatDisplayName,
+          workingDirectory: data.workingDirectory,
+          model: data.model,
+          mode: (data.mode as ChannelBinding['mode']) ?? existing.mode,
+          updatedAt: now(),
+        };
+        this.bindings.set(key, updated);
+        return updated;
+      }
       const binding: ChannelBinding = {
         id: uuid(),
         channelType: data.channelType,
@@ -331,30 +402,30 @@ export class JsonFileStore implements BridgeStore {
         createdAt: now(),
         updatedAt: now(),
       };
-    this.bindings.set(key, binding);
-    this.persistBindings();
-    return binding;
+      this.bindings.set(key, binding);
+      return binding;
+    });
   }
 
   deleteChannelBinding(id: string): void {
-    this.reloadBindings();
-    for (const [key, binding] of this.bindings) {
-      if (binding.id !== id) continue;
-      this.bindings.delete(key);
-      this.persistBindings();
-      return;
-    }
+    this.mutateBindings(() => {
+      for (const [key, binding] of this.bindings) {
+        if (binding.id !== id) continue;
+        this.bindings.delete(key);
+        return;
+      }
+    });
   }
 
   updateChannelBinding(id: string, updates: Partial<ChannelBinding>): void {
-    this.reloadBindings();
-    for (const [key, b] of this.bindings) {
-      if (b.id === id) {
-        this.bindings.set(key, { ...b, ...updates, updatedAt: now() });
-        this.persistBindings();
-        break;
+    this.mutateBindings(() => {
+      for (const [key, b] of this.bindings) {
+        if (b.id === id) {
+          this.bindings.set(key, { ...b, ...updates, updatedAt: now() });
+          break;
+        }
       }
-    }
+    });
   }
 
   listChannelBindings(channelType?: ChannelType): ChannelBinding[] {
@@ -404,81 +475,81 @@ export class JsonFileStore implements BridgeStore {
       expiresAt?: string;
     },
   ): BridgeSession {
-    this.reloadSessions();
-    const timestamp = now();
-    const session: BridgeSession = {
-      id: uuid(),
-      name,
-      working_directory: cwd || process.cwd(),
-      model,
-      preferred_mode: mode as BridgeSession['preferred_mode'],
-      system_prompt: systemPrompt,
-      reasoning_effort: options?.reasoningEffort,
-      session_type: options?.sessionType || 'normal',
-      hidden: options?.hidden === true,
-      parent_session_id: options?.parentSessionId,
-      expires_at: options?.expiresAt,
-      created_at: timestamp,
-      updated_at: timestamp,
-    };
-    this.sessions.set(session.id, session);
-    this.persistSessions();
-    return session;
+    return this.mutateSessions(() => {
+      const timestamp = now();
+      const session: BridgeSession = {
+        id: uuid(),
+        name,
+        working_directory: cwd || process.cwd(),
+        model,
+        preferred_mode: mode as BridgeSession['preferred_mode'],
+        system_prompt: systemPrompt,
+        reasoning_effort: options?.reasoningEffort,
+        session_type: options?.sessionType || 'normal',
+        hidden: options?.hidden === true,
+        parent_session_id: options?.parentSessionId,
+        expires_at: options?.expiresAt,
+        created_at: timestamp,
+        updated_at: timestamp,
+      };
+      this.sessions.set(session.id, session);
+      return session;
+    });
   }
 
   updateSessionProviderId(sessionId: string, providerId: string): void {
-    this.reloadSessions();
-    const s = this.sessions.get(sessionId);
-    if (s) {
+    this.mutateSessions(() => {
+      const s = this.sessions.get(sessionId);
+      if (!s) return;
       s.provider_id = providerId;
       s.updated_at = now();
-      this.persistSessions();
-    }
+    });
   }
 
   updateSession(sessionId: string, updates: Partial<BridgeSession>, options?: { touch?: boolean }): void {
-    this.reloadSessions();
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    const next: BridgeSession = {
-      ...session,
-      ...updates,
-      id: session.id,
-      updated_at: options?.touch === false ? session.updated_at : now(),
-    };
-    this.sessions.set(sessionId, next);
-    this.persistSessions();
+    this.mutateSessions(() => {
+      const session = this.sessions.get(sessionId);
+      if (!session) return;
+      const next: BridgeSession = {
+        ...session,
+        ...updates,
+        id: session.id,
+        updated_at: options?.touch === false ? session.updated_at : now(),
+      };
+      this.sessions.set(sessionId, next);
+    });
   }
 
   deleteSession(sessionId: string): void {
-    this.reloadSessions();
-    this.reloadBindings();
-    this.sessions.delete(sessionId);
-    for (const [key, binding] of this.bindings) {
-      if (binding.codepilotSessionId === sessionId) {
-        this.bindings.delete(key);
+    const messagePath = path.join(MESSAGES_DIR, `${sessionId}.json`);
+    withFileLocks([SESSIONS_PATH, BINDINGS_PATH, messagePath], () => {
+      this.reloadSessions();
+      this.reloadBindings();
+      this.sessions.delete(sessionId);
+      for (const [key, binding] of this.bindings) {
+        if (binding.codepilotSessionId === sessionId) {
+          this.bindings.delete(key);
+        }
       }
-    }
-    this.messages.delete(sessionId);
-    try {
-      fs.rmSync(path.join(MESSAGES_DIR, `${sessionId}.json`), { force: true });
-    } catch {
-      // best effort
-    }
-    this.persistSessions();
-    this.persistBindings();
+      this.messages.delete(sessionId);
+      try { fs.rmSync(messagePath, { force: true }); } catch { /* best effort */ }
+      this.persistSessions();
+      this.persistBindings();
+    });
   }
 
   // ── Messages ──
 
   addMessage(sessionId: string, role: string, content: string, _usage?: string | null): void {
-    const msgs = this.loadMessages(sessionId);
-    msgs.push({ role, content });
-    this.persistMessages(sessionId);
+    this.mutateMessages(sessionId, (messages) => {
+      messages.push({ role, content });
+    });
   }
 
   getMessages(sessionId: string, opts?: { limit?: number }): { messages: BridgeMessage[] } {
-    const msgs = this.loadMessages(sessionId);
+    const messagePath = path.join(MESSAGES_DIR, `${sessionId}.json`);
+    const msgs = readJson<BridgeMessage[]>(messagePath, []);
+    this.messages.set(sessionId, msgs);
     if (opts?.limit && opts.limit > 0) {
       return { messages: msgs.slice(-opts.limit) };
     }
@@ -516,70 +587,70 @@ export class JsonFileStore implements BridgeStore {
   }
 
   setSessionRuntimeStatus(_sessionId: string, _status: string): void {
-    this.reloadSessions();
-    const session = this.sessions.get(_sessionId);
-    if (!session) return;
+    this.mutateSessions(() => {
+      const session = this.sessions.get(_sessionId);
+      if (!session) return;
 
-    const queuedCount = session.queued_count && session.queued_count > 0
-      ? session.queued_count
-      : 0;
-    let runtimeStatus: BridgeSession['runtime_status'];
+      const queuedCount = session.queued_count && session.queued_count > 0
+        ? session.queued_count
+        : 0;
+      let runtimeStatus: BridgeSession['runtime_status'];
 
-    if (_status === 'running') {
-      runtimeStatus = queuedCount > 0 ? 'queued' : 'running';
-    } else if (_status === 'idle') {
-      runtimeStatus = queuedCount > 0 ? 'queued' : 'idle';
-    } else {
-      runtimeStatus = session.runtime_status;
-    }
+      if (_status === 'running') {
+        runtimeStatus = queuedCount > 0 ? 'queued' : 'running';
+      } else if (_status === 'idle') {
+        runtimeStatus = queuedCount > 0 ? 'queued' : 'idle';
+      } else {
+        runtimeStatus = session.runtime_status;
+      }
 
-    const next: BridgeSession = {
-      ...session,
-      runtime_status: runtimeStatus,
-      last_runtime_update_at: now(),
-      updated_at: now(),
-    };
-    this.sessions.set(_sessionId, next);
-    this.persistSessions();
+      const next: BridgeSession = {
+        ...session,
+        runtime_status: runtimeStatus,
+        last_runtime_update_at: now(),
+        updated_at: now(),
+      };
+      this.sessions.set(_sessionId, next);
+    });
   }
 
   // ── SDK Session ──
 
   updateSdkSessionId(sessionId: string, sdkSessionId: string): void {
-    this.reloadSessions();
-    this.reloadBindings();
-    const s = this.sessions.get(sessionId);
-    if (s) {
-      s.sdk_session_id = sdkSessionId;
-      if (sdkSessionId) {
-        s.codex_thread_id = sdkSessionId;
-        s.thread_origin = s.thread_origin || 'bridge';
-      } else {
-        delete s.codex_thread_id;
-        if (s.thread_origin !== 'desktop') {
-          delete s.thread_origin;
+    withFileLocks([SESSIONS_PATH, BINDINGS_PATH], () => {
+      this.reloadSessions();
+      this.reloadBindings();
+      const s = this.sessions.get(sessionId);
+      if (s) {
+        s.sdk_session_id = sdkSessionId;
+        if (sdkSessionId) {
+          s.codex_thread_id = sdkSessionId;
+          s.thread_origin = s.thread_origin || 'bridge';
+        } else {
+          delete s.codex_thread_id;
+          if (s.thread_origin !== 'desktop') {
+            delete s.thread_origin;
+          }
+        }
+        s.updated_at = now();
+      }
+      for (const [key, b] of this.bindings) {
+        if (b.codepilotSessionId === sessionId) {
+          this.bindings.set(key, { ...b, sdkSessionId, updatedAt: now() });
         }
       }
-      s.updated_at = now();
       this.persistSessions();
-    }
-    // Also update any bindings that reference this session
-    for (const [key, b] of this.bindings) {
-      if (b.codepilotSessionId === sessionId) {
-        this.bindings.set(key, { ...b, sdkSessionId, updatedAt: now() });
-      }
-    }
-    this.persistBindings();
+      this.persistBindings();
+    });
   }
 
   updateSessionModel(sessionId: string, model: string): void {
-    this.reloadSessions();
-    const s = this.sessions.get(sessionId);
-    if (s) {
+    this.mutateSessions(() => {
+      const s = this.sessions.get(sessionId);
+      if (!s) return;
       s.model = model;
       s.updated_at = now();
-      this.persistSessions();
-    }
+    });
   }
 
   syncSdkTasks(_sessionId: string, _todos: unknown): void {
@@ -599,23 +670,25 @@ export class JsonFileStore implements BridgeStore {
   // ── Audit & Dedup ──
 
   insertAuditLog(entry: AuditLogInput): void {
-    this.auditLog.push({
-      ...entry,
-      id: uuid(),
-      createdAt: now(),
+    withFileLock(AUDIT_PATH, () => {
+      this.reloadAudit();
+      this.auditLog.push({
+        ...entry,
+        id: uuid(),
+        createdAt: now(),
+      });
+      if (this.auditLog.length > 1000) {
+        this.auditLog = this.auditLog.slice(-1000);
+      }
+      this.persistAudit();
     });
-    // Ring buffer: keep last 1000
-    if (this.auditLog.length > 1000) {
-      this.auditLog = this.auditLog.slice(-1000);
-    }
-    this.persistAudit();
   }
 
   checkDedup(key: string): boolean {
+    this.reloadDedup();
     const ts = this.dedupKeys.get(key);
     if (ts === undefined) return false;
-    // 5 minute window
-    if (Date.now() - ts > 5 * 60 * 1000) {
+    if (Date.now() - ts > dedupTtlMs(key)) {
       this.dedupKeys.delete(key);
       return false;
     }
@@ -623,20 +696,26 @@ export class JsonFileStore implements BridgeStore {
   }
 
   insertDedup(key: string): void {
-    this.dedupKeys.set(key, Date.now());
-    this.persistDedup();
+    withFileLock(DEDUP_PATH, () => {
+      this.reloadDedup();
+      this.dedupKeys.set(key, Date.now());
+      this.persistDedup();
+    });
   }
 
   cleanupExpiredDedup(): void {
-    const cutoff = Date.now() - 5 * 60 * 1000;
-    let changed = false;
-    for (const [key, ts] of this.dedupKeys) {
-      if (ts < cutoff) {
-        this.dedupKeys.delete(key);
-        changed = true;
+    withFileLock(DEDUP_PATH, () => {
+      this.reloadDedup();
+      const timestamp = Date.now();
+      let changed = false;
+      for (const [key, ts] of this.dedupKeys) {
+        if (timestamp - ts > dedupTtlMs(key)) {
+          this.dedupKeys.delete(key);
+          changed = true;
+        }
       }
-    }
-    if (changed) this.persistDedup();
+      if (changed) this.persistDedup();
+    });
   }
 
   insertOutboundRef(_ref: OutboundRefInput): void {
@@ -646,31 +725,39 @@ export class JsonFileStore implements BridgeStore {
   // ── Permission Links ──
 
   insertPermissionLink(link: PermissionLinkInput): void {
-    const record: PermissionLinkRecord = {
-      permissionRequestId: link.permissionRequestId,
-      chatId: link.chatId,
-      messageId: link.messageId,
-      sessionId: link.sessionId,
-      resolved: false,
-      suggestions: link.suggestions,
-    };
-    this.permissionLinks.set(link.permissionRequestId, record);
-    this.persistPermissions();
+    withFileLock(PERMISSIONS_PATH, () => {
+      this.reloadPermissions();
+      const record: PermissionLinkRecord = {
+        permissionRequestId: link.permissionRequestId,
+        chatId: link.chatId,
+        messageId: link.messageId,
+        sessionId: link.sessionId,
+        resolved: false,
+        suggestions: link.suggestions,
+      };
+      this.permissionLinks.set(link.permissionRequestId, record);
+      this.persistPermissions();
+    });
   }
 
   getPermissionLink(permissionRequestId: string): PermissionLinkRecord | null {
+    this.reloadPermissions();
     return this.permissionLinks.get(permissionRequestId) ?? null;
   }
 
   markPermissionLinkResolved(permissionRequestId: string): boolean {
-    const link = this.permissionLinks.get(permissionRequestId);
-    if (!link || link.resolved) return false;
-    link.resolved = true;
-    this.persistPermissions();
-    return true;
+    return withFileLock(PERMISSIONS_PATH, () => {
+      this.reloadPermissions();
+      const link = this.permissionLinks.get(permissionRequestId);
+      if (!link || link.resolved) return false;
+      link.resolved = true;
+      this.persistPermissions();
+      return true;
+    });
   }
 
   listPendingPermissionLinksByChat(chatId: string): PermissionLinkRecord[] {
+    this.reloadPermissions();
     const result: PermissionLinkRecord[] = [];
     for (const link of this.permissionLinks.values()) {
       if (link.chatId === chatId && !link.resolved) {
@@ -683,11 +770,15 @@ export class JsonFileStore implements BridgeStore {
   // ── Channel Offsets ──
 
   getChannelOffset(key: string): string {
+    this.reloadOffsets();
     return this.offsets.get(key) ?? '0';
   }
 
   setChannelOffset(key: string, offset: string): void {
-    this.offsets.set(key, offset);
-    this.persistOffsets();
+    withFileLock(OFFSETS_PATH, () => {
+      this.reloadOffsets();
+      this.offsets.set(key, offset);
+      this.persistOffsets();
+    });
   }
 }

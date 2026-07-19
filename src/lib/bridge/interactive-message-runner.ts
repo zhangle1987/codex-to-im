@@ -621,8 +621,32 @@ export async function runInteractiveMessage(
 
   let finalOutcome: 'completed' | 'failed' | 'aborted' = 'failed';
   let finalOutcomeDetail: string | undefined;
+  let finalDeliveryError: string | undefined;
   let shouldRecordHealthEnd = true;
   let forceStopStarted = false;
+
+  const deliverFinalPayload = async (
+    response: Parameters<typeof deliverFinalResponse>[1],
+    options?: Parameters<typeof deliverFinalResponse>[2],
+  ): Promise<boolean> => {
+    try {
+      const result = await deliverFinalResponse({
+        adapter,
+        address: msg.address,
+        sessionId: binding.codepilotSessionId,
+        replyToMessageId: msg.messageId,
+        deliverResponse: deps.deliverResponse,
+      }, response, options);
+      if (result.ok) return true;
+      finalDeliveryError = `最终回复投递失败：${result.error || '未知错误'}`;
+    } catch (error) {
+      finalDeliveryError = `最终回复投递异常：${error instanceof Error ? error.message : String(error)}`;
+    }
+    console.error(`[interactive-message-runner] ${finalDeliveryError}`);
+    finalOutcome = 'failed';
+    finalOutcomeDetail = finalDeliveryError;
+    return false;
+  };
 
   taskState.forceStop = async (detail = '任务已收到停止请求。') => {
     if (forceStopStarted) return true;
@@ -725,13 +749,7 @@ export async function runInteractiveMessage(
       });
       const cardFinalized = await finalizeStreamUiOnce(streamEndStatus, terminalResponse.text);
       if (hasFinalResponsePayload(terminalResponse)) {
-        await deliverFinalResponse({
-          adapter,
-          address: msg.address,
-          sessionId: binding.codepilotSessionId,
-          replyToMessageId: msg.messageId,
-          deliverResponse: deps.deliverResponse,
-        }, terminalResponse, { skipText: cardFinalized });
+        await deliverFinalPayload(terminalResponse, { skipText: cardFinalized });
       }
       return;
     }
@@ -783,29 +801,11 @@ export async function runInteractiveMessage(
     }
 
     if (staleResponse) {
-      await deliverFinalResponse({
-        adapter,
-        address: msg.address,
-        sessionId: binding.codepilotSessionId,
-        replyToMessageId: msg.messageId,
-        deliverResponse: deps.deliverResponse,
-      }, staleResponse, { skipText: cardFinalized });
+      await deliverFinalPayload(staleResponse, { skipText: cardFinalized });
     } else if (hasFinalResponsePayload(effectiveResponse)) {
-      await deliverFinalResponse({
-        adapter,
-        address: msg.address,
-        sessionId: binding.codepilotSessionId,
-        replyToMessageId: msg.messageId,
-        deliverResponse: deps.deliverResponse,
-      }, effectiveResponse, { skipText: cardFinalized });
+      await deliverFinalPayload(effectiveResponse, { skipText: cardFinalized });
     } else if (result.hasError && !taskAbort.signal.aborted) {
-      await deliverFinalResponse({
-          adapter,
-          address: msg.address,
-          sessionId: binding.codepilotSessionId,
-          replyToMessageId: msg.messageId,
-          deliverResponse: deps.deliverResponse,
-        },
+      await deliverFinalPayload(
         assembleSdkFinalResponse({
           text: `**Error:** ${result.errorMessage}`,
           hasError: true,
@@ -819,10 +819,12 @@ export async function runInteractiveMessage(
     } catch {
       // best effort
     }
-    finalOutcome = terminalAfterProcess?.outcome || (result.hasError ? 'failed' : 'completed');
-    finalOutcomeDetail = terminalAfterProcess?.detail || (result.hasError
-      ? (result.errorMessage?.trim() || undefined)
-      : undefined);
+    if (!finalDeliveryError) {
+      finalOutcome = terminalAfterProcess?.outcome || (result.hasError ? 'failed' : 'completed');
+      finalOutcomeDetail = terminalAfterProcess?.detail || (result.hasError
+        ? (result.errorMessage?.trim() || undefined)
+        : undefined);
+    }
   } finally {
     await finalizeStreamUiOnce(
       taskAbort.signal.aborted

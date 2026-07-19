@@ -6,7 +6,12 @@ import type {
   SendResult,
 } from '../lib/bridge/types.js';
 import type { WeixinChannelConfig } from '../config.js';
-import { BaseChannelAdapter, registerAdapterFactory, type AdapterRuntimeInstance } from '../lib/bridge/channel-adapter.js';
+import {
+  BaseChannelAdapter,
+  buildInboundDedupKey,
+  registerAdapterFactory,
+  type AdapterRuntimeInstance,
+} from '../lib/bridge/channel-adapter.js';
 import { getBridgeContext } from '../lib/bridge/context.js';
 import {
   getWeixinAccount,
@@ -36,6 +41,23 @@ const DEDUP_MAX = 500;
 const BACKOFF_BASE_MS = 2_000;
 const BACKOFF_MAX_MS = 30_000;
 
+interface PendingCursorBatch {
+  accountId: string;
+  offsetKey: string;
+  cursor: string;
+  remaining: number;
+  sealed: boolean;
+  failed: boolean;
+  messageIds: Set<string>;
+  observedMessageIds: Set<string>;
+  settledMessageIds: Set<string>;
+}
+
+interface CursorRecoveryGate {
+  promise: Promise<void>;
+  resolve: () => void;
+}
+
 export class WeixinAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType;
   readonly provider = 'weixin';
@@ -50,12 +72,10 @@ export class WeixinAdapter extends BaseChannelAdapter {
   private seenMessageIds = new Map<string, Set<string>>();
   private consecutiveFailures = new Map<string, number>();
   private typingTickets = new Map<string, string>();
-  private pendingCursors = new Map<number, {
-    offsetKey: string;
-    cursor: string;
-    remaining: number;
-    sealed: boolean;
-  }>();
+  private pendingCursors = new Map<number, PendingCursorBatch>();
+  private pollCursors = new Map<string, string>();
+  private cursorGenerations = new Map<string, number>();
+  private cursorRecoveryGates = new Map<string, CursorRecoveryGate>();
   private nextBatchId = 1;
 
   constructor(instance?: AdapterRuntimeInstance) {
@@ -103,6 +123,10 @@ export class WeixinAdapter extends BaseChannelAdapter {
       this.stopAccountWorker(accountId);
     }
     this.pendingCursors.clear();
+    this.pollCursors.clear();
+    this.cursorGenerations.clear();
+    for (const gate of this.cursorRecoveryGates.values()) gate.resolve();
+    this.cursorRecoveryGates.clear();
     this.clearInboundQueue();
     this.rejectPendingInboundConsumers();
 
@@ -176,11 +200,12 @@ export class WeixinAdapter extends BaseChannelAdapter {
     return true;
   }
 
-  acknowledgeUpdate(updateId: number): void {
-    const batch = this.pendingCursors.get(updateId);
-    if (!batch) return;
-    batch.remaining = Math.max(0, batch.remaining - 1);
-    this.maybeCommitPendingCursor(updateId);
+  acknowledgeUpdate(updateId: number, messageId?: string): void {
+    this.settlePendingCursorMessage(updateId, messageId, false);
+  }
+
+  rejectUpdate(updateId: number, messageId?: string): void {
+    this.settlePendingCursorMessage(updateId, messageId, true);
   }
 
   onMessageStart(chatId: string): void {
@@ -239,6 +264,7 @@ export class WeixinAdapter extends BaseChannelAdapter {
     this.pollAborts.set(accountId, controller);
     this.seenMessageIds.set(accountId, new Set());
     this.consecutiveFailures.set(accountId, 0);
+    this.cursorGenerations.set(accountId, 0);
     void this.runPollLoop(accountId, creds, controller.signal);
   }
 
@@ -248,6 +274,14 @@ export class WeixinAdapter extends BaseChannelAdapter {
     this.workerSignatures.delete(accountId);
     this.seenMessageIds.delete(accountId);
     this.consecutiveFailures.delete(accountId);
+    this.pollCursors.delete(accountId);
+    this.cursorGenerations.delete(accountId);
+    for (const [batchId, batch] of this.pendingCursors) {
+      if (batch.accountId === accountId) this.pendingCursors.delete(batchId);
+    }
+    const recoveryGate = this.cursorRecoveryGates.get(accountId);
+    recoveryGate?.resolve();
+    this.cursorRecoveryGates.delete(accountId);
     for (const key of Array.from(this.typingTickets.keys())) {
       if (key.startsWith(`${accountId}:`)) {
         this.typingTickets.delete(key);
@@ -265,11 +299,25 @@ export class WeixinAdapter extends BaseChannelAdapter {
       }
 
       try {
+        await this.waitForCursorRecovery(accountId, signal);
+        if (signal.aborted) break;
+
         const { store } = getBridgeContext();
         const offsetKey = `weixin:${accountId}`;
         const rawOffset = store.getChannelOffset(offsetKey);
-        const cursor = rawOffset === '0' ? '' : rawOffset;
+        const persistedCursor = rawOffset === '0' ? '' : rawOffset;
+        const cursor = this.pollCursors.get(accountId) ?? persistedCursor;
+        this.pollCursors.set(accountId, cursor);
+        const cursorGeneration = this.cursorGenerations.get(accountId) ?? 0;
         const response: GetUpdatesResponse = await getUpdates(creds, cursor);
+
+        if (signal.aborted || !this._running) break;
+        if (
+          (this.cursorGenerations.get(accountId) ?? 0) !== cursorGeneration
+          || this.cursorRecoveryGates.has(accountId)
+        ) {
+          continue;
+        }
 
         if (response.errcode === ERRCODE_SESSION_EXPIRED) {
           setPaused(accountId, 'Session expired (errcode -14)');
@@ -280,35 +328,31 @@ export class WeixinAdapter extends BaseChannelAdapter {
           throw new Error(`API error: ${response.errcode} ${response.errmsg || ''}`.trim());
         }
 
-        let batchId: number | undefined;
-        let batchCompleted = false;
-
-        if (response.msgs && response.msgs.length > 0 && response.get_updates_buf) {
-          batchId = this.nextBatchId++;
-          this.pendingCursors.set(batchId, {
-            offsetKey,
-            cursor: response.get_updates_buf,
-            remaining: 0,
-            sealed: false,
-          });
-
-          for (const message of response.msgs) {
-            await this.processMessage(accountId, message, batchId);
+        const messages = response.msgs ?? [];
+        const nextCursor = response.get_updates_buf;
+        if (nextCursor) {
+          const batchId = this.createPendingCursorBatch(accountId, offsetKey, nextCursor);
+          try {
+            for (const message of messages) {
+              await this.processMessage(accountId, message, batchId);
+            }
+            const batch = this.pendingCursors.get(batchId);
+            if (batch) batch.sealed = true;
+            this.pollCursors.set(accountId, nextCursor);
+            this.maybeCommitPendingCursors(accountId);
+          } catch (error) {
+            const batch = this.pendingCursors.get(batchId);
+            if (batch) {
+              batch.failed = true;
+              batch.sealed = true;
+              this.ensureCursorRecoveryGate(accountId);
+            }
+            this.maybeCommitPendingCursors(accountId);
+            throw error;
           }
-          batchCompleted = true;
-        } else if (response.msgs && response.msgs.length > 0) {
-          for (const message of response.msgs) {
+        } else {
+          for (const message of messages) {
             await this.processMessage(accountId, message);
-          }
-        }
-
-        if (batchId !== undefined && response.get_updates_buf) {
-          const batch = this.pendingCursors.get(batchId);
-          if (batchCompleted && batch) {
-            batch.sealed = true;
-            this.maybeCommitPendingCursor(batchId);
-          } else if (!batchCompleted) {
-            this.pendingCursors.delete(batchId);
           }
         }
 
@@ -334,13 +378,23 @@ export class WeixinAdapter extends BaseChannelAdapter {
   private async processMessage(accountId: string, message: WeixinMessage, batchId?: number): Promise<void> {
     if (!message.from_user_id) return;
 
-    const messageKey = message.message_id || `seq_${message.seq}`;
+    const fallbackSequence = message.seq ?? message.create_time ?? 'unknown';
+    const inboundMessageId = message.message_id
+      || `weixin_${accountId}_${message.from_user_id}_${fallbackSequence}`;
+    const messageKey = inboundMessageId;
+    if (getBridgeContext().store.checkDedup(buildInboundDedupKey(this.channelType, inboundMessageId))) {
+      return;
+    }
+
     const seenIds = this.seenMessageIds.get(accountId);
     if (seenIds?.has(messageKey)) {
       return;
     }
 
     seenIds?.add(messageKey);
+    if (batchId !== undefined) {
+      this.pendingCursors.get(batchId)?.observedMessageIds.add(messageKey);
+    }
     if (seenIds && seenIds.size > DEDUP_MAX) {
       const overflow = Array.from(seenIds).slice(0, seenIds.size - DEDUP_MAX);
       for (const staleKey of overflow) {
@@ -410,7 +464,7 @@ export class WeixinAdapter extends BaseChannelAdapter {
 
     const chatId = encodeWeixinChatId(accountId, message.from_user_id);
     const inbound: InboundMessage = {
-      messageId: message.message_id || `weixin_${accountId}_${message.seq || Date.now()}`,
+      messageId: inboundMessageId,
       address: {
         channelType: this.channelType,
         channelProvider: this.provider,
@@ -446,7 +500,10 @@ export class WeixinAdapter extends BaseChannelAdapter {
 
     if (batchId !== undefined) {
       const batch = this.pendingCursors.get(batchId);
-      if (batch) batch.remaining++;
+      if (batch && !batch.messageIds.has(inbound.messageId)) {
+        batch.messageIds.add(inbound.messageId);
+        batch.remaining++;
+      }
     }
     this.enqueueInboundMessage(inbound);
 
@@ -534,13 +591,121 @@ export class WeixinAdapter extends BaseChannelAdapter {
     });
   }
 
-  private maybeCommitPendingCursor(updateId: number): void {
+  private createPendingCursorBatch(accountId: string, offsetKey: string, cursor: string): number {
+    const batchId = this.nextBatchId++;
+    this.pendingCursors.set(batchId, {
+      accountId,
+      offsetKey,
+      cursor,
+      remaining: 0,
+      sealed: false,
+      failed: false,
+      messageIds: new Set(),
+      observedMessageIds: new Set(),
+      settledMessageIds: new Set(),
+    });
+    return batchId;
+  }
+
+  private settlePendingCursorMessage(updateId: number, messageId: string | undefined, failed: boolean): void {
     const batch = this.pendingCursors.get(updateId);
-    if (!batch || !batch.sealed || batch.remaining > 0) {
+    if (!batch) return;
+
+    const targetMessageId = messageId && batch.messageIds.has(messageId)
+      ? messageId
+      : Array.from(batch.messageIds).find((id) => !batch.settledMessageIds.has(id));
+    if (!targetMessageId || batch.settledMessageIds.has(targetMessageId)) return;
+
+    batch.settledMessageIds.add(targetMessageId);
+    batch.remaining = Math.max(0, batch.remaining - 1);
+    if (failed) {
+      batch.failed = true;
+      this.ensureCursorRecoveryGate(batch.accountId);
+    }
+    this.maybeCommitPendingCursors(batch.accountId);
+  }
+
+  private maybeCommitPendingCursors(accountId: string): void {
+    const accountBatches = () => Array.from(this.pendingCursors.entries())
+      .filter(([, batch]) => batch.accountId === accountId)
+      .sort(([left], [right]) => left - right);
+
+    let batches = accountBatches();
+    while (batches.length > 0) {
+      const [batchId, batch] = batches[0];
+      if (!batch.sealed || batch.remaining > 0 || batch.failed) break;
+
+      try {
+        getBridgeContext().store.setChannelOffset(batch.offsetKey, batch.cursor);
+      } catch (error) {
+        batch.failed = true;
+        this.ensureCursorRecoveryGate(accountId);
+        console.error(
+          `[weixin-adapter] Failed to commit cursor for ${accountId}:`,
+          error instanceof Error ? error.message : error,
+        );
+        break;
+      }
+      this.pendingCursors.delete(batchId);
+      batches = accountBatches();
+    }
+
+    batches = accountBatches();
+    if (!batches.some(([, batch]) => batch.failed)) return;
+    this.ensureCursorRecoveryGate(accountId);
+    if (!batches.every(([, batch]) => batch.sealed && batch.remaining === 0)) return;
+
+    const offsetKey = batches[0][1].offsetKey;
+    let persistedCursor: string;
+    try {
+      const rawOffset = getBridgeContext().store.getChannelOffset(offsetKey);
+      persistedCursor = rawOffset === '0' ? '' : rawOffset;
+    } catch (error) {
+      console.error(
+        `[weixin-adapter] Failed to reload cursor for ${accountId}:`,
+        error instanceof Error ? error.message : error,
+      );
       return;
     }
-    getBridgeContext().store.setChannelOffset(batch.offsetKey, batch.cursor);
-    this.pendingCursors.delete(updateId);
+
+    const seenIds = this.seenMessageIds.get(accountId);
+    for (const [batchId, batch] of batches) {
+      for (const messageKey of batch.observedMessageIds) seenIds?.delete(messageKey);
+      this.pendingCursors.delete(batchId);
+    }
+    this.pollCursors.set(accountId, persistedCursor);
+    this.cursorGenerations.set(accountId, (this.cursorGenerations.get(accountId) ?? 0) + 1);
+
+    const gate = this.cursorRecoveryGates.get(accountId);
+    this.cursorRecoveryGates.delete(accountId);
+    gate?.resolve();
+  }
+
+  private ensureCursorRecoveryGate(accountId: string): CursorRecoveryGate {
+    const existing = this.cursorRecoveryGates.get(accountId);
+    if (existing) return existing;
+
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    const gate = { promise, resolve };
+    this.cursorRecoveryGates.set(accountId, gate);
+    return gate;
+  }
+
+  private waitForCursorRecovery(accountId: string, signal: AbortSignal): Promise<void> {
+    const gate = this.cursorRecoveryGates.get(accountId);
+    if (!gate || signal.aborted) return Promise.resolve();
+
+    return new Promise<void>((resolve) => {
+      const finish = () => {
+        signal.removeEventListener('abort', finish);
+        resolve();
+      };
+      signal.addEventListener('abort', finish, { once: true });
+      gate.promise.then(finish, finish);
+    });
   }
 
   private filterConfiguredAccounts(accounts: ReturnType<typeof listWeixinAccounts>) {

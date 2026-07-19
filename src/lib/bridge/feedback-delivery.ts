@@ -112,13 +112,21 @@ export async function deliverResponse(
     }, { sessionId });
 
     if (!attachmentResult.ok) {
-      return deliverTextResponse(
+      const attachmentError = attachmentResult.error || '未知错误';
+      const noticeResult = await deliverTextResponse(
         adapter,
         address,
-        `附件发送失败：${attachment.path}\n${attachmentResult.error || '未知错误'}`,
+        `附件发送失败：${attachment.path}\n${attachmentError}`,
         sessionId,
         replyToMessageId,
       );
+      return {
+        ok: false,
+        messageId: noticeResult.messageId,
+        error: noticeResult.ok
+          ? `附件发送失败：${attachment.path}: ${attachmentError}`
+          : `附件发送失败：${attachment.path}: ${attachmentError}; 错误提示也发送失败：${noticeResult.error || '未知错误'}`,
+      };
     }
 
     lastResult = attachmentResult;

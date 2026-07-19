@@ -5,6 +5,37 @@ import { MessageItemType } from './weixin-types.js';
 
 const MAX_MEDIA_SIZE = 100 * 1024 * 1024;
 
+export async function readResponseBodyWithLimit(
+  response: Response,
+  maxSize: number,
+  label: string,
+): Promise<Buffer> {
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > maxSize) {
+    throw new Error(`Media too large: ${contentLength} bytes`);
+  }
+
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalSize = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalSize += value.byteLength;
+      if (totalSize > maxSize) {
+        await reader.cancel(`Media too large while downloading ${label}`);
+        throw new Error(`Media too large: more than ${maxSize} bytes`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, totalSize);
+}
+
 export function encryptMedia(data: Buffer, key: Buffer): Buffer {
   const cipher = crypto.createCipheriv('aes-128-ecb', key, null);
   return Buffer.concat([cipher.update(data), cipher.final()]);
@@ -76,14 +107,10 @@ async function downloadAndDecryptMedia(cdnUrl: string, aesKey: Buffer, label: st
     throw new Error(`CDN download failed for ${label}: ${res.status}`);
   }
 
-  const encrypted = Buffer.from(await res.arrayBuffer());
+  const encrypted = await readResponseBodyWithLimit(res, MAX_MEDIA_SIZE, label);
   if (encrypted.length === 0) {
     throw new Error(`Downloaded ${label} is empty`);
   }
-  if (encrypted.length > MAX_MEDIA_SIZE) {
-    throw new Error(`Media too large: ${encrypted.length} bytes`);
-  }
-
   return decryptMedia(encrypted, aesKey);
 }
 

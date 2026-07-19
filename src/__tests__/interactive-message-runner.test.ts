@@ -163,6 +163,63 @@ describe('interactive-message-runner', () => {
     assert.equal(formatInteractiveRuntimeStatus(1_000, 3_730_000), '已运行 1秒，上次响应距今 1小时2分10秒');
   });
 
+  it('records a failed health outcome when the final response cannot be delivered', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-delivery-failure',
+      userId: 'user-delivery-failure',
+    } as const;
+    router.createBinding(address, 'D:\\workspace\\delivery-failure');
+
+    const tasks = new Map<string, InteractiveTaskState>();
+    const healthEnds: Array<{ outcome: string; detail?: string }> = [];
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-delivery-failure',
+        address,
+        text: 'hello',
+        timestamp: Date.now(),
+      },
+      'hello',
+      undefined,
+      {
+        registerInteractiveTask(task) { tasks.set(task.sessionId, task); },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) { return tasks.get(sessionId)?.id === taskId; },
+        touchInteractiveTask() {},
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd(_sessionId, outcome, detail) { healthEnds.push({ outcome, detail }); },
+        beginMirrorSuppression() { return 'suppression-delivery-failure'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        releaseInteractiveTask(sessionId, taskId) {
+          if (tasks.get(sessionId)?.id === taskId) tasks.delete(sessionId);
+        },
+        async deliverResponse() { return { ok: false, error: 'channel unavailable' }; },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async () => ({
+          responseText: '最终回复',
+          outboundAttachments: [],
+          tokenUsage: null,
+          hasError: false,
+          errorMessage: '',
+          permissionRequests: [],
+          sdkSessionId: 'sdk-delivery-failure',
+        }),
+      },
+    );
+
+    assert.equal(healthEnds.length, 1);
+    assert.equal(healthEnds[0]?.outcome, 'failed');
+    assert.match(healthEnds[0]?.detail || '', /channel unavailable/);
+  });
+
   it('keeps runtime visible and adds last response age after 10 seconds without a response', async () => {
     const adapter = new FakeFeishuStreamingAdapter();
     const address = {

@@ -733,11 +733,20 @@ function createDesktopEventSignature(rawLine: string): string {
   return crypto.createHash('sha1').update(rawLine).digest('hex');
 }
 
-function readFileUtf8Range(filePath: string, startOffset: number, endOffset: number): string {
+interface CompleteUtf8LineRange {
+  content: string;
+  nextOffset: number;
+}
+
+function readCompleteUtf8LineRange(
+  filePath: string,
+  startOffset: number,
+  endOffset: number,
+): CompleteUtf8LineRange {
   const safeStart = Math.max(0, startOffset);
   const safeEnd = Math.max(safeStart, endOffset);
   const bytesToRead = safeEnd - safeStart;
-  if (bytesToRead <= 0) return '';
+  if (bytesToRead <= 0) return { content: '', nextOffset: safeStart };
 
   const fd = fs.openSync(filePath, 'r');
   try {
@@ -748,7 +757,16 @@ function readFileUtf8Range(filePath: string, startOffset: number, endOffset: num
       if (bytesRead <= 0) break;
       totalRead += bytesRead;
     }
-    return buffer.subarray(0, totalRead).toString('utf-8');
+    const readBuffer = buffer.subarray(0, totalRead);
+    const lastNewlineIndex = readBuffer.lastIndexOf(0x0a);
+    if (lastNewlineIndex < 0) {
+      return { content: '', nextOffset: safeStart };
+    }
+    const consumedBytes = lastNewlineIndex + 1;
+    return {
+      content: readBuffer.subarray(0, consumedBytes).toString('utf-8'),
+      nextOffset: safeStart + consumedBytes,
+    };
   } finally {
     fs.closeSync(fd);
   }
@@ -769,6 +787,7 @@ function isTurnContextLine(line: SessionMessageLine | SessionEventLine | TurnCon
 const IGNORED_EVENT_MSG_TYPES = new Set([
   'context_compacted',
   'thread_settings_applied',
+  'thread_goal_updated',
   'thread_name_updated',
   'thread_rolled_back',
   'token_count',
@@ -777,6 +796,11 @@ const IGNORED_EVENT_MSG_TYPES = new Set([
 const IGNORED_RESPONSE_ITEM_TYPES = new Set([
   'image_generation_call',
   'web_search_call',
+]);
+
+const IGNORED_TOP_LEVEL_TYPES = new Set([
+  'session_meta',
+  'turn_context',
 ]);
 
 const TERMINAL_COMPLETION_EVENT_TYPES = new Set([
@@ -817,7 +841,8 @@ function isIgnoredMirrorLineKind(line: SessionMessageLine | SessionEventLine | T
     const payloadType = typeof line.payload?.type === 'string' ? line.payload.type.trim() : '';
     return IGNORED_RESPONSE_ITEM_TYPES.has(payloadType);
   }
-  return false;
+  const topLevelType = typeof line.type === 'string' ? line.type.trim() : '';
+  return IGNORED_TOP_LEVEL_TYPES.has(topLevelType);
 }
 
 function describeUnhandledMirrorLineKind(
@@ -832,7 +857,8 @@ function describeUnhandledMirrorLineKind(
     const payloadType = typeof line.payload?.type === 'string' ? line.payload.type.trim() : '';
     return `response_item:${payloadType || '<unknown>'}`;
   }
-  return null;
+  const topLevelType = typeof line.type === 'string' ? line.type.trim() : '';
+  return `top_level:${topLevelType || '<unknown>'}`;
 }
 
 export function listDesktopSessions(limit?: number): DesktopSessionSummary[] {
@@ -891,9 +917,21 @@ export function listDesktopSessions(limit?: number): DesktopSessionSummary[] {
     .slice(0, typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? Math.max(1, Math.floor(limit)) : undefined);
 }
 
+const DESKTOP_SESSION_LOOKUP_CACHE_TTL_MS = 1_000;
+let desktopSessionLookupCache: {
+  expiresAt: number;
+  sessions: Map<string, DesktopSessionSummary>;
+} | null = null;
+
 export function getDesktopSessionByThreadId(threadId: string): DesktopSessionSummary | null {
-  const sessions = listDesktopSessions(200);
-  return sessions.find((session) => session.threadId === threadId) || null;
+  const timestamp = Date.now();
+  if (!desktopSessionLookupCache || desktopSessionLookupCache.expiresAt <= timestamp) {
+    desktopSessionLookupCache = {
+      expiresAt: timestamp + DESKTOP_SESSION_LOOKUP_CACHE_TTL_MS,
+      sessions: new Map(listDesktopSessions().map((session) => [session.threadId, session])),
+    };
+  }
+  return desktopSessionLookupCache.sessions.get(threadId) || null;
 }
 
 export function isArchivedDesktopThread(threadId: string): boolean {
@@ -1245,6 +1283,29 @@ function pushDesktopMirrorResponseRecord(
     return true;
   }
 
+  if (parsed.payload?.type === 'message' && parsed.payload.role === 'user') {
+    const text = extractDesktopMessageText(parsed);
+    if (!text) return true;
+    const previous = records.at(-1);
+    if (
+      previous?.type === 'message'
+      && previous.role === 'user'
+      && previous.content === text
+      && previous.turnId === (activeTurnId || undefined)
+    ) {
+      return true;
+    }
+    records.push({
+      signature,
+      type: 'message',
+      role: 'user',
+      content: text,
+      timestamp,
+      ...(activeTurnId ? { turnId: activeTurnId } : {}),
+    });
+    return true;
+  }
+
   if (parsed.payload?.type === 'tool_search_call') {
     const toolId = extractNormalizedFreeText(parsed.payload.call_id) || signature;
     records.push({
@@ -1526,9 +1587,9 @@ export function readDesktopSessionEventDeltaByFilePath(
   endOffset: number,
   trailingText = '',
 ): DesktopSessionEventDelta {
-  let content = '';
+  let range: CompleteUtf8LineRange;
   try {
-    content = readFileUtf8Range(filePath, startOffset, endOffset);
+    range = readCompleteUtf8LineRange(filePath, startOffset, endOffset);
   } catch {
     return {
       events: [],
@@ -1537,10 +1598,10 @@ export function readDesktopSessionEventDeltaByFilePath(
     };
   }
 
-  const parsed = parseDesktopSessionEventText(content, trailingText);
+  const parsed = parseDesktopSessionEventText(range.content, trailingText);
   return {
     events: parsed.events,
-    nextOffset: Math.max(startOffset, endOffset),
+    nextOffset: range.nextOffset,
     trailingText: parsed.trailingText,
   };
 }
@@ -1564,9 +1625,9 @@ export function readDesktopSessionMirrorRecordDeltaByFilePath(
   currentTurnId: string | null = null,
   currentSpecialCallIds: Iterable<string> = [],
 ): DesktopMirrorRecordDelta {
-  let content = '';
+  let range: CompleteUtf8LineRange;
   try {
-    content = readFileUtf8Range(filePath, startOffset, endOffset);
+    range = readCompleteUtf8LineRange(filePath, startOffset, endOffset);
   } catch {
     return {
       records: [],
@@ -1578,10 +1639,16 @@ export function readDesktopSessionMirrorRecordDeltaByFilePath(
     };
   }
 
-  const parsed = parseDesktopMirrorRecordText(content, trailingText, false, currentTurnId, currentSpecialCallIds);
+  const parsed = parseDesktopMirrorRecordText(
+    range.content,
+    trailingText,
+    false,
+    currentTurnId,
+    currentSpecialCallIds,
+  );
   return {
     records: parsed.records,
-    nextOffset: Math.max(startOffset, endOffset),
+    nextOffset: range.nextOffset,
     trailingText: parsed.trailingText,
     nextTurnId: parsed.nextTurnId,
     nextSpecialCallIds: parsed.nextSpecialCallIds,

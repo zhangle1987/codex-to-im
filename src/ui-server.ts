@@ -56,6 +56,11 @@ import {
 import { listWeixinAccounts } from './weixin-store.js';
 import { listAvailableCodexModels, readConfiguredCodexModel } from './codex-models.js';
 import type { CachedCodexModel } from './codex-models.js';
+import {
+  assertTrustedMutationRequest,
+  HttpRequestError,
+  readJsonBody,
+} from './ui-http-security.js';
 
 let port = 4781;
 const serverStartTime = new Date().toISOString();
@@ -174,15 +179,6 @@ function html(response: ServerResponse, body: string): void {
 function text(response: ServerResponse, statusCode: number, body: string): void {
   response.writeHead(statusCode, { 'Content-Type': 'text/plain; charset=utf-8' });
   response.end(body);
-}
-
-async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) {
-    chunks.push(Buffer.from(chunk));
-  }
-  const raw = Buffer.concat(chunks).toString('utf-8').trim();
-  return raw ? JSON.parse(raw) as T : {} as T;
 }
 
 function asString(value: unknown): string | undefined {
@@ -4171,6 +4167,12 @@ function renderHtml(): string {
 
 const server = http.createServer(async (request, response) => {
   try {
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    response.setHeader('X-Frame-Options', 'DENY');
+    response.setHeader('Referrer-Policy', 'no-referrer');
+    response.setHeader('Cache-Control', 'no-store');
+    assertTrustedMutationRequest(request);
+
     const url = new URL(request.url || '/', getUiServerUrl(port));
     const config = loadConfig();
     const localRequest = isLocalRequest(request);
@@ -4559,7 +4561,8 @@ const server = http.createServer(async (request, response) => {
 
     text(response, 404, 'Not found');
   } catch (error) {
-    json(response, 500, {
+    const statusCode = error instanceof HttpRequestError ? error.statusCode : 500;
+    json(response, statusCode, {
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -4567,10 +4570,11 @@ const server = http.createServer(async (request, response) => {
 
 async function startServer(): Promise<void> {
   port = await resolveUiPort(parsePreferredPort());
+  const listenHost = loadConfig().uiAllowLan === true ? '0.0.0.0' : '127.0.0.1';
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '0.0.0.0', () => {
+    server.listen(port, listenHost, () => {
       server.removeListener('error', reject);
       resolve();
     });

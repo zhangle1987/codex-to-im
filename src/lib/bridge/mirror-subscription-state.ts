@@ -85,7 +85,9 @@ export function createMirrorSubscription(
     chatId: input.chatId,
     threadId: input.threadId,
     filePath: input.filePath,
-    cursor: { initialized: false, lastEventCount: 0 },
+    cursor: input.lastDeliveredAt
+      ? { initialized: true, lastEventTimestamp: input.lastDeliveredAt, lastEventCount: 0 }
+      : { initialized: false, lastEventCount: 0 },
     dirty: true,
     status: input.filePath ? 'watching' : 'stale',
     watcher: null,
@@ -113,7 +115,9 @@ function resetMirrorSubscriptionForThreadChange(
   subscription: DesktopMirrorSubscription,
   lastDeliveredAt: string | null,
 ): void {
-  subscription.cursor = { initialized: false, lastEventCount: 0 };
+  subscription.cursor = lastDeliveredAt
+    ? { initialized: true, lastEventTimestamp: lastDeliveredAt, lastEventCount: 0 }
+    : { initialized: false, lastEventCount: 0 };
   subscription.lastDeliveredAt = lastDeliveredAt;
   subscription.dirty = true;
   subscription.pendingTurn = null;

@@ -27,7 +27,11 @@ describe('mirror-subscription-state', () => {
       chatId: 'chat-1',
       threadId: 'thread-1',
       filePath: 'D:\\codex\\session.jsonl',
-      cursor: { initialized: false, lastEventCount: 0 },
+      cursor: {
+        initialized: true,
+        lastEventTimestamp: '2026-04-13T12:00:00.000Z',
+        lastEventCount: 0,
+      },
       dirty: true,
       status: 'watching',
       watcher: null,
@@ -130,7 +134,11 @@ describe('mirror-subscription-state', () => {
     assert.equal(subscription.chatId, 'chat-new');
     assert.equal(subscription.threadId, 'thread-new');
     assert.equal(subscription.filePath, 'D:\\codex\\new.jsonl');
-    assert.deepEqual(subscription.cursor, { initialized: false, lastEventCount: 0 });
+    assert.deepEqual(subscription.cursor, {
+      initialized: true,
+      lastEventTimestamp: '2026-04-13T13:00:00.000Z',
+      lastEventCount: 0,
+    });
     assert.equal(subscription.lastDeliveredAt, '2026-04-13T13:00:00.000Z');
     assert.equal(subscription.dirty, true);
     assert.equal(subscription.pendingTurn, null);

@@ -135,7 +135,9 @@ export function reconcileDesktopMirrorCursor(
   if (cursor.lastEventCount === 0) {
     return {
       nextCursor,
-      deliverableRecords: records,
+      deliverableRecords: cursor.lastEventTimestamp
+        ? collectEventsAfterTimestamp(records, cursor.lastEventTimestamp)
+        : records,
       reset: false,
     };
   }

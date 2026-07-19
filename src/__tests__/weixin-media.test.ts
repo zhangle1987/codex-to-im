@@ -1,7 +1,11 @@
 import './test-setup.js';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { downloadMediaFromItem, encryptMedia } from '../adapters/weixin/weixin-media.js';
+import {
+  downloadMediaFromItem,
+  encryptMedia,
+  readResponseBodyWithLimit,
+} from '../adapters/weixin/weixin-media.js';
 import { MessageItemType } from '../adapters/weixin/weixin-types.js';
 
 describe('weixin-media', () => {
@@ -115,6 +119,28 @@ describe('weixin-media', () => {
     assert.equal(
       lastFetchUrl,
       'https://cdn.weixin.test/c2c/download?encrypted_query_param=foo%3Dbar%26x%3D1',
+    );
+  });
+
+  it('rejects declared and streamed media bodies above the limit', async () => {
+    const declared = new Response(new Uint8Array([1]), {
+      headers: { 'content-length': '11' },
+    });
+    await assert.rejects(
+      readResponseBodyWithLimit(declared, 10, 'declared.bin'),
+      /Media too large: 11 bytes/,
+    );
+
+    const streamed = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(6));
+        controller.enqueue(new Uint8Array(6));
+        controller.close();
+      },
+    }));
+    await assert.rejects(
+      readResponseBodyWithLimit(streamed, 10, 'streamed.bin'),
+      /more than 10 bytes/,
     );
   });
 });

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -8,6 +9,7 @@ import {
   type RuntimeReasoningEffort,
   type RuntimeSandboxMode,
 } from "./runtime-options.js";
+import { withFileLock } from "./file-lock.js";
 
 export type CodexSandboxMode = RuntimeSandboxMode;
 export type CodexReasoningEffort = RuntimeReasoningEffort;
@@ -65,7 +67,13 @@ interface ConfigV2File {
   schemaVersion: 2;
   runtime: RuntimeConfigV2;
   channels: ChannelInstance[];
+  [key: string]: unknown;
 }
+
+const RAW_CHANNELS = Symbol('rawConfigV2Channels');
+type InternalConfigV2File = ConfigV2File & {
+  [RAW_CHANNELS]?: unknown[];
+};
 
 function toFeishuConfig(channel?: ChannelInstance): FeishuChannelConfig | undefined {
   return channel?.provider === 'feishu' ? channel.config as FeishuChannelConfig : undefined;
@@ -177,25 +185,67 @@ function ensureConfigDir(): void {
   fs.mkdirSync(CTI_HOME, { recursive: true });
 }
 
-function readConfigV2File(): ConfigV2File | null {
+function readConfigV2File(): InternalConfigV2File | null {
+  if (!fs.existsSync(CONFIG_V2_PATH)) return null;
+
+  let content: string;
   try {
-    const parsed = JSON.parse(fs.readFileSync(CONFIG_V2_PATH, 'utf-8')) as ConfigV2File;
-    if (parsed && parsed.schemaVersion === 2 && parsed.runtime && Array.isArray(parsed.channels)) {
-      parsed.runtime.provider = normalizeRuntimeProvider(parsed.runtime.provider);
-      parsed.channels = normalizeChannelInstances(parsed.channels);
-      return parsed;
-    }
-    return null;
-  } catch {
-    return null;
+    content = fs.readFileSync(CONFIG_V2_PATH, 'utf-8');
+  } catch (error) {
+    throw new Error(`无法读取配置文件 ${CONFIG_V2_PATH}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(content) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`配置文件 ${CONFIG_V2_PATH} 不是有效 JSON，已拒绝覆盖: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`配置文件 ${CONFIG_V2_PATH} 的根节点必须是对象，已拒绝覆盖。`);
+  }
+  if (raw.schemaVersion !== 2) {
+    throw new Error(`不支持配置 schemaVersion=${String(raw.schemaVersion)}，已拒绝用当前版本覆盖。`);
+  }
+  if (!raw.runtime || typeof raw.runtime !== 'object' || Array.isArray(raw.runtime)) {
+    throw new Error(`配置文件 ${CONFIG_V2_PATH} 缺少有效的 runtime 对象，已拒绝覆盖。`);
+  }
+  if (!Array.isArray(raw.channels)) {
+    throw new Error(`配置文件 ${CONFIG_V2_PATH} 缺少 channels 数组，已拒绝覆盖。`);
+  }
+
+  const rawChannels = raw.channels;
+  const parsed: InternalConfigV2File = {
+    ...raw,
+    schemaVersion: 2,
+    runtime: {
+      ...(raw.runtime as Record<string, unknown>),
+      provider: normalizeRuntimeProvider((raw.runtime as Record<string, unknown>).provider),
+    } as RuntimeConfigV2,
+    channels: normalizeChannelInstances(rawChannels),
+  };
+  Object.defineProperty(parsed, RAW_CHANNELS, { value: rawChannels, enumerable: false });
+  return parsed;
+}
+
+function atomicWriteFile(filePath: string, content: string): void {
+  ensureConfigDir();
+  const tmpPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmpPath, content, { mode: 0o600 });
+    fs.renameSync(tmpPath, filePath);
+  } finally {
+    try { fs.rmSync(tmpPath, { force: true }); } catch { /* best effort */ }
   }
 }
 
-function writeConfigV2File(config: ConfigV2File): void {
-  ensureConfigDir();
-  const tmpPath = CONFIG_V2_PATH + '.tmp';
-  fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), { mode: 0o600 });
-  fs.renameSync(tmpPath, CONFIG_V2_PATH);
+function writeConfigV2File(config: InternalConfigV2File): void {
+  const serialized = {
+    ...config,
+    channels: config[RAW_CHANNELS] || config.channels,
+  };
+  atomicWriteFile(CONFIG_V2_PATH, JSON.stringify(serialized, null, 2));
 }
 
 function defaultAliasForProvider(provider: ChannelProvider): string {
@@ -224,6 +274,7 @@ function normalizeChannelInstances(value: unknown): ChannelInstance[] {
       : {};
     const timestamp = nowIso();
     return [{
+      ...record,
       id: normalizeChannelId(
         typeof record.id === 'string' && record.id.trim()
           ? record.id
@@ -237,7 +288,7 @@ function normalizeChannelInstances(value: unknown): ChannelInstance[] {
       createdAt: typeof record.createdAt === 'string' ? record.createdAt : timestamp,
       updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : timestamp,
       config,
-    }];
+    } as ChannelInstance];
   });
 }
 
@@ -357,16 +408,62 @@ function expandConfig(v2: ConfigV2File): Config {
   };
 }
 
-function buildV2FileFromExpandedConfig(config: Config, current?: ConfigV2File | null): ConfigV2File {
+function mergeRawChannelRecords(
+  current: InternalConfigV2File | null | undefined,
+  channels: ChannelInstance[],
+): unknown[] {
+  const remaining = new Map(channels.map((channel) => [channel.id, channel]));
+  const rawChannels = current?.[RAW_CHANNELS] || current?.channels || [];
+  const merged: unknown[] = [];
+
+  for (const rawEntry of rawChannels) {
+    if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) continue;
+    const rawRecord = rawEntry as Record<string, unknown>;
+    if (!isSupportedChannelProvider(rawRecord.provider)) {
+      merged.push(rawEntry);
+      continue;
+    }
+
+    const rawId = normalizeChannelId(
+      typeof rawRecord.id === 'string' && rawRecord.id.trim()
+        ? rawRecord.id
+        : buildDefaultChannelId(rawRecord.provider),
+    );
+    const replacement = remaining.get(rawId);
+    if (!replacement) continue;
+    remaining.delete(rawId);
+    const rawConfig = rawRecord.config && typeof rawRecord.config === 'object' && !Array.isArray(rawRecord.config)
+      ? rawRecord.config as Record<string, unknown>
+      : {};
+    merged.push({
+      ...rawRecord,
+      ...replacement,
+      config: {
+        ...rawConfig,
+        ...replacement.config,
+      },
+    });
+  }
+
+  merged.push(...remaining.values());
+  return merged;
+}
+
+function buildV2FileFromExpandedConfig(
+  config: Config,
+  current?: InternalConfigV2File | null,
+): InternalConfigV2File {
   const hasExplicitChannels = Array.isArray(config.channels);
   let channels = hasExplicitChannels
     ? [...(config.channels || [])]
     : [...(current?.channels || [])];
   channels = normalizeChannelInstances(channels);
 
-  return {
+  const next: InternalConfigV2File = {
+    ...(current || {}),
     schemaVersion: 2,
     runtime: {
+      ...(current?.runtime || {}),
       provider: config.runtime,
       defaultWorkspaceRoot: config.defaultWorkspaceRoot,
       defaultModel: config.defaultModel,
@@ -386,36 +483,46 @@ function buildV2FileFromExpandedConfig(config: Config, current?: ConfigV2File | 
       alias: channel.alias?.trim() || defaultAliasForProvider(channel.provider),
     })),
   };
+  Object.defineProperty(next, RAW_CHANNELS, {
+    value: mergeRawChannelRecords(current, next.channels),
+    enumerable: false,
+  });
+  return next;
 }
 
 export function loadConfig(): Config {
   const current = readConfigV2File();
   if (current) return expandConfig(current);
 
-  const legacyEnv = loadRawConfigEnv();
-  if (legacyEnv.size > 0) {
-    const migrated = migrateLegacyEnvToV2(legacyEnv);
-    writeConfigV2File(migrated);
-    return expandConfig(migrated);
-  }
+  return withFileLock(CONFIG_V2_PATH, () => {
+    const concurrentlyCreated = readConfigV2File();
+    if (concurrentlyCreated) return expandConfig(concurrentlyCreated);
 
-  const empty: ConfigV2File = {
-    schemaVersion: 2,
-    runtime: {
-      provider: 'codex',
-      defaultWorkspaceRoot: DEFAULT_WORKSPACE_ROOT,
-      defaultMode: 'code',
-      historyMessageLimit: 8,
-      streamStatusIdleStartSeconds: DEFAULT_STREAM_STATUS_IDLE_START_SECONDS,
-      streamStatusCheckIntervalSeconds: DEFAULT_STREAM_STATUS_CHECK_INTERVAL_SECONDS,
-      codexSkipGitRepoCheck: true,
-      codexSandboxMode: 'workspace-write',
-      codexReasoningEffort: 'medium',
-      uiAllowLan: false,
-    },
-    channels: [],
-  };
-  return expandConfig(empty);
+    const legacyEnv = loadRawConfigEnv();
+    if (legacyEnv.size > 0) {
+      const migrated = migrateLegacyEnvToV2(legacyEnv);
+      writeConfigV2File(migrated);
+      return expandConfig(migrated);
+    }
+
+    const empty: ConfigV2File = {
+      schemaVersion: 2,
+      runtime: {
+        provider: 'codex',
+        defaultWorkspaceRoot: DEFAULT_WORKSPACE_ROOT,
+        defaultMode: 'code',
+        historyMessageLimit: 8,
+        streamStatusIdleStartSeconds: DEFAULT_STREAM_STATUS_IDLE_START_SECONDS,
+        streamStatusCheckIntervalSeconds: DEFAULT_STREAM_STATUS_CHECK_INTERVAL_SECONDS,
+        codexSkipGitRepoCheck: true,
+        codexSandboxMode: 'workspace-write',
+        codexReasoningEffort: 'medium',
+        uiAllowLan: false,
+      },
+      channels: [],
+    };
+    return expandConfig(empty);
+  });
 }
 
 function formatEnvLine(key: string, value: string | undefined): string {
@@ -424,13 +531,14 @@ function formatEnvLine(key: string, value: string | undefined): string {
 }
 
 export function saveConfig(config: Config): void {
-  const current = readConfigV2File();
-  const next = buildV2FileFromExpandedConfig(config, current);
-  writeConfigV2File(next);
+  withFileLock(CONFIG_V2_PATH, () => {
+    const current = readConfigV2File();
+    const next = buildV2FileFromExpandedConfig(config, current);
+    writeConfigV2File(next);
 
-  // Keep a lightweight env snapshot for operational visibility and shell tooling.
-  let out = "";
-  out += formatEnvLine("CTI_RUNTIME", next.runtime.provider);
+    // Keep a lightweight env snapshot for operational visibility and shell tooling.
+    let out = "";
+    out += formatEnvLine("CTI_RUNTIME", next.runtime.provider);
   out += formatEnvLine(
     "CTI_ENABLED_CHANNELS",
     Array.from(new Set(next.channels.filter((channel) => channel.enabled).map((channel) => channel.provider))).join(","),
@@ -483,10 +591,8 @@ export function saveConfig(config: Config): void {
     }
   }
 
-  ensureConfigDir();
-  const tmpPath = CONFIG_PATH + ".tmp";
-  fs.writeFileSync(tmpPath, out, { mode: 0o600 });
-  fs.renameSync(tmpPath, CONFIG_PATH);
+    atomicWriteFile(CONFIG_PATH, out);
+  });
 }
 
 export function maskSecret(value: string): string {

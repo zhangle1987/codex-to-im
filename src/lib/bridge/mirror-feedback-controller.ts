@@ -292,7 +292,9 @@ export function createMirrorFeedbackController(
     turn: FinalizedDesktopMirrorTurn,
   ): Promise<void> {
     const adapter = deps.getAdapter(subscription.channelType);
-    if (!adapter || !adapter.isRunning()) return;
+    if (!adapter || !adapter.isRunning()) {
+      throw new Error(`mirror adapter unavailable: ${subscription.channelType}`);
+    }
 
     const title = deps.getThreadTitle(subscription.threadId)?.trim() || '桌面线程';
     const responseParseMode = getFeedbackParseMode(subscription.channelType);

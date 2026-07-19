@@ -12,8 +12,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
-import type { LLMProvider, StreamChatParams } from './lib/bridge/host.js';
+import type { Input, ThreadEvent, ThreadItem, UserInput } from '@openai/codex-sdk';
+import type { LLMProvider, StreamChatParams, TokenUsage } from './lib/bridge/host.js';
 import type { PendingPermissions } from './permission-gateway.js';
 import { sseEvent } from './sse-utils.js';
 import type { CodexReasoningEffort, CodexSandboxMode } from './config.js';
@@ -33,13 +33,67 @@ const MIME_EXT: Record<string, string> = {
 
 const DEFAULT_TERMINAL_DRAIN_TIMEOUT_MS = 3_000;
 
-// Keep SDK types as `any` because we lazy-load the package at runtime.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type CodexModule = any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type CodexInstance = any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type ThreadInstance = any;
+type CodexModule = typeof import('@openai/codex-sdk');
+type CodexInstance = InstanceType<CodexModule['Codex']>;
+type ThreadInstance = ReturnType<CodexInstance['startThread']>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeTokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
+/** Normalize stable and forward SDK usage field names to the bridge contract. */
+export function mapCodexUsage(usage: unknown): TokenUsage | undefined {
+  if (!isRecord(usage)) return undefined;
+
+  const cacheRead = usage.cached_input_tokens ?? usage.cache_read_input_tokens;
+  const cacheCreation = usage.cache_write_input_tokens ?? usage.cache_creation_input_tokens;
+
+  return {
+    input_tokens: normalizeTokenCount(usage.input_tokens),
+    output_tokens: normalizeTokenCount(usage.output_tokens),
+    cache_read_input_tokens: normalizeTokenCount(cacheRead),
+    reasoning_output_tokens: normalizeTokenCount(usage.reasoning_output_tokens),
+    ...(cacheCreation === undefined
+      ? {}
+      : { cache_creation_input_tokens: normalizeTokenCount(cacheCreation) }),
+  };
+}
+
+function isMissingCodexPackageError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  const code = typeof error.code === 'string' ? error.code : '';
+  const message = typeof error.message === 'string' ? error.message : '';
+  return (
+    (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND')
+    && /@openai[\\/]codex(?:-sdk)?/.test(message)
+  );
+}
+
+function assertCodexClient(value: unknown): asserts value is CodexInstance {
+  if (
+    !isRecord(value)
+    || typeof value.startThread !== 'function'
+    || typeof value.resumeThread !== 'function'
+  ) {
+    throw new Error(
+      '[CodexProvider] Incompatible @openai/codex-sdk: Codex client does not expose startThread() and resumeThread().',
+    );
+  }
+}
+
+function assertCodexThread(value: unknown): asserts value is ThreadInstance {
+  if (!isRecord(value) || typeof value.runStreamed !== 'function') {
+    throw new Error(
+      '[CodexProvider] Incompatible @openai/codex-sdk: thread does not expose runStreamed().',
+    );
+  }
+}
 
 /**
  * Map bridge permission modes to Codex approval policies.
@@ -183,14 +237,31 @@ export class CodexProvider implements LLMProvider {
       return { sdk: this.sdk, codex: this.codex };
     }
 
+    let sdk: CodexModule;
     try {
-      this.sdk = await (Function('return import("@openai/codex-sdk")')() as Promise<CodexModule>);
-    } catch {
+      sdk = await (Function('return import("@openai/codex-sdk")')() as Promise<CodexModule>);
+    } catch (error) {
+      if (isMissingCodexPackageError(error)) {
+        throw new Error(
+          '[CodexProvider] @openai/codex-sdk is missing from this codex-to-im installation. ' +
+          'Reinstall codex-to-im or run npm install in the project root.',
+          { cause: error },
+        );
+      }
+
+      const detail = error instanceof Error ? error.message : String(error);
       throw new Error(
-        '[CodexProvider] @openai/codex-sdk is missing from this codex-to-im installation. ' +
-        'Reinstall codex-to-im or run npm install in the project root.'
+        `[CodexProvider] Failed to load @openai/codex-sdk: ${detail}`,
+        { cause: error },
       );
     }
+
+    if (!sdk || typeof sdk.Codex !== 'function') {
+      throw new Error(
+        '[CodexProvider] Incompatible @openai/codex-sdk: Codex export is unavailable.',
+      );
+    }
+    this.sdk = sdk;
 
     // Resolve API key: CTI_CODEX_API_KEY > CODEX_API_KEY > OPENAI_API_KEY > (login auth)
     const apiKey = process.env.CTI_CODEX_API_KEY
@@ -199,11 +270,13 @@ export class CodexProvider implements LLMProvider {
       || undefined;
     const baseUrl = process.env.CTI_CODEX_BASE_URL || undefined;
 
-    const CodexClass = this.sdk.Codex;
-    this.codex = new CodexClass({
+    const CodexClass = sdk.Codex;
+    const codex = new CodexClass({
       ...(apiKey ? { apiKey } : {}),
       ...(baseUrl ? { baseUrl } : {}),
     });
+    assertCodexClient(codex);
+    this.codex = codex;
 
     return { sdk: this.sdk, codex: this.codex };
   }
@@ -242,9 +315,9 @@ export class CodexProvider implements LLMProvider {
               f => f.type.startsWith('image/')
             ) ?? [];
 
-            let input: string | Array<Record<string, string>>;
+            let input: Input;
             if (imageFiles.length > 0) {
-              const parts: Array<Record<string, string>> = [
+              const parts: UserInput[] = [
                 { type: 'text', text: params.prompt },
               ];
               for (const file of imageFiles) {
@@ -278,6 +351,7 @@ export class CodexProvider implements LLMProvider {
               } else {
                 thread = codex.startThread(threadOptions);
               }
+              assertCodexThread(thread);
 
               let sawAnyEvent = false;
               let sawTerminalEvent = false;
@@ -362,16 +436,10 @@ export class CodexProvider implements LLMProvider {
                     }
 
                     case 'turn.completed': {
-                      const usage = event.usage as Record<string, unknown> | undefined;
                       const threadId = self.threadIds.get(params.sessionId);
 
                       controller.enqueue(sseEvent('result', {
-                        usage: usage ? {
-                          input_tokens: usage.input_tokens ?? 0,
-                          output_tokens: usage.output_tokens ?? 0,
-                          cache_read_input_tokens: usage.cached_input_tokens ?? 0,
-                          reasoning_output_tokens: usage.reasoning_output_tokens ?? 0,
-                        } : undefined,
+                        usage: mapCodexUsage(event.usage),
                         ...(threadId ? { session_id: threadId } : {}),
                       }));
                       sawTerminalEvent = true;
@@ -395,10 +463,9 @@ export class CodexProvider implements LLMProvider {
                     }
 
                     default: {
-                      const exhaustiveEvent: never = event;
                       console.warn(
                         '[codex-provider] Unhandled thread event:',
-                        stringifyUnknown(exhaustiveEvent),
+                        stringifyUnknown(event),
                       );
                       break;
                     }
@@ -601,10 +668,9 @@ export class CodexProvider implements LLMProvider {
       }
 
       default: {
-        const exhaustiveItem: never = item;
         console.warn(
           '[codex-provider] Unhandled thread item:',
-          stringifyUnknown(exhaustiveItem),
+          stringifyUnknown(item),
         );
         break;
       }

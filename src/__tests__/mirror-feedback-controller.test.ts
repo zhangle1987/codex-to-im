@@ -63,6 +63,39 @@ class FakeMirrorFeishuAdapter extends BaseChannelAdapter {
 }
 
 describe('mirror-feedback-controller', () => {
+  it('keeps a finalized turn pending when its channel adapter is unavailable', async () => {
+    const controller = createMirrorFeedbackController({
+      getAdapter: () => undefined,
+      getThreadTitle: () => '测试线程',
+      getStructuredStreamStatusConfig: () => ({ idleStartMs: 10_000, heartbeatMs: 10_000 }),
+      nowIso: () => '2026-05-14T00:00:02.000Z',
+      eventBatchLimit: 10,
+      deliverResponse: async () => ({ ok: true }),
+    });
+    const subscription = createMirrorSubscription({
+      bindingId: 'binding-unavailable',
+      sessionId: 'session-unavailable',
+      channelType: 'feishu-default',
+      chatId: 'chat-unavailable',
+      threadId: 'thread-unavailable',
+      filePath: 'rollout.jsonl',
+      lastDeliveredAt: null,
+    });
+
+    const result = await controller.deliverMirrorTurns(subscription, [{
+      streamKey: 'mirror:session-unavailable:turn-1',
+      userText: 'hello',
+      text: 'final answer',
+      signature: 'complete-1',
+      timestamp: '2026-05-14T00:00:01.000Z',
+      status: 'completed',
+    }]);
+
+    assert.equal(result.deliveredCount, 0);
+    assert.match(result.error instanceof Error ? result.error.message : '', /adapter unavailable/);
+    assert.equal(subscription.lastDeliveredAt, null);
+  });
+
   it('keeps last response age visible when mirror tool progress updates the status area', () => {
     initBridgeContext({
       store: new JsonFileStore(new Map([

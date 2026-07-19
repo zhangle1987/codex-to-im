@@ -560,7 +560,8 @@ describe('readDesktopSessionEventStreamByFilePath', () => {
       firstDelta.events.map((event) => ({ role: event.role, content: event.content })),
       [{ role: 'user', content: 'hello' }],
     );
-    assert.equal(firstDelta.trailingText, secondLine.slice(0, 40));
+    assert.equal(firstDelta.trailingText, '');
+    assert.equal(firstDelta.nextOffset, Buffer.byteLength(`${firstLine}\n`, 'utf8'));
 
     fs.appendFileSync(filePath, `${secondLine.slice(40)}\n`, 'utf-8');
     const secondDelta = readDesktopSessionEventDeltaByFilePath(
@@ -1532,6 +1533,11 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
             type: 'approval_request',
           },
         }),
+        JSON.stringify({
+          timestamp: '2026-03-25T00:00:02.000Z',
+          type: 'future_top_level_record',
+          payload: {},
+        }),
       ].join('\n') + '\n',
       'utf-8',
     );
@@ -1541,6 +1547,7 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
     assert.deepEqual(delta.unknownKinds.sort(), [
       'event_msg:approval_request_started',
       'response_item:approval_request',
+      'top_level:future_top_level_record',
     ]);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -1573,6 +1580,11 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
           payload: { type: 'thread_rolled_back', num_turns: 1 },
         }),
         JSON.stringify({
+          timestamp: '2026-05-14T00:00:03.500Z',
+          type: 'event_msg',
+          payload: { type: 'thread_goal_updated' },
+        }),
+        JSON.stringify({
           timestamp: '2026-05-14T00:00:04.000Z',
           type: 'response_item',
           payload: { type: 'web_search_call', status: 'completed' },
@@ -1593,12 +1605,52 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
             revised_prompt: 'ignored duplicate image payload',
           },
         }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:07.000Z',
+          type: 'session_meta',
+          payload: { id: 'thread-1' },
+        }),
       ].join('\n') + '\n',
       'utf-8',
     );
 
     const delta = readDesktopSessionMirrorRecordDeltaByFilePath(filePath, 0, fs.statSync(filePath).size);
     assert.deepEqual(delta.records, []);
+    assert.deepEqual(delta.unknownKinds, []);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('uses response_item user messages as a fallback without duplicating event_msg user messages', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    const userText = '只应镜像一次';
+    fs.writeFileSync(filePath, [
+      JSON.stringify({
+        timestamp: '2026-05-14T00:00:00.000Z',
+        type: 'turn_context',
+        payload: { turn_id: 'turn-user-fallback' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-05-14T00:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: userText },
+      }),
+      JSON.stringify({
+        timestamp: '2026-05-14T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: userText }],
+        },
+      }),
+    ].join('\n') + '\n', 'utf8');
+
+    const delta = readDesktopSessionMirrorRecordDeltaByFilePath(filePath, 0, fs.statSync(filePath).size);
+    assert.deepEqual(delta.records.map((record) => ({ role: record.role, content: record.content })), [
+      { role: 'user', content: userText },
+    ]);
     assert.deepEqual(delta.unknownKinds, []);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -1677,7 +1729,8 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
       firstDelta.records.map((record) => record.type),
       ['task_started'],
     );
-    assert.equal(firstDelta.trailingText, secondLine.slice(0, 48));
+    assert.equal(firstDelta.trailingText, '');
+    assert.equal(firstDelta.nextOffset, Buffer.byteLength(`${firstLine}\n`, 'utf8'));
 
     fs.appendFileSync(filePath, `${secondLine.slice(48)}\n`, 'utf-8');
     const secondDelta = readDesktopSessionMirrorRecordDeltaByFilePath(
@@ -1692,6 +1745,43 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
       [{ type: 'task_complete', content: 'final answer' }],
     );
     assert.equal(secondDelta.trailingText, '');
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('does not corrupt a multibyte character split across incremental reads', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    const firstLine = JSON.stringify({
+      timestamp: '2026-03-25T00:00:00.000Z',
+      type: 'event_msg',
+      payload: { type: 'task_started', turn_id: 'turn-unicode' },
+    });
+    const secondLine = JSON.stringify({
+      timestamp: '2026-03-25T00:00:01.000Z',
+      type: 'event_msg',
+      payload: { type: 'task_complete', turn_id: 'turn-unicode', last_agent_message: '最终回复' },
+    });
+    const fullBuffer = Buffer.from(`${firstLine}\n${secondLine}\n`, 'utf8');
+    const unicodeStart = fullBuffer.indexOf(Buffer.from('最终回复', 'utf8'));
+    const splitOffset = unicodeStart + 1;
+    fs.writeFileSync(filePath, fullBuffer.subarray(0, splitOffset));
+
+    const firstDelta = readDesktopSessionMirrorRecordDeltaByFilePath(filePath, 0, splitOffset);
+    assert.deepEqual(firstDelta.records.map((record) => record.type), ['task_started']);
+    assert.equal(firstDelta.nextOffset, Buffer.byteLength(`${firstLine}\n`, 'utf8'));
+
+    fs.appendFileSync(filePath, fullBuffer.subarray(splitOffset));
+    const secondDelta = readDesktopSessionMirrorRecordDeltaByFilePath(
+      filePath,
+      firstDelta.nextOffset,
+      fs.statSync(filePath).size,
+      firstDelta.trailingText,
+      firstDelta.nextTurnId,
+      firstDelta.nextSpecialCallIds,
+    );
+    assert.equal(secondDelta.records.at(-1)?.content, '最终回复');
+    assert.doesNotMatch(secondDelta.records.at(-1)?.content || '', /�/);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });

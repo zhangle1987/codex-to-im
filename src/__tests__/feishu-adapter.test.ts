@@ -1,8 +1,14 @@
 import './test-setup.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-import { FeishuAdapter } from '../lib/bridge/adapters/feishu-adapter.js';
+import {
+  FeishuAdapter,
+  validateFeishuAttachmentPath,
+} from '../lib/bridge/adapters/feishu-adapter.js';
 
 function createDeferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -13,6 +19,22 @@ function createDeferred<T = void>() {
   });
   return { promise, resolve, reject };
 }
+
+describe('feishu-adapter attachments', () => {
+  it('rejects missing, non-file, and oversized attachment paths before upload', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-feishu-attachment-'));
+    const filePath = path.join(tempDir, 'artifact.bin');
+    try {
+      fs.writeFileSync(filePath, Buffer.alloc(4));
+      assert.equal(validateFeishuAttachmentPath(filePath, 4), null);
+      assert.match(validateFeishuAttachmentPath(filePath, 3) || '', /too large/);
+      assert.match(validateFeishuAttachmentPath(tempDir, 10) || '', /not a regular file/);
+      assert.match(validateFeishuAttachmentPath(path.join(tempDir, 'missing'), 10) || '', /not found/);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('feishu-adapter structured streaming regions', () => {
   it('does not add typing reactions while starting or ending a stream', async () => {
@@ -172,6 +194,113 @@ describe('feishu-adapter structured streaming regions', () => {
       path: { message_id: 'card-message-1' },
       data: { reaction_type: { emoji_type: 'ERROR' } },
     }]);
+  });
+
+  it('retains card state and retries a transient terminal update failure', async () => {
+    let settingsCalls = 0;
+    let updateCalls = 0;
+    const adapter = new FeishuAdapter({
+      id: 'feishu-default',
+      provider: 'feishu',
+      enabled: true,
+      alias: '飞书',
+      config: {
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        streamingEnabled: true,
+      },
+    });
+    (adapter as any).cardFinalizeRetryDelaysMs = [0];
+    (adapter as any).cardTerminalReactionDelayMs = 0;
+    (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => {
+              settingsCalls += 1;
+              if (settingsCalls === 1) throw new Error('temporary CardKit failure');
+              return {};
+            },
+            update: async () => {
+              updateCalls += 1;
+              return {};
+            },
+          },
+          cardElement: {
+            content: async () => ({}),
+          },
+        },
+      },
+      im: {
+        message: {
+          reply: async () => ({ data: { message_id: 'card-message-1' } }),
+        },
+      },
+    };
+
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    const firstResult = await adapter.onStreamEnd('chat-1', 'completed', '最终回复', 'stream-1');
+
+    assert.equal(firstResult, false);
+    assert.equal((adapter as any).activeCards.has('stream-1'), true);
+    adapter.onMessageEnd('chat-1', 'stream-1');
+    assert.equal((adapter as any).activeCards.has('stream-1'), true);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(settingsCalls, 2);
+    assert.equal(updateCalls, 1);
+    assert.equal((adapter as any).activeCards.has('stream-1'), false);
+    assert.equal((adapter as any).pendingCardFinalizations.has('stream-1'), false);
+  });
+
+  it('best-effort finalizes active cards before stopping the Feishu client', async () => {
+    const cardUpdates: Array<Record<string, any>> = [];
+    const adapter = new FeishuAdapter({
+      id: 'feishu-default',
+      provider: 'feishu',
+      enabled: true,
+      alias: '飞书',
+      config: {
+        appId: 'app-id',
+        appSecret: 'app-secret',
+        streamingEnabled: true,
+      },
+    });
+    (adapter as any).running = true;
+    (adapter as any).cardTerminalReactionDelayMs = 0;
+    (adapter as any).restClient = {
+      cardkit: {
+        v1: {
+          card: {
+            create: async () => ({ data: { card_id: 'card-1' } }),
+            settings: async () => ({}),
+            update: async (payload: Record<string, any>) => {
+              cardUpdates.push(payload);
+              return {};
+            },
+          },
+          cardElement: {
+            content: async () => ({}),
+          },
+        },
+      },
+      im: {
+        message: {
+          reply: async () => ({ data: { message_id: 'card-message-1' } }),
+        },
+      },
+    };
+
+    await (adapter as any).createStreamingCard('chat-1', 'reply-1', 'stream-1');
+    await adapter.stop();
+
+    assert.equal(cardUpdates.length, 1);
+    assert.equal((adapter as any).activeCards.size, 0);
+    assert.equal((adapter as any).pendingCardFinalizations.size, 0);
+    const finalCardJson = String(cardUpdates[0]?.data?.card?.data || '');
+    assert.match(finalCardJson, /Interrupted/);
   });
 
   it('waits briefly after final card update before adding a terminal reaction', async () => {

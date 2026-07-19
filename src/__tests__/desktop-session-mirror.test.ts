@@ -75,6 +75,20 @@ describe('reconcileDesktopMirrorCursor', () => {
     assert.equal(delta.reset, false);
   });
 
+  it('recovers only records newer than the persisted delivery timestamp', () => {
+    const records = [
+      makeEvent('sig-old', 'assistant', 'old', '2026-04-13T12:00:00.000Z'),
+      makeEvent('sig-new', 'assistant', 'new', '2026-04-13T12:00:02.000Z'),
+    ];
+    const delta = reconcileDesktopMirrorCursor({
+      initialized: true,
+      lastEventTimestamp: '2026-04-13T12:00:01.000Z',
+      lastEventCount: 0,
+    }, records);
+
+    assert.deepEqual(delta.deliverableRecords.map((record) => record.signature), ['sig-new']);
+  });
+
   it('recovers newer events by timestamp when the previous signature disappeared after compaction', () => {
     const events = [
       makeEvent('x', 'user', 'older', '2026-03-25T00:00:00.000Z'),

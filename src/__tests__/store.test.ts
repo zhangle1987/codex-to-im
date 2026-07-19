@@ -336,6 +336,38 @@ describe('JsonFileStore', () => {
     assert.equal(messages[1].content, 'msg3');
   });
 
+  it('merges writes made through separate store instances without losing sessions or messages', () => {
+    const firstStore = new JsonFileStore(makeSettings());
+    const secondStore = new JsonFileStore(makeSettings());
+
+    const firstSession = firstStore.createSession('first', 'model-a', undefined, '/tmp/a');
+    const secondSession = secondStore.createSession('second', 'model-b', undefined, '/tmp/b');
+    firstStore.addMessage(firstSession.id, 'user', 'from-first-store');
+    secondStore.addMessage(firstSession.id, 'assistant', 'from-second-store');
+
+    assert.deepEqual(
+      firstStore.listSessions().map((session) => session.id).sort(),
+      [firstSession.id, secondSession.id].sort(),
+    );
+    assert.deepEqual(
+      firstStore.getMessages(firstSession.id).messages.map((message) => message.content),
+      ['from-first-store', 'from-second-store'],
+    );
+  });
+
+  it('refuses to overwrite a malformed store file during a mutation', () => {
+    const store = new JsonFileStore(makeSettings());
+    const sessionsPath = path.join(DATA_DIR, 'sessions.json');
+    const malformed = '{"session":';
+    fs.writeFileSync(sessionsPath, malformed);
+
+    assert.throws(
+      () => store.createSession('should-not-save', 'model', undefined, '/tmp'),
+      /无法读取 JSON 数据文件/,
+    );
+    assert.equal(fs.readFileSync(sessionsPath, 'utf8'), malformed);
+  });
+
   // ── Session Locking ──
 
   it('acquireSessionLock succeeds on first call', () => {

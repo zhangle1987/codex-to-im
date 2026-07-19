@@ -17,10 +17,18 @@ const TOKENS_PATH = path.join(DATA_DIR, 'weixin-context-tokens.json');
 
 function createMockStore(settings: Record<string, string> = {}) {
   const auditLogs: Array<{ summary: string }> = [];
+  const offsets = new Map<string, string>();
+  const dedup = new Set<string>();
   return {
     auditLogs,
+    offsets,
+    dedup,
     getSetting: (key: string) => settings[key] ?? null,
     insertAuditLog: (entry: { summary: string }) => { auditLogs.push(entry); },
+    getChannelOffset: (key: string) => offsets.get(key) ?? '0',
+    setChannelOffset: (key: string, value: string) => { offsets.set(key, value); },
+    checkDedup: (key: string) => dedup.has(key),
+    insertDedup: (key: string) => { dedup.add(key); },
   };
 }
 
@@ -128,5 +136,67 @@ describe('weixin-adapter voice handling', () => {
       adapter.validateConfig(),
       'Multiple linked WeChat accounts detected. Please select a WeChat account for this channel.',
     );
+  });
+
+  it('commits deferred cursors in batch order even when messages finish out of order', async () => {
+    const store = createMockStore();
+    setupContext(store);
+    const adapter = new WeixinAdapter();
+    (adapter as any).seenMessageIds.set('acct-1', new Set());
+
+    const firstBatch = (adapter as any).createPendingCursorBatch('acct-1', 'weixin:acct-1', 'cursor-1');
+    await (adapter as any).processMessage('acct-1', {
+      message_id: 'ordered-1',
+      from_user_id: 'wx-user-1',
+      item_list: [{ type: MessageItemType.TEXT, text_item: { text: 'first' } }],
+    }, firstBatch);
+    (adapter as any).pendingCursors.get(firstBatch).sealed = true;
+    (adapter as any).maybeCommitPendingCursors('acct-1');
+
+    const secondBatch = (adapter as any).createPendingCursorBatch('acct-1', 'weixin:acct-1', 'cursor-2');
+    await (adapter as any).processMessage('acct-1', {
+      message_id: 'ordered-2',
+      from_user_id: 'wx-user-1',
+      item_list: [{ type: MessageItemType.TEXT, text_item: { text: 'second' } }],
+    }, secondBatch);
+    (adapter as any).pendingCursors.get(secondBatch).sealed = true;
+    (adapter as any).maybeCommitPendingCursors('acct-1');
+
+    const first = await adapter.consumeOne();
+    const second = await adapter.consumeOne();
+    assert.ok(first && second);
+
+    adapter.acknowledgeUpdate(secondBatch, second.messageId);
+    assert.equal(store.getChannelOffset('weixin:acct-1'), '0');
+
+    adapter.acknowledgeUpdate(firstBatch, first.messageId);
+    assert.equal(store.getChannelOffset('weixin:acct-1'), 'cursor-2');
+  });
+
+  it('rolls back a rejected batch and allows its message to be replayed', async () => {
+    const store = createMockStore();
+    setupContext(store);
+    const adapter = new WeixinAdapter();
+    (adapter as any).seenMessageIds.set('acct-1', new Set());
+
+    const message = {
+      message_id: 'retry-message',
+      from_user_id: 'wx-user-1',
+      item_list: [{ type: MessageItemType.TEXT, text_item: { text: 'retry me' } }],
+    };
+    const failedBatch = (adapter as any).createPendingCursorBatch('acct-1', 'weixin:acct-1', 'cursor-failed');
+    await (adapter as any).processMessage('acct-1', message, failedBatch);
+    (adapter as any).pendingCursors.get(failedBatch).sealed = true;
+    const firstAttempt = await adapter.consumeOne();
+    assert.ok(firstAttempt);
+
+    adapter.rejectUpdate(failedBatch, firstAttempt.messageId);
+    assert.equal(store.getChannelOffset('weixin:acct-1'), '0');
+    assert.equal((adapter as any).pendingCursors.size, 0);
+
+    const retryBatch = (adapter as any).createPendingCursorBatch('acct-1', 'weixin:acct-1', 'cursor-retry');
+    await (adapter as any).processMessage('acct-1', message, retryBatch);
+    const retried = await adapter.consumeOne();
+    assert.equal(retried?.messageId, 'retry-message');
   });
 });

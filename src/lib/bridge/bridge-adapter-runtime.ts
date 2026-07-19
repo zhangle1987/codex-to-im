@@ -163,14 +163,31 @@ export function createAdapterRuntime(
             msg.text.trim().startsWith('/') ||
             deps.isNumericPermissionShortcut(adapter.provider, msg.text.trim(), msg.address.chatId)
           ) {
-            await deps.handleMessage(adapter, msg);
+            try {
+              await deps.handleMessage(adapter, msg);
+            } catch (error) {
+              if (msg.updateId != null) {
+                adapter.rejectUpdate?.(msg.updateId, msg.messageId);
+              }
+              throw error;
+            }
           } else {
-            const sessionId = deps.resolveSessionIdForMessage(msg);
-            deps.processWithSessionLock(sessionId, () =>
-              deps.handleMessage(adapter, msg),
-            ).catch(err => {
-              console.error(`[bridge-manager] Session ${sessionId.slice(0, 8)} error:`, err);
-            });
+            try {
+              const sessionId = deps.resolveSessionIdForMessage(msg);
+              deps.processWithSessionLock(sessionId, () =>
+                deps.handleMessage(adapter, msg),
+              ).catch(err => {
+                if (msg.updateId != null) {
+                  adapter.rejectUpdate?.(msg.updateId, msg.messageId);
+                }
+                console.error(`[bridge-manager] Session ${sessionId.slice(0, 8)} error:`, err);
+              });
+            } catch (error) {
+              if (msg.updateId != null) {
+                adapter.rejectUpdate?.(msg.updateId, msg.messageId);
+              }
+              throw error;
+            }
           }
         } catch (err) {
           if (abort.signal.aborted) break;

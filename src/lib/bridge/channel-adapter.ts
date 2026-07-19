@@ -29,6 +29,10 @@ export interface StructuredStreamingUiSnapshot {
   consecutiveFailures?: number;
 }
 
+export function buildInboundDedupKey(channelType: string, messageId: string): string {
+  return `inbound:${channelType}:${messageId}`;
+}
+
 export abstract class BaseChannelAdapter {
   private inboundQueue: InboundMessage[] = [];
   private inboundWaiters: Array<(msg: InboundMessage | null) => void> = [];
@@ -99,7 +103,10 @@ export abstract class BaseChannelAdapter {
    * Adapters that defer offset commits until after handleMessage should implement this.
    * Default is a no-op; override in adapters that need deferred offset tracking.
    */
-  acknowledgeUpdate?(_updateId: number): void;
+  acknowledgeUpdate?(_updateId: number, _messageId?: string): void;
+
+  /** Reject a deferred update so polling adapters can replay it safely. */
+  rejectUpdate?(_updateId: number, _messageId?: string): void;
 
   /**
    * Return preview capabilities for a given chat.

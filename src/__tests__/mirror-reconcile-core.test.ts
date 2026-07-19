@@ -1,14 +1,80 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { createMirrorSubscription } from '../lib/bridge/mirror-subscription-state.js';
 import {
   isMirrorSnapshotUnchanged,
   markMirrorSnapshotMissing,
+  readMirrorDeliverableRecords,
   refreshMirrorSubscriptionSource,
+  statMirrorFile,
 } from '../lib/bridge/mirror-reconcile-core.js';
 
 describe('mirror-reconcile-core', () => {
+  it('starts a new mirror subscription at the current complete line without replaying history', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-mirror-reconcile-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(filePath, `${JSON.stringify({
+      timestamp: '2026-04-13T12:00:00.000Z',
+      type: 'event_msg',
+      payload: { type: 'task_complete', last_agent_message: 'historical answer' },
+    })}\n`, 'utf8');
+    const subscription = createMirrorSubscription({
+      bindingId: 'binding-new',
+      sessionId: 'session-new',
+      channelType: 'feishu-default',
+      chatId: 'chat-new',
+      threadId: 'thread-new',
+      filePath,
+      lastDeliveredAt: null,
+    });
+    const snapshot = statMirrorFile(filePath);
+    assert.ok(snapshot);
+
+    const result = readMirrorDeliverableRecords(subscription, snapshot);
+
+    assert.deepEqual(result.records, []);
+    assert.equal(subscription.cursor.initialized, true);
+    assert.equal(subscription.fileOffset, snapshot.size);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('replays records newer than the persisted mirror delivery timestamp after restart', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-mirror-reconcile-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(filePath, [
+      JSON.stringify({
+        timestamp: '2026-04-13T12:00:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'task_complete', last_agent_message: 'already delivered' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-04-13T12:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'task_complete', last_agent_message: 'recover after restart' },
+      }),
+    ].join('\n') + '\n', 'utf8');
+    const subscription = createMirrorSubscription({
+      bindingId: 'binding-restart',
+      sessionId: 'session-restart',
+      channelType: 'feishu-default',
+      chatId: 'chat-restart',
+      threadId: 'thread-restart',
+      filePath,
+      lastDeliveredAt: '2026-04-13T12:00:01.000Z',
+    });
+    const snapshot = statMirrorFile(filePath);
+    assert.ok(snapshot);
+
+    const result = readMirrorDeliverableRecords(subscription, snapshot);
+
+    assert.deepEqual(result.records.map((record) => record.content), ['recover after restart']);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('refreshes the mirror source path and resets read state only when the file changes', () => {
     const subscription = createMirrorSubscription({
       bindingId: 'binding-1',
@@ -23,6 +89,7 @@ describe('mirror-reconcile-core', () => {
     subscription.dirty = false;
     subscription.fileOffset = 42;
     subscription.fileSize = 84;
+    subscription.fileOffset = 84;
     subscription.fileMtimeMs = 1000;
     subscription.fileIdentity = 'dev:ino';
     subscription.trailingText = 'partial';
@@ -111,6 +178,7 @@ describe('mirror-reconcile-core', () => {
 
     subscription.dirty = false;
     subscription.fileSize = 84;
+    subscription.fileOffset = 84;
     subscription.fileMtimeMs = 1000;
     subscription.fileIdentity = 'dev:ino';
 
@@ -125,6 +193,16 @@ describe('mirror-reconcile-core', () => {
     assert.equal(
       isMirrorSnapshotUnchanged(subscription, {
         size: 85,
+        mtimeMs: 1000,
+        identity: 'dev:ino',
+      }),
+      false,
+    );
+
+    subscription.fileOffset = 80;
+    assert.equal(
+      isMirrorSnapshotUnchanged(subscription, {
+        size: 84,
         mtimeMs: 1000,
         identity: 'dev:ino',
       }),

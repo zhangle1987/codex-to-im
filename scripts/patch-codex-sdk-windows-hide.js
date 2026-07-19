@@ -10,12 +10,12 @@ import path from 'node:path';
  * the upstream package while avoiding the extra console window on Windows.
  *
  * Maintenance rule:
- * - Keep this patch conservative and version-gated.
+ * - Keep this patch conservative and source-shape-gated.
  * - When upgrading `@openai/codex-sdk`, verify the spawn block still matches.
  * - If upstream adds `windowsHide` natively, remove this script.
  */
 const PATCH_MARKER = 'windowsHide: process.platform === "win32"';
-const SUPPORTED_SDK_VERSION = /^0\.(11\d|12\d|13\d|14[0-4])\.\d+$/;
+const MIN_SUPPORTED_SDK_VERSION = [0, 110, 0];
 
 function logSkip(message) {
   console.warn(`[postinstall] ${message}`);
@@ -38,6 +38,17 @@ function readSdkVersion(packageJsonPath) {
   } catch {
     return null;
   }
+}
+
+function isSupportedSdkVersion(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/.exec(version);
+  if (!match) return false;
+  const current = match.slice(1).map(Number);
+  for (let index = 0; index < MIN_SUPPORTED_SDK_VERSION.length; index += 1) {
+    if (current[index] > MIN_SUPPORTED_SDK_VERSION[index]) return true;
+    if (current[index] < MIN_SUPPORTED_SDK_VERSION[index]) return false;
+  }
+  return true;
 }
 
 function applyPatch(filePath) {
@@ -82,7 +93,7 @@ if (!sdkVersion) {
   process.exit(0);
 }
 
-if (!SUPPORTED_SDK_VERSION.test(sdkVersion)) {
+if (!isSupportedSdkVersion(sdkVersion)) {
   logSkip(`unsupported @openai/codex-sdk version ${sdkVersion}; skipping windowsHide patch`);
   process.exit(0);
 }

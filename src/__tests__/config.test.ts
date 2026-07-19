@@ -415,4 +415,76 @@ describe('loadConfig/saveConfig round-trip', () => {
     assert.equal(reloaded.streamStatusIdleStartSeconds, 240);
     assert.equal(reloaded.streamStatusCheckIntervalSeconds, 15);
   });
+
+  it('refuses to overwrite invalid v2 JSON with the legacy env snapshot', () => {
+    fs.mkdirSync(path.dirname(CONFIG_V2_PATH), { recursive: true });
+    const invalidJson = '{"schemaVersion":2,"runtime":';
+    fs.writeFileSync(CONFIG_V2_PATH, invalidJson);
+    fs.writeFileSync(CONFIG_PATH, 'CTI_DEFAULT_MODEL=legacy-model');
+
+    assert.throws(() => loadConfig(), /不是有效 JSON.*拒绝覆盖/);
+    assert.equal(fs.readFileSync(CONFIG_V2_PATH, 'utf8'), invalidJson);
+  });
+
+  it('refuses to overwrite a config created by a future schema version', () => {
+    fs.mkdirSync(path.dirname(CONFIG_V2_PATH), { recursive: true });
+    const futureConfig = JSON.stringify({
+      schemaVersion: 3,
+      runtime: { provider: 'codex', defaultMode: 'code' },
+      channels: [],
+    }, null, 2);
+    fs.writeFileSync(CONFIG_V2_PATH, futureConfig);
+    fs.writeFileSync(CONFIG_PATH, 'CTI_DEFAULT_MODEL=legacy-model');
+
+    assert.throws(() => loadConfig(), /不支持配置 schemaVersion=3.*拒绝/);
+    assert.equal(fs.readFileSync(CONFIG_V2_PATH, 'utf8'), futureConfig);
+  });
+
+  it('preserves unknown future fields and unsupported channels while saving known settings', () => {
+    fs.mkdirSync(path.dirname(CONFIG_V2_PATH), { recursive: true });
+    fs.writeFileSync(CONFIG_V2_PATH, JSON.stringify({
+      schemaVersion: 2,
+      futureTopLevel: { enabled: true },
+      runtime: {
+        provider: 'codex',
+        defaultMode: 'code',
+        futureRuntimeOption: 'keep-me',
+      },
+      channels: [
+        {
+          id: 'feishu-default',
+          alias: '飞书',
+          provider: 'feishu',
+          enabled: true,
+          createdAt: '2026-03-28T00:00:00.000Z',
+          updatedAt: '2026-03-28T00:00:00.000Z',
+          futureChannelOption: 42,
+          config: {
+            appId: 'app-id',
+            futureFeishuOption: 'keep-channel-config',
+          },
+        },
+        {
+          id: 'future-channel',
+          alias: 'Future',
+          provider: 'future-provider',
+          enabled: true,
+          config: { token: 'keep-unsupported-channel' },
+        },
+      ],
+    }, null, 2));
+
+    const loaded = loadConfig();
+    assert.deepEqual(loaded.channels?.map((channel) => channel.provider), ['feishu']);
+    saveConfig({ ...loaded, defaultMode: 'plan' });
+
+    const saved = JSON.parse(fs.readFileSync(CONFIG_V2_PATH, 'utf8')) as any;
+    assert.deepEqual(saved.futureTopLevel, { enabled: true });
+    assert.equal(saved.runtime.futureRuntimeOption, 'keep-me');
+    assert.equal(saved.runtime.defaultMode, 'plan');
+    assert.equal(saved.channels[0].futureChannelOption, 42);
+    assert.equal(saved.channels[0].config.futureFeishuOption, 'keep-channel-config');
+    assert.equal(saved.channels[1].provider, 'future-provider');
+    assert.equal(saved.channels[1].config.token, 'keep-unsupported-channel');
+  });
 });

@@ -82,4 +82,47 @@ describe('bridge-adapter-runtime', () => {
     assert.deepEqual(handled, ['/status']);
     assert.deepEqual(locked, []);
   });
+
+  it('rejects deferred updates when regular message handling fails', async () => {
+    const state = {
+      adapters: new Map(),
+      adapterMeta: new Map(),
+      invalidAdapters: new Map(),
+      loopAborts: new Map(),
+      running: true,
+    };
+    const rejected: Array<[number, string | undefined]> = [];
+    let consumed = false;
+    const adapter = {
+      channelType: 'weixin-default',
+      provider: 'weixin',
+      isRunning: () => !consumed,
+      consumeOne: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          messageId: 'failed-message',
+          updateId: 42,
+          address: { channelType: 'weixin-default', chatId: 'chat-failed' },
+          text: 'fail',
+          timestamp: Date.now(),
+        };
+      },
+      rejectUpdate: (updateId: number, messageId?: string) => {
+        rejected.push([updateId, messageId]);
+      },
+    };
+    const runtime = createAdapterRuntime(() => state, {
+      notifyAdapterSetChanged: () => {},
+      handleMessage: async () => { throw new Error('processing failed'); },
+      processWithSessionLock: async (_sessionId, fn) => { await fn(); },
+      isNumericPermissionShortcut: () => false,
+      resolveSessionIdForMessage: () => 'session-failed',
+    });
+
+    runtime.runAdapterLoop(adapter as never);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.deepEqual(rejected, [[42, 'failed-message']]);
+  });
 });
