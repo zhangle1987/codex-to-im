@@ -280,6 +280,8 @@ export interface StreamChatParams {
   prompt: string;
   sessionId: string;
   sdkSessionId?: string;
+  sessionOrigin?: 'bridge' | 'desktop';
+  desktopThreadId?: string;
   model?: string;
   forceModel?: boolean;
   sandboxMode?: CodexSandboxMode;
@@ -294,12 +296,21 @@ export interface StreamChatParams {
   onRuntimeStatusChange?: (status: string) => void;
 }
 
+export interface LLMThreadRuntimeStatus {
+  transport: 'app-server' | 'sdk';
+  status: 'idle' | 'active' | 'system_error' | 'not_loaded' | 'unknown';
+  processId?: number;
+}
+
 export interface LLMProvider {
   /**
    * Start a streaming chat with the LLM.
    * Returns a ReadableStream of SSE-formatted strings.
    */
   streamChat(params: StreamChatParams): ReadableStream<string>;
+  getThreadRuntimeStatus?(threadId: string): LLMThreadRuntimeStatus | null;
+  getOwnedProcessIds?(): number[];
+  dispose?(): Promise<void> | void;
 }
 
 // ── Host Interface: Permission Gateway ───────────────────────

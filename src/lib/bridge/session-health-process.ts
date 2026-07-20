@@ -16,6 +16,10 @@ export interface ThreadProcessProbeResult {
   error?: string;
 }
 
+export interface CodexProcessProbeOptions {
+  excludePids?: Iterable<number>;
+}
+
 function normalizeProbeRecord(
   threadId: string,
   checkedAt: string,
@@ -55,7 +59,10 @@ function escapePowerShellSingleQuoted(value: string): string {
   return value.replace(/'/g, "''");
 }
 
-export async function probeCodexThreadProcess(threadId: string): Promise<ThreadProcessProbeResult> {
+export async function probeCodexThreadProcess(
+  threadId: string,
+  options: CodexProcessProbeOptions = {},
+): Promise<ThreadProcessProbeResult> {
   const checkedAt = new Date().toISOString();
   const trimmedThreadId = threadId.trim();
 
@@ -79,11 +86,15 @@ export async function probeCodexThreadProcess(threadId: string): Promise<ThreadP
   }
 
   const psThreadId = escapePowerShellSingleQuoted(trimmedThreadId);
+  const excludePids = Array.from(options.excludePids || [])
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+  const excludedLiteral = excludePids.length > 0 ? excludePids.join(',') : '';
   const script = [
     `$threadId = '${psThreadId}'`,
     '$escaped = [regex]::Escape($threadId)',
+    `$excludedPids = @(${excludedLiteral})`,
     '$proc = Get-CimInstance Win32_Process | Where-Object {',
-    "  $_.Name -ieq 'codex.exe' -and $_.CommandLine -match $escaped",
+    "  $_.Name -ieq 'codex.exe' -and $_.CommandLine -match $escaped -and $excludedPids -notcontains [int]$_.ProcessId",
     '} | Select-Object -First 1 ProcessId, CreationDate, CommandLine',
     "if ($null -eq $proc) { '' } else { $proc | ConvertTo-Json -Compress }",
   ].join('; ');

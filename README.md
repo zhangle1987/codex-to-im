@@ -55,6 +55,18 @@
 - 已登录 Codex CLI
 - 已配置 `CTI_CODEX_API_KEY`、`CODEX_API_KEY` 或 `OPENAI_API_KEY`
 
+### Codex 执行后端
+
+bridge 默认使用 `auto` 策略：纯 IM 会话通过随 `@openai/codex-sdk` 固定版本安装的 Codex app-server 执行；复用 Codex Desktop thread 的会话继续使用 SDK，并结合 Desktop JSONL 做 mirror 和终态确认。Codex CLI 虽然已经提供 daemon/listen 能力，但当前 Codex Desktop 仍持有自己的 stdio app-server，没有向 bridge 发布可共享端点，因此不会尝试连接或修改 ChatGPT Remote 的私有 relay/enrollment 状态。
+
+可以通过环境变量临时切换：
+
+- `CTI_CODEX_TRANSPORT=auto`：默认策略
+- `CTI_CODEX_TRANSPORT=sdk`：全部使用 SDK，作为兼容回退
+- `CTI_CODEX_TRANSPORT=app-server`：纯 IM 会话强制使用 app-server，主要用于诊断和灰度验证；不会接管 Desktop thread
+
+`auto` 只会在 app-server 尚未发出 `turn/start` 时回退 SDK；请求一旦发出，即使响应超时也不会换后端重复执行。长驻客户端会复用已加载线程、空闲后 unsubscribe，并在终止或线程系统错误时保证事件流收尾。
+
 ### 安装
 
 ```bash

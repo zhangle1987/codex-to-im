@@ -15,6 +15,7 @@ export interface TurnCoordinatorDeps {
 export interface TurnCoordinator {
   registerInteractiveTurn(turn: ActiveBridgeTurn): void;
   getActiveTurn(sessionId: string): ActiveBridgeTurn | undefined;
+  associateDesktopTurn(sessionId: string, turnId: string): boolean;
   claimDesktopTerminal(record: BridgeTurnTerminalRecord): Promise<DesktopTerminalClaimResult>;
   releaseTurn(turnId: string): void;
   releaseSessionTurn(sessionId: string, turnId?: string): void;
@@ -32,6 +33,15 @@ export function createTurnCoordinator(deps: TurnCoordinatorDeps = {}): TurnCoord
     return activeTurnsBySession.get(sessionId);
   }
 
+  function associateDesktopTurn(sessionId: string, turnId: string): boolean {
+    const turn = activeTurnsBySession.get(sessionId);
+    const normalizedTurnId = turnId.trim();
+    if (!turn || turn.kind !== 'im_desktop_reuse' || !normalizedTurnId) return false;
+    if (turn.codexTurnId && turn.codexTurnId !== normalizedTurnId) return false;
+    turn.codexTurnId = normalizedTurnId;
+    return true;
+  }
+
   async function claimDesktopTerminal(
     terminal: BridgeTurnTerminalRecord,
   ): Promise<DesktopTerminalClaimResult> {
@@ -41,6 +51,9 @@ export function createTurnCoordinator(deps: TurnCoordinatorDeps = {}): TurnCoord
     }
     if (turn.desktopThreadId && turn.desktopThreadId !== terminal.desktopThreadId) {
       return { claimed: false };
+    }
+    if (!turn.codexTurnId || terminal.turnId !== turn.codexTurnId) {
+      return { claimed: false, turn };
     }
 
     const finalized = await deps.finalizeTerminalTurn?.(turn, terminal);
@@ -69,6 +82,7 @@ export function createTurnCoordinator(deps: TurnCoordinatorDeps = {}): TurnCoord
   return {
     registerInteractiveTurn,
     getActiveTurn,
+    associateDesktopTurn,
     claimDesktopTerminal,
     releaseTurn,
     releaseSessionTurn,

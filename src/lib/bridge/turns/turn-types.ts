@@ -18,6 +18,7 @@ export interface ActiveBridgeTurn {
   finalSource: BridgeTurnFinalSource;
   codexThreadId?: string;
   desktopThreadId?: string;
+  codexTurnId?: string;
   requestMessageId?: string;
   streamKey?: string;
   startedAt: number;

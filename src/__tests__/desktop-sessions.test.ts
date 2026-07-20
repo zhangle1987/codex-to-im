@@ -4,17 +4,31 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
 
 import {
   listDesktopSessions,
   readDesktopSessionEventDeltaByFilePath,
   readDesktopSessionEventStreamByFilePath,
+  readDesktopSessionMessagesByFilePath,
   readDesktopSessionMirrorRecordDeltaByFilePath,
   readDesktopSessionMirrorRecordStreamByFilePath,
 } from '../desktop-sessions.js';
 
 const originalCodexHome = process.env.CODEX_HOME;
+const localRequire = createRequire(import.meta.url);
+
+function getTestDatabaseSync(): (new (filePath: string) => {
+  exec(sql: string): void;
+  prepare(sql: string): { run(...params: unknown[]): unknown };
+  close(): void;
+}) | null {
+  try {
+    return localRequire('node:sqlite').DatabaseSync;
+  } catch {
+    return null;
+  }
+}
 
 afterEach(() => {
   if (originalCodexHome === undefined) {
@@ -267,7 +281,12 @@ describe('listDesktopSessions', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('includes freshly created desktop threads that have reached session_index before the state db catches up', () => {
+  it('includes freshly created desktop threads that have reached session_index before the state db catches up', (t) => {
+    const DatabaseSync = getTestDatabaseSync();
+    if (!DatabaseSync) {
+      t.skip('node:sqlite is unavailable on this Node version');
+      return;
+    }
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-sessions-'));
     process.env.CODEX_HOME = tempRoot;
 
@@ -352,6 +371,68 @@ describe('listDesktopSessions', () => {
     assert.deepEqual(threadIds, [freshThreadId, visibleThreadId]);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('uses state db titles and rollout paths while excluding subagent rows', (t) => {
+    const DatabaseSync = getTestDatabaseSync();
+    if (!DatabaseSync) {
+      t.skip('node:sqlite is unavailable on this Node version');
+      return;
+    }
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-state-'));
+    process.env.CODEX_HOME = tempRoot;
+    const sessionsDir = path.join(tempRoot, 'sessions', '2026', '07', '20');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    const userThreadId = '019f7dc8-55df-76f0-8b98-99b548eb6885';
+    const subagentThreadId = '019f7dc8-55df-76f0-8b98-99b548eb6886';
+
+    const writeRollout = (threadId: string, source: unknown) => {
+      const rolloutPath = path.join(sessionsDir, `rollout-2026-07-20T12-28-34-${threadId}.jsonl`);
+      fs.writeFileSync(rolloutPath, JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          id: threadId,
+          cwd: 'D:\\codex\\test',
+          originator: 'Codex Desktop',
+          source,
+        },
+      }) + '\n', 'utf8');
+      return rolloutPath;
+    };
+    const userRolloutPath = writeRollout(userThreadId, 'vscode');
+    const subagentRolloutPath = writeRollout(subagentThreadId, { subagent: { parent_thread_id: userThreadId } });
+
+    const db = new DatabaseSync(path.join(tempRoot, 'state_5.sqlite'));
+    db.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        rollout_path TEXT,
+        updated_at INTEGER NOT NULL,
+        updated_at_ms INTEGER,
+        archived INTEGER NOT NULL,
+        source TEXT,
+        thread_source TEXT,
+        title TEXT,
+        cwd TEXT
+      );
+    `);
+    const insert = db.prepare(`
+      INSERT INTO threads
+        (id, rollout_path, updated_at, updated_at_ms, archived, source, thread_source, title, cwd)
+      VALUES (?, ?, 1, ?, 0, 'vscode', ?, ?, 'D:\\codex\\test')
+    `);
+    insert.run(userThreadId, userRolloutPath, 2_000, 'user', 'Authoritative title');
+    insert.run(subagentThreadId, subagentRolloutPath, 3_000, 'subagent', 'Hidden subagent');
+    db.close();
+
+    try {
+      const sessions = listDesktopSessions(10);
+      assert.deepEqual(sessions.map((session) => session.threadId), [userThreadId]);
+      assert.equal(sessions[0]?.title, 'Authoritative title');
+      assert.equal(sessions[0]?.filePath, userRolloutPath);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -578,6 +659,39 @@ describe('readDesktopSessionEventStreamByFilePath', () => {
     assert.equal(secondDelta.trailingText, '');
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+describe('readDesktopSessionMessagesByFilePath', () => {
+  it('reads recent history from the bounded file tail', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-history-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    const ignoredLine = JSON.stringify({
+      timestamp: '2026-07-20T00:00:00.000Z',
+      type: 'response_item',
+      payload: { type: 'function_call_output', call_id: 'large', output: 'x'.repeat(4_000) },
+    });
+    const lines = Array.from({ length: 400 }, () => ignoredLine);
+    lines.push(JSON.stringify({
+      timestamp: '2026-07-20T00:00:01.000Z',
+      type: 'event_msg',
+      payload: { type: 'user_message', message: 'recent question' },
+    }));
+    lines.push(JSON.stringify({
+      timestamp: '2026-07-20T00:00:02.000Z',
+      type: 'response_item',
+      payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'recent answer' }] },
+    }));
+    fs.writeFileSync(filePath, `${lines.join('\n')}\n`, 'utf8');
+
+    try {
+      assert.deepEqual(readDesktopSessionMessagesByFilePath(filePath, 2), [
+        { role: 'user', content: 'recent question' },
+        { role: 'assistant', content: 'recent answer' },
+      ]);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1850,5 +1964,30 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
     assert.doesNotMatch(secondDelta.records.at(-1)?.content || '', /�/);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('prefers response item metadata turn ids over stale turn context', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-turn-metadata-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ type: 'turn_context', payload: { turn_id: 'stale-turn' } }),
+      JSON.stringify({
+        timestamp: '2026-07-20T00:00:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'current answer' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'current-turn' },
+        },
+      }),
+    ].join('\n') + '\n', 'utf8');
+
+    try {
+      const records = readDesktopSessionMirrorRecordStreamByFilePath(filePath);
+      assert.equal(records[0]?.turnId, 'current-turn');
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });

@@ -41,6 +41,7 @@ describe('turn-coordinator', () => {
       },
     });
     coordinator.registerInteractiveTurn(activeTurn());
+    coordinator.associateDesktopTurn('session-1', 'desktop-turn-1');
 
     const result = await coordinator.claimDesktopTerminal(terminal());
 
@@ -66,16 +67,42 @@ describe('turn-coordinator', () => {
     assert.equal(result.claimed, false);
   });
 
+  it('does not claim a terminal before the Desktop turn is associated', async () => {
+    const coordinator = createTurnCoordinator({
+      finalizeTerminalTurn: async () => true,
+    });
+    coordinator.registerInteractiveTurn(activeTurn());
+
+    const result = await coordinator.claimDesktopTerminal(terminal());
+
+    assert.equal(result.claimed, false);
+  });
+
   it('does not claim terminals from another desktop thread', async () => {
     const coordinator = createTurnCoordinator({
       finalizeTerminalTurn: async () => true,
     });
     coordinator.registerInteractiveTurn(activeTurn());
+    coordinator.associateDesktopTurn('session-1', 'desktop-turn-1');
 
     const result = await coordinator.claimDesktopTerminal(terminal({
       desktopThreadId: 'other-thread',
     }));
 
     assert.equal(result.claimed, false);
+  });
+
+  it('only claims the desktop terminal associated with the active IM turn', async () => {
+    const coordinator = createTurnCoordinator({
+      finalizeTerminalTurn: async () => true,
+    });
+    coordinator.registerInteractiveTurn(activeTurn());
+    assert.equal(coordinator.associateDesktopTurn('session-1', 'desktop-turn-expected'), true);
+
+    const stale = await coordinator.claimDesktopTerminal(terminal({ turnId: 'desktop-turn-stale' }));
+    const expected = await coordinator.claimDesktopTerminal(terminal({ turnId: 'desktop-turn-expected' }));
+
+    assert.equal(stale.claimed, false);
+    assert.equal(expected.claimed, true);
   });
 });

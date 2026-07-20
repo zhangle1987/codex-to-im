@@ -23,6 +23,8 @@ export interface MirrorSuppressionConfig {
   promptMatchGraceMs: number;
 }
 
+export type OnMirrorTurnAssociated = (sessionId: string, turnId: string) => void;
+
 export function normalizeMirrorPromptText(text: string): string {
   return text.replace(/\r\n/g, '\n').normalize('NFKC').trim();
 }
@@ -204,6 +206,7 @@ export function filterSuppressedMirrorRecords(
   records: DesktopMirrorRecord[],
   config: MirrorSuppressionConfig,
   nowMs = Date.now(),
+  onTurnAssociated?: OnMirrorTurnAssociated,
 ): DesktopMirrorRecord[] {
   const suppressions = getMirrorSuppressionStates(store, sessionId, nowMs);
   const ignoredTurnIds = cleanupIgnoredMirrorTurns(store, sessionId, nowMs);
@@ -254,6 +257,9 @@ export function filterSuppressedMirrorRecords(
             suppression.awaitingPromptMatch = false;
             suppression.droppingTurn = true;
             suppression.activeTurnId = record.turnId || suppression.candidateTurnId || null;
+            if (suppression.activeTurnId) {
+              onTurnAssociated?.(sessionId, suppression.activeTurnId);
+            }
             handled = true;
             break;
           }
@@ -332,4 +338,35 @@ export function filterSuppressedMirrorRecords(
   }
 
   return filtered;
+}
+
+export function associateMirrorSuppressionTurns(
+  store: MirrorSuppressionStore,
+  sessionId: string,
+  records: DesktopMirrorRecord[],
+  nowMs = Date.now(),
+  onTurnAssociated?: OnMirrorTurnAssociated,
+): void {
+  const suppressions = getMirrorSuppressionStates(store, sessionId, nowMs);
+  if (suppressions.length === 0 || records.length === 0) return;
+
+  const suppression = suppressions[0];
+  if (!suppression.awaitingPromptMatch) return;
+  for (const record of records) {
+    if (record.type === 'task_started' && record.turnId) {
+      suppression.candidateTurnId = record.turnId;
+      continue;
+    }
+    if (record.type !== 'message' || record.role !== 'user') continue;
+    if (isSyntheticDesktopUserContext(record.content || '')) continue;
+    const normalizedContent = normalizeMirrorPromptText(record.content || '');
+    if (!suppression.promptText || normalizedContent !== suppression.promptText) break;
+    const turnId = record.turnId || suppression.candidateTurnId;
+    if (!turnId) break;
+    suppression.awaitingPromptMatch = false;
+    suppression.droppingTurn = true;
+    suppression.activeTurnId = turnId;
+    onTurnAssociated?.(sessionId, turnId);
+    break;
+  }
 }

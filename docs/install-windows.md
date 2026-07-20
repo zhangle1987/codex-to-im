@@ -64,6 +64,8 @@ npm -v
 - 已有可用的 Codex CLI 登录态
 - 已配置可用的 API Key（`CTI_CODEX_API_KEY`、`CODEX_API_KEY` 或 `OPENAI_API_KEY`）
 
+bridge 默认以 `CTI_CODEX_TRANSPORT=auto` 运行：纯 IM 会话使用包内 Codex app-server，Desktop thread 复用保持 SDK + JSONL 路径。即使显式设置 `CTI_CODEX_TRANSPORT=app-server`，Desktop thread 也不会被独立 app-server 接管。需要紧急回退时，可在服务环境中设置 `CTI_CODEX_TRANSPORT=sdk` 后按安全流程重启服务；不要直接连接或改写 Codex Desktop 的 Remote enrollment 数据。
+
 说明：
 
 - `codex-to-im` 现在已经随包带上运行 bridge 所需的 `@openai/codex-sdk` / Codex CLI 平台依赖

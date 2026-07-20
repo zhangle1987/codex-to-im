@@ -50,6 +50,7 @@ import {
   type FinalizedDesktopMirrorTurn,
 } from './mirror-turns.js';
 import {
+  associateMirrorSuppressionTurns as associateMirrorSuppressionTurnsBase,
   abortMirrorSuppression as abortMirrorSuppressionBase,
   beginMirrorSuppression as beginMirrorSuppressionBase,
   filterSuppressedMirrorRecords as filterSuppressedMirrorRecordsBase,
@@ -94,6 +95,7 @@ import {
 import {
   isCodexThreadProcessDefinitelyGone,
   probeCodexThreadProcess,
+  type ThreadProcessProbeResult,
 } from './session-health-process.js';
 import { createSessionHealthRuntime } from './session-health-runtime.js';
 import { deliverBridgeNotice, deliverResponse } from './feedback-delivery.js';
@@ -262,10 +264,52 @@ const TURN_COORDINATOR = createTurnCoordinator({
   ),
 });
 
+function getBridgeOwnedCodexProcessIds(): number[] {
+  try {
+    return getBridgeContext().llm.getOwnedProcessIds?.() || [];
+  } catch {
+    return [];
+  }
+}
+
+async function probeManagedThreadProcess(threadId: string): Promise<ThreadProcessProbeResult> {
+  const checkedAt = nowIso();
+  try {
+    const runtime = getBridgeContext().llm.getThreadRuntimeStatus?.(threadId);
+    if (runtime) {
+      if (runtime.status === 'system_error') {
+        return {
+          threadId,
+          status: 'error',
+          supported: true,
+          checkedAt,
+          ...(runtime.processId ? { pid: runtime.processId } : {}),
+          error: 'Codex app-server reported a system error for this thread',
+        };
+      }
+      if (runtime.status !== 'not_loaded') {
+        return {
+          threadId,
+          status: 'alive',
+          supported: true,
+          checkedAt,
+          ...(runtime.processId ? { pid: runtime.processId } : {}),
+          commandLine: `codex app-server (${runtime.status})`,
+        };
+      }
+    }
+  } catch {
+    // Fall back to the OS-level probe.
+  }
+  return probeCodexThreadProcess(threadId, {
+    excludePids: getBridgeOwnedCodexProcessIds(),
+  });
+}
+
 const SESSION_HEALTH_RUNTIME = createSessionHealthRuntime({
   getStore: () => getBridgeContext().store,
   nowIso,
-  probeThreadProcess: (threadId) => probeCodexThreadProcess(threadId),
+  probeThreadProcess: probeManagedThreadProcess,
 });
 
 const MIRROR_SUPPRESSION_CONFIG: MirrorSuppressionConfig = {
@@ -324,6 +368,25 @@ function filterSuppressedMirrorRecords(
     sessionId,
     records,
     MIRROR_SUPPRESSION_CONFIG,
+    Date.now(),
+    (associatedSessionId, turnId) => {
+      TURN_COORDINATOR.associateDesktopTurn(associatedSessionId, turnId);
+    },
+  );
+}
+
+function associateSuppressedDesktopTurn(
+  sessionId: string,
+  records: DesktopMirrorRecord[],
+): void {
+  associateMirrorSuppressionTurnsBase(
+    getMirrorSuppressionStore(),
+    sessionId,
+    records,
+    Date.now(),
+    (associatedSessionId, turnId) => {
+      TURN_COORDINATOR.associateDesktopTurn(associatedSessionId, turnId);
+    },
   );
 }
 
@@ -479,13 +542,16 @@ const MIRROR_RUNTIME = createMirrorRuntime(getState, {
   recordOrphanedMirrorTurn: (sessionId, detail) => {
     SESSION_HEALTH_RUNTIME.recordInteractiveEnd(sessionId, 'aborted', detail);
   },
-  isThreadProcessDefinitelyGone: isCodexThreadProcessDefinitelyGone,
-  routeDesktopRecords: (sessionId, threadId, records) => routeDesktopRecords(
-    sessionId,
+  isThreadProcessDefinitelyGone: (threadId) => isCodexThreadProcessDefinitelyGone(
     threadId,
-    records,
-    TURN_COORDINATOR,
+    (probeValue) => probeCodexThreadProcess(probeValue, {
+      excludePids: getBridgeOwnedCodexProcessIds(),
+    }),
   ),
+  routeDesktopRecords: (sessionId, threadId, records) => {
+    associateSuppressedDesktopTurn(sessionId, records);
+    return routeDesktopRecords(sessionId, threadId, records, TURN_COORDINATOR);
+  },
   consumeMirrorRecords,
   flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription),
   hasPendingMirrorWork,

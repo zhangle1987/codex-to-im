@@ -13,10 +13,19 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { Input, ThreadEvent, ThreadItem, UserInput } from '@openai/codex-sdk';
-import type { LLMProvider, StreamChatParams, TokenUsage } from './lib/bridge/host.js';
+import type {
+  LLMProvider,
+  LLMThreadRuntimeStatus,
+  StreamChatParams,
+  TokenUsage,
+} from './lib/bridge/host.js';
 import type { PendingPermissions } from './permission-gateway.js';
 import { sseEvent } from './sse-utils.js';
 import type { CodexReasoningEffort, CodexSandboxMode } from './config.js';
+import {
+  AppServerPreTurnError,
+  CodexAppServerClient,
+} from './codex-app-server-client.js';
 import {
   normalizeSandboxMode,
   parseReasoningEffort,
@@ -51,14 +60,16 @@ function normalizeTokenCount(value: unknown): number {
 export function mapCodexUsage(usage: unknown): TokenUsage | undefined {
   if (!isRecord(usage)) return undefined;
 
-  const cacheRead = usage.cached_input_tokens ?? usage.cache_read_input_tokens;
-  const cacheCreation = usage.cache_write_input_tokens ?? usage.cache_creation_input_tokens;
+  const cacheRead = usage.cached_input_tokens ?? usage.cache_read_input_tokens ?? usage.cachedInputTokens;
+  const cacheCreation = usage.cache_write_input_tokens
+    ?? usage.cache_creation_input_tokens
+    ?? usage.cacheWriteInputTokens;
 
   return {
-    input_tokens: normalizeTokenCount(usage.input_tokens),
-    output_tokens: normalizeTokenCount(usage.output_tokens),
+    input_tokens: normalizeTokenCount(usage.input_tokens ?? usage.inputTokens),
+    output_tokens: normalizeTokenCount(usage.output_tokens ?? usage.outputTokens),
     cache_read_input_tokens: normalizeTokenCount(cacheRead),
-    reasoning_output_tokens: normalizeTokenCount(usage.reasoning_output_tokens),
+    reasoning_output_tokens: normalizeTokenCount(usage.reasoning_output_tokens ?? usage.reasoningOutputTokens),
     ...(cacheCreation === undefined
       ? {}
       : { cache_creation_input_tokens: normalizeTokenCount(cacheCreation) }),
@@ -216,14 +227,120 @@ function stringifyUnknown(value: unknown): string {
   }
 }
 
+export type CodexTransport = 'sdk' | 'app-server' | 'auto';
+
+export interface CodexProviderOptions {
+  transport?: string;
+  appServerClient?: CodexAppServerClient;
+}
+
+function normalizeTransport(value: string | undefined): CodexTransport {
+  return value === 'app-server' || value === 'auto' ? value : 'sdk';
+}
+
+function normalizeAppServerItem(item: Record<string, unknown>): ThreadItem | null {
+  const type = typeof item.type === 'string' ? item.type : '';
+  const id = typeof item.id === 'string' ? item.id : `item-${Date.now()}`;
+  switch (type) {
+    case 'agentMessage':
+      return { type: 'agent_message', id, text: typeof item.text === 'string' ? item.text : '' } as ThreadItem;
+    case 'reasoning': {
+      const summary = Array.isArray(item.summary) ? item.summary.filter((part): part is string => typeof part === 'string') : [];
+      const content = Array.isArray(item.content) ? item.content.filter((part): part is string => typeof part === 'string') : [];
+      return { type: 'reasoning', id, text: [...summary, ...content].join('\n\n') } as ThreadItem;
+    }
+    case 'commandExecution':
+      return {
+        type: 'command_execution',
+        id,
+        command: typeof item.command === 'string' ? item.command : '',
+        aggregated_output: typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput : '',
+        exit_code: typeof item.exitCode === 'number' ? item.exitCode : undefined,
+        status: item.status,
+      } as unknown as ThreadItem;
+    case 'fileChange':
+      return {
+        type: 'file_change',
+        id,
+        changes: Array.isArray(item.changes) ? item.changes : [],
+        status: item.status,
+      } as unknown as ThreadItem;
+    case 'mcpToolCall':
+      return {
+        type: 'mcp_tool_call',
+        id,
+        server: typeof item.server === 'string' ? item.server : '',
+        tool: typeof item.tool === 'string' ? item.tool : '',
+        arguments: item.arguments,
+        status: item.status,
+        result: item.result,
+        error: item.error,
+      } as unknown as ThreadItem;
+    case 'dynamicToolCall':
+      return {
+        type: 'mcp_tool_call',
+        id,
+        server: typeof item.namespace === 'string' ? item.namespace : 'dynamic',
+        tool: typeof item.tool === 'string' ? item.tool : 'tool',
+        arguments: item.arguments,
+        status: item.status,
+        result: { content: item.contentItems },
+        error: item.success === false ? { message: 'Dynamic tool call failed' } : undefined,
+      } as unknown as ThreadItem;
+    case 'webSearch':
+      return {
+        type: 'web_search',
+        id,
+        query: typeof item.query === 'string' ? item.query : '',
+      } as unknown as ThreadItem;
+    case 'imageGeneration': {
+      const savedPath = typeof item.savedPath === 'string' ? item.savedPath : '';
+      const resultText = savedPath || (typeof item.result === 'string' ? item.result : 'Image generation completed');
+      return {
+        type: 'mcp_tool_call',
+        id,
+        server: 'codex',
+        tool: 'image_generation',
+        arguments: { prompt: item.revisedPrompt },
+        status: item.status,
+        result: { content: [{ type: 'text', text: resultText }] },
+        error: item.status === 'failed' ? { message: resultText } : undefined,
+      } as unknown as ThreadItem;
+    }
+    default:
+      return null;
+  }
+}
+
 export class CodexProvider implements LLMProvider {
   private sdk: CodexModule | null = null;
   private codex: CodexInstance | null = null;
+  private readonly pendingPermissions?: PendingPermissions;
+  private readonly transport: CodexTransport;
+  private appServerClient: CodexAppServerClient | null;
+  private warnedDesktopAppServerOverride = false;
 
   /** Maps session IDs to Codex thread IDs for resume. */
   private threadIds = new Map<string, string>();
 
-  constructor(_pendingPerms?: PendingPermissions) {}
+  constructor(pendingPerms?: PendingPermissions, options: CodexProviderOptions = {}) {
+    this.pendingPermissions = pendingPerms;
+    this.transport = normalizeTransport(options.transport ?? process.env.CTI_CODEX_TRANSPORT);
+    this.appServerClient = options.appServerClient || null;
+  }
+
+  async dispose(): Promise<void> {
+    await this.appServerClient?.close();
+  }
+
+  getOwnedProcessIds(): number[] {
+    return this.appServerClient?.getOwnedProcessIds() || [];
+  }
+
+  getThreadRuntimeStatus(threadId: string): LLMThreadRuntimeStatus | null {
+    const runtime = this.appServerClient?.getThreadRuntimeStatus(threadId);
+    return runtime ? { transport: 'app-server', ...runtime } : null;
+  }
 
   private clearCachedThreadId(sessionId: string): void {
     this.threadIds.delete(sessionId);
@@ -282,6 +399,22 @@ export class CodexProvider implements LLMProvider {
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
+    const desktopBacked = params.sessionOrigin === 'desktop' || Boolean(params.desktopThreadId);
+    if (desktopBacked && this.transport === 'app-server' && !this.warnedDesktopAppServerOverride) {
+      this.warnedDesktopAppServerOverride = true;
+      console.warn(
+        '[codex-provider] Ignoring CTI_CODEX_TRANSPORT=app-server for Desktop-backed sessions; '
+        + 'a separate app-server cannot safely attach to the Desktop host process.',
+      );
+    }
+    const useAppServer = !desktopBacked && (this.transport === 'app-server' || this.transport === 'auto');
+    if (useAppServer) {
+      return this.streamChatViaAppServer(params, this.transport === 'auto');
+    }
+    return this.streamChatViaSdk(params);
+  }
+
+  private streamChatViaSdk(params: StreamChatParams): ReadableStream<string> {
     const self = this;
 
     return new ReadableStream<string>({
@@ -528,6 +661,223 @@ export class CodexProvider implements LLMProvider {
             // Clean up temp image files
             for (const tmp of tempFiles) {
               try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+            }
+          }
+        })();
+      },
+    });
+  }
+
+  private streamChatViaAppServer(
+    params: StreamChatParams,
+    allowSdkFallback: boolean,
+  ): ReadableStream<string> {
+    const self = this;
+    return new ReadableStream<string>({
+      start(controller) {
+        (async () => {
+          const tempFiles: string[] = [];
+          try {
+            const imageFiles = params.files?.filter((file) => file.type.startsWith('image/')) || [];
+            const imagePaths: string[] = [];
+            for (const file of imageFiles) {
+              if (file.filePath && fs.existsSync(file.filePath)) {
+                imagePaths.push(file.filePath);
+                continue;
+              }
+              const ext = MIME_EXT[file.type] || '.png';
+              const tmpPath = path.join(
+                os.tmpdir(),
+                `cti-img-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`,
+              );
+              fs.writeFileSync(tmpPath, Buffer.from(file.data, 'base64'));
+              tempFiles.push(tmpPath);
+              imagePaths.push(tmpPath);
+            }
+
+            self.appServerClient ||= new CodexAppServerClient(self.pendingPermissions);
+            let turn;
+            try {
+              turn = await self.appServerClient.startTurn({
+                savedThreadId: self.threadIds.get(params.sessionId) || params.sdkSessionId || undefined,
+                prompt: params.prompt,
+                imagePaths,
+                model: params.model,
+                forceModel: params.forceModel,
+                modelReasoningEffort: parseReasoningEffort(params.modelReasoningEffort),
+                workingDirectory: params.workingDirectory,
+                sandboxMode: normalizeSandboxMode(params.sandboxMode),
+                permissionMode: params.permissionMode,
+                systemPrompt: params.systemPrompt,
+                skipGitRepoCheck: shouldSkipGitRepoCheck(),
+                abortSignal: params.abortController?.signal,
+              });
+            } catch (error) {
+              if (allowSdkFallback && error instanceof AppServerPreTurnError) {
+                console.warn('[codex-provider] app-server unavailable before turn/start; falling back to SDK:', error.message);
+                const fallback = self.streamChatViaSdk(params).getReader();
+                try {
+                  while (true) {
+                    const { done, value } = await fallback.read();
+                    if (done) break;
+                    controller.enqueue(value);
+                  }
+                  controller.close();
+                } finally {
+                  fallback.releaseLock();
+                }
+                return;
+              }
+              throw error;
+            }
+
+            self.threadIds.set(params.sessionId, turn.threadId);
+            controller.enqueue(sseEvent('status', {
+              session_id: turn.threadId,
+              turn_id: turn.turnId,
+              transport: 'app-server',
+            }));
+
+            const emittedToolStarts = new Set<string>();
+            const streamedAgentItems = new Set<string>();
+            const agentItemPhases = new Map<string, string>();
+            const reasoningText = new Map<string, string>();
+            let usage: TokenUsage | undefined;
+            let terminalSeen = false;
+
+            for await (const event of turn.events) {
+              if (params.abortController?.signal.aborted && event.type !== 'turn.completed') {
+                continue;
+              }
+              switch (event.type) {
+                case 'agent_message.delta':
+                  if (event.delta) {
+                    if (agentItemPhases.get(event.itemId) === 'commentary') {
+                      const accumulated = `${reasoningText.get(event.itemId) || ''}${event.delta}`;
+                      reasoningText.set(event.itemId, accumulated);
+                      controller.enqueue(sseEvent('status', { reasoning: accumulated }));
+                      break;
+                    }
+                    streamedAgentItems.add(event.itemId);
+                    controller.enqueue(sseEvent('text', event.delta));
+                  }
+                  break;
+                case 'reasoning.delta': {
+                  const accumulated = `${reasoningText.get(event.itemId) || ''}${event.delta}`;
+                  reasoningText.set(event.itemId, accumulated);
+                  if (accumulated.trim()) {
+                    controller.enqueue(sseEvent('status', { reasoning: accumulated }));
+                  }
+                  break;
+                }
+                case 'item.started':
+                case 'item.completed': {
+                  const itemId = typeof event.item.id === 'string' ? event.item.id : '';
+                  if (event.item.type === 'agentMessage' && itemId) {
+                    const phase = typeof event.item.phase === 'string' ? event.item.phase : '';
+                    if (phase) agentItemPhases.set(itemId, phase);
+                    if (phase === 'commentary') {
+                      if (event.type === 'item.completed' && !reasoningText.has(itemId)) {
+                        const text = typeof event.item.text === 'string' ? event.item.text : '';
+                        if (text.trim()) controller.enqueue(sseEvent('status', { reasoning: text }));
+                      }
+                      break;
+                    }
+                  }
+                  const normalized = normalizeAppServerItem(event.item);
+                  if (!normalized) break;
+                  if (
+                    event.type === 'item.completed'
+                    && normalized.type === 'agent_message'
+                    && streamedAgentItems.has(normalized.id)
+                  ) {
+                    break;
+                  }
+                  self.handleItemEvent(
+                    controller,
+                    normalized,
+                    event.type === 'item.started' ? 'started' : 'completed',
+                    params.sessionId,
+                    emittedToolStarts,
+                  );
+                  break;
+                }
+                case 'plan.updated': {
+                  const tasks = event.plan.map((step) => ({
+                    text: step.step,
+                    status: step.status === 'completed'
+                      ? 'completed' as const
+                      : step.status === 'inProgress' || step.status === 'in_progress'
+                        ? 'in_progress' as const
+                        : 'pending' as const,
+                  }));
+                  controller.enqueue(sseEvent('task_update', {
+                    session_id: turn.threadId,
+                    sdk_session_id: turn.threadId,
+                    tasks,
+                    todos: tasks,
+                  }));
+                  break;
+                }
+                case 'usage.updated':
+                  usage = mapCodexUsage(event.usage);
+                  break;
+                case 'model.updated':
+                  controller.enqueue(sseEvent('status', { model: event.model }));
+                  break;
+                case 'permission.request':
+                  controller.enqueue(sseEvent('permission_request', {
+                    permissionRequestId: event.requestId,
+                    toolName: event.toolName,
+                    toolInput: event.toolInput,
+                    suggestions: event.suggestions,
+                  }));
+                  break;
+                case 'warning':
+                  controller.enqueue(sseEvent('status', { reasoning: event.message }));
+                  break;
+                case 'turn.completed':
+                  terminalSeen = true;
+                  if (event.status === 'completed') {
+                    controller.enqueue(sseEvent('result', {
+                      usage,
+                      session_id: turn.threadId,
+                      turn_id: turn.turnId,
+                    }));
+                  } else if (event.status === 'failed') {
+                    self.clearCachedThreadId(params.sessionId);
+                    controller.enqueue(sseEvent(
+                      'error',
+                      normalizeCodexErrorMessage(event.errorMessage || 'Turn failed'),
+                    ));
+                  } else if (!params.abortController?.signal.aborted) {
+                    controller.enqueue(sseEvent('error', event.errorMessage || 'Task interrupted'));
+                  }
+                  break;
+              }
+            }
+
+            if (!terminalSeen && !params.abortController?.signal.aborted) {
+              throw new Error('Codex app-server stream ended without turn/completed');
+            }
+            controller.close();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error('[codex-provider] app-server error:', error instanceof Error ? error.stack || error.message : error);
+            self.clearCachedThreadId(params.sessionId);
+            if (params.abortController?.signal.aborted) {
+              try { controller.close(); } catch { /* controller already closed */ }
+              return;
+            }
+            try {
+              controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(message)));
+              controller.close();
+            } catch {
+              // Controller already closed.
+            }
+          } finally {
+            for (const tempFile of tempFiles) {
+              try { fs.unlinkSync(tempFile); } catch { /* best effort */ }
             }
           }
         })();

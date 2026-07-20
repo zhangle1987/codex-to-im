@@ -380,6 +380,8 @@ export async function processMessage(
         prompt: promptText,
         sessionId,
         sdkSessionId: binding.sdkSessionId || undefined,
+        sessionOrigin: session?.thread_origin === 'desktop' ? 'desktop' : 'bridge',
+        desktopThreadId: session?.desktop_thread_id || undefined,
         model: effectiveModel,
         forceModel: !binding.sdkSessionId && Boolean(effectiveModel),
         sandboxMode,

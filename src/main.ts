@@ -30,9 +30,11 @@ const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');
 const PID_FILE = path.join(RUNTIME_DIR, 'bridge.pid');
 const runId = crypto.randomUUID();
 
-async function resolveProvider(): Promise<LLMProvider> {
+async function resolveProvider(pendingPerms: PendingPermissions): Promise<LLMProvider> {
   const { CodexProvider } = await import('./codex-provider.js');
-  return new CodexProvider();
+  return new CodexProvider(pendingPerms, {
+    transport: process.env.CTI_CODEX_TRANSPORT || 'auto',
+  });
 }
 
 function writeStatus(info: RuntimeStatusInfo, options: RuntimeStatusWriteOptions = {}): boolean {
@@ -79,7 +81,7 @@ async function main(): Promise<void> {
   const settings = configToSettings(config);
   const store = new JsonFileStore(settings, { dynamicSettings: true });
   const pendingPerms = new PendingPermissions();
-  const llm = await resolveProvider();
+  const llm = await resolveProvider(pendingPerms);
   console.log(`[codex-to-im] Runtime: ${config.runtime}`);
 
   const gateway = {
@@ -139,6 +141,11 @@ async function main(): Promise<void> {
     } catch (error) {
       console.error('[codex-to-im] Graceful bridge stop failed:', error instanceof Error ? error.stack || error.message : error);
     } finally {
+      try {
+        await llm.dispose?.();
+      } catch (error) {
+        console.error('[codex-to-im] Failed to stop Codex provider:', error instanceof Error ? error.stack || error.message : error);
+      }
       releaseInstanceLock();
       try {
         writeStatus({ running: false, lastExitReason: reason }, { expectedRunId: runId });

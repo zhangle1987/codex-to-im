@@ -56,6 +56,187 @@ function handleCompletedItem(
 }
 
 describe('CodexProvider', () => {
+  it('streams app-server deltas and does not duplicate the completed agent message', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const appServerClient = {
+      async startTurn() {
+        return {
+          threadId: 'app-thread-1',
+          turnId: 'app-turn-1',
+          events: (async function* () {
+            yield { type: 'item.started', item: { type: 'agentMessage', id: 'commentary-1', text: '', phase: 'commentary' } };
+            yield { type: 'agent_message.delta', itemId: 'commentary-1', delta: 'working' };
+            yield { type: 'item.completed', item: { type: 'agentMessage', id: 'commentary-1', text: 'working', phase: 'commentary' } };
+            yield { type: 'agent_message.delta', itemId: 'message-1', delta: 'hello' };
+            yield { type: 'item.completed', item: { type: 'agentMessage', id: 'message-1', text: 'hello' } };
+            yield { type: 'usage.updated', usage: { inputTokens: 3, outputTokens: 2, cachedInputTokens: 1, reasoningOutputTokens: 1 } };
+            yield { type: 'turn.completed', status: 'completed' };
+          })(),
+          async interrupt() {},
+        };
+      },
+      async close() {},
+    };
+    const provider = new CodexProvider(new PendingPermissions(), {
+      transport: 'app-server',
+      appServerClient: appServerClient as never,
+    });
+
+    const events = parseSSEChunks(await collectStream(provider.streamChat({
+      prompt: 'test',
+      sessionId: 'test-session',
+      sessionOrigin: 'bridge',
+    })));
+
+    assert.equal(events.filter((event) => event.type === 'text').length, 1);
+    assert.equal(events.find((event) => event.type === 'text')?.data, 'hello');
+    assert.ok(events.some((event) => event.type === 'status' && event.data.includes('working')));
+    const result = JSON.parse(events.find((event) => event.type === 'result')!.data);
+    assert.equal(result.session_id, 'app-thread-1');
+    assert.equal(result.turn_id, 'app-turn-1');
+    assert.equal(result.usage.reasoning_output_tokens, 1);
+  });
+
+  it('falls back to SDK only when auto app-server fails before turn/start', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { AppServerPreTurnError } = await import('../codex-app-server-client.js');
+    const provider = new CodexProvider(undefined, {
+      transport: 'auto',
+      appServerClient: {
+        async startTurn() { throw new AppServerPreTurnError('not available'); },
+        async close() {},
+      } as never,
+    });
+    let sdkCalls = 0;
+    (provider as any).streamChatViaSdk = () => new ReadableStream<string>({
+      start(controller) {
+        sdkCalls += 1;
+        controller.enqueue(sseEvent('text', 'sdk fallback'));
+        controller.close();
+      },
+    });
+
+    const events = parseSSEChunks(await collectStream(provider.streamChat({
+      prompt: 'test',
+      sessionId: 'test-session',
+      sessionOrigin: 'bridge',
+    })));
+
+    assert.equal(sdkCalls, 1);
+    assert.equal(events.find((event) => event.type === 'text')?.data, 'sdk fallback');
+  });
+
+  it('does not rerun an accepted app-server turn through SDK after a stream failure', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const provider = new CodexProvider(undefined, {
+      transport: 'auto',
+      appServerClient: {
+        async startTurn() {
+          return {
+            threadId: 'app-thread-1',
+            turnId: 'app-turn-1',
+            events: (async function* () {
+              yield { type: 'agent_message.delta', itemId: 'message-1', delta: 'partial' };
+              throw new Error('stream disconnected');
+            })(),
+            async interrupt() {},
+          };
+        },
+        async close() {},
+      } as never,
+    });
+    let sdkCalls = 0;
+    (provider as any).streamChatViaSdk = () => {
+      sdkCalls += 1;
+      throw new Error('must not rerun');
+    };
+
+    const events = parseSSEChunks(await collectStream(provider.streamChat({
+      prompt: 'test',
+      sessionId: 'test-session',
+      sessionOrigin: 'bridge',
+    })));
+
+    assert.equal(sdkCalls, 0);
+    assert.equal(events.find((event) => event.type === 'text')?.data, 'partial');
+    assert.ok(events.some((event) => event.type === 'error' && event.data.includes('stream disconnected')));
+  });
+
+  it('always uses the SDK transport for Desktop-backed sessions', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    let appServerCalls = 0;
+    const provider = new CodexProvider(undefined, {
+      transport: 'app-server',
+      appServerClient: {
+        async startTurn() {
+          appServerCalls += 1;
+          throw new Error('Desktop session must not reach a separate app-server');
+        },
+        async close() {},
+      } as never,
+    });
+    let sdkCalls = 0;
+    (provider as any).streamChatViaSdk = () => new ReadableStream<string>({
+      start(controller) {
+        sdkCalls += 1;
+        controller.enqueue(sseEvent('text', 'desktop sdk'));
+        controller.close();
+      },
+    });
+
+    const events = parseSSEChunks(await collectStream(provider.streamChat({
+      prompt: 'continue desktop task',
+      sessionId: 'desktop-session',
+      sessionOrigin: 'desktop',
+      desktopThreadId: 'desktop-thread',
+    })));
+
+    assert.equal(appServerCalls, 0);
+    assert.equal(sdkCalls, 1);
+    assert.equal(events.find((event) => event.type === 'text')?.data, 'desktop sdk');
+  });
+
+  it('exposes app-server ownership and thread status for bridge health checks', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const provider = new CodexProvider(undefined, {
+      transport: 'app-server',
+      appServerClient: {
+        getOwnedProcessIds: () => [4312],
+        getThreadRuntimeStatus: (threadId: string) => threadId === 'loaded-thread'
+          ? { status: 'active', processId: 4312 }
+          : null,
+        async startTurn() { throw new Error('not used'); },
+        async close() {},
+      } as never,
+    });
+
+    assert.deepEqual(provider.getOwnedProcessIds(), [4312]);
+    assert.deepEqual(provider.getThreadRuntimeStatus('loaded-thread'), {
+      transport: 'app-server',
+      status: 'active',
+      processId: 4312,
+    });
+    assert.equal(provider.getThreadRuntimeStatus('other-thread'), null);
+  });
+
+  it('maps the current app-server cache write usage field', async () => {
+    const { mapCodexUsage } = await import('../codex-provider.js');
+    assert.deepEqual(mapCodexUsage({
+      inputTokens: 13,
+      outputTokens: 5,
+      cachedInputTokens: 7,
+      cacheWriteInputTokens: 2,
+      reasoningOutputTokens: 3,
+    }), {
+      input_tokens: 13,
+      output_tokens: 5,
+      cache_read_input_tokens: 7,
+      cache_creation_input_tokens: 2,
+      reasoning_output_tokens: 3,
+    });
+  });
+
   it('emits error when SDK init fails', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');

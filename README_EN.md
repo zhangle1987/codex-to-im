@@ -55,6 +55,12 @@ Any of the following is sufficient:
 - a logged-in Codex CLI
 - `CTI_CODEX_API_KEY`, `CODEX_API_KEY`, or `OPENAI_API_KEY`
 
+### Codex execution backend
+
+The bridge defaults to `auto`: IM-owned sessions run through the Codex app-server bundled with the pinned `@openai/codex-sdk`, while sessions reusing a Codex Desktop thread keep using the SDK plus Desktop JSONL mirroring and terminal correlation. The Codex CLI now has daemon/listen support, but the current Desktop app still owns a separate stdio app-server and does not publish a shared endpoint to the bridge. Codex-to-IM therefore does not connect to or modify ChatGPT Remote's private relay/enrollment state.
+
+Use `CTI_CODEX_TRANSPORT=auto|sdk|app-server` to select the backend for IM-owned sessions. Desktop-backed sessions always stay on SDK + JSONL even when `app-server` is selected. In `auto`, SDK fallback is allowed only before `turn/start` is dispatched; a dispatched turn is never executed again on another backend. Loaded threads are reused, released with `thread/unsubscribe` after an idle period, and terminated locally if interrupt or thread lifecycle notifications fail to close the stream.
+
 ### Install
 
 ```bash

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
 import type { BridgeMessage } from './lib/bridge/host.js';
 import type { TaskProgressInfo } from './lib/bridge/types.js';
 
@@ -39,6 +39,7 @@ export interface DesktopMirrorRecord {
   content: string;
   timestamp: string;
   turnId?: string;
+  clientId?: string;
   toolId?: string;
   toolName?: string;
   isError?: boolean;
@@ -64,6 +65,8 @@ interface SessionMetaLine {
     originator?: unknown;
     cli_version?: unknown;
     source?: unknown;
+    thread_source?: unknown;
+    parent_thread_id?: unknown;
   };
 }
 
@@ -98,6 +101,11 @@ interface SessionMessageLine {
     revised_prompt?: unknown;
     saved_path?: unknown;
     tools?: unknown;
+    client_id?: unknown;
+    internal_chat_message_metadata_passthrough?: {
+      turn_id?: unknown;
+      turnId?: unknown;
+    };
     content?: Array<{
       type?: string;
       text?: unknown;
@@ -168,7 +176,26 @@ interface ThreadIndexEntry {
 interface VisibleDesktopThreadRow {
   id: string;
   updatedAtMs: number;
+  rolloutPath?: string;
+  title?: string;
+  cwd?: string;
+  source?: string;
+  threadSource?: string;
 }
+
+interface DatabaseStatementLike {
+  all(...params: unknown[]): unknown[];
+}
+
+interface DatabaseSyncLike {
+  prepare(sql: string): DatabaseStatementLike;
+  close(): void;
+}
+
+type DatabaseSyncConstructor = new (
+  filePath: string,
+  options: { readOnly: boolean },
+) => DatabaseSyncLike;
 
 interface CodexGlobalState {
   'electron-saved-workspace-roots'?: unknown;
@@ -177,7 +204,23 @@ interface CodexGlobalState {
 const ACTIVE_WINDOW_MS = 15 * 60 * 1000;
 const MAX_SESSION_META_BYTES = 4 * 1024 * 1024;
 const MAX_SESSION_TITLE_SCAN_BYTES = 512 * 1024;
+const INITIAL_HISTORY_TAIL_BYTES = 256 * 1024;
+const MAX_HISTORY_TAIL_BYTES = 64 * 1024 * 1024;
 const TITLE_MAX_CHARS = 72;
+const localRequire = createRequire(import.meta.url);
+
+let databaseSyncConstructor: DatabaseSyncConstructor | null | undefined;
+
+function getDatabaseSyncConstructor(): DatabaseSyncConstructor | null {
+  if (databaseSyncConstructor !== undefined) return databaseSyncConstructor;
+  try {
+    const sqlite = localRequire('node:sqlite') as { DatabaseSync?: DatabaseSyncConstructor };
+    databaseSyncConstructor = typeof sqlite.DatabaseSync === 'function' ? sqlite.DatabaseSync : null;
+  } catch {
+    databaseSyncConstructor = null;
+  }
+  return databaseSyncConstructor;
+}
 
 function getCodexHome(): string {
   return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
@@ -361,10 +404,40 @@ function walkSessionFiles(dirPath: string, target: string[]): void {
   }
 }
 
+function normalizeSourceKind(value: unknown): string {
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    if (!normalized) return '';
+    if (normalized.startsWith('{')) {
+      try {
+        return normalizeSourceKind(JSON.parse(normalized));
+      } catch {
+        return normalized.toLowerCase();
+      }
+    }
+    return normalized.toLowerCase();
+  }
+  if (!value || typeof value !== 'object') return '';
+  const record = value as Record<string, unknown>;
+  if ('subagent' in record || 'sub_agent' in record) return 'subagent';
+  for (const key of ['type', 'kind', 'source', 'name']) {
+    const nested = normalizeSourceKind(record[key]);
+    if (nested) return nested;
+  }
+  return '';
+}
+
+function isSubagentThread(source: unknown, threadSource?: unknown, parentThreadId?: unknown): boolean {
+  if (typeof parentThreadId === 'string' && parentThreadId.trim()) return true;
+  return normalizeSourceKind(threadSource) === 'subagent'
+    || normalizeSourceKind(source) === 'subagent';
+}
+
 function isDesktopLike(meta: SessionMetaLine['payload']): boolean {
   const originator = typeof meta?.originator === 'string' ? meta.originator.toLowerCase() : '';
-  const source = typeof meta?.source === 'string' ? meta.source.toLowerCase() : '';
+  const source = normalizeSourceKind(meta?.source);
   if (source === 'exec') return false;
+  if (isSubagentThread(meta?.source, meta?.thread_source, meta?.parent_thread_id)) return false;
   return originator.includes('desktop') || source === 'vscode' || source === 'desktop';
 }
 
@@ -423,29 +496,59 @@ function loadVisibleDesktopThreads(limit?: number): VisibleDesktopThreadRow[] | 
   const dbPath = getDesktopStateDbPath();
   if (!dbPath || !fs.existsSync(dbPath)) return null;
 
-  let db: DatabaseSync | null = null;
+  const DatabaseSync = getDatabaseSyncConstructor();
+  if (!DatabaseSync) return null;
+
+  let db: DatabaseSyncLike | null = null;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
+    const columns = new Set(
+      db.prepare('PRAGMA table_info(threads)').all()
+        .map((row) => (row && typeof row === 'object' ? (row as { name?: unknown }).name : null))
+        .filter((name): name is string => typeof name === 'string'),
+    );
+    if (!columns.has('id') || !columns.has('updated_at')) return null;
+
     const hasLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0;
+    const selectedColumns = [
+      'id',
+      'updated_at',
+      ...['updated_at_ms', 'rollout_path', 'title', 'cwd', 'source', 'thread_source']
+        .filter((column) => columns.has(column)),
+    ];
+    const whereClauses = columns.has('archived') ? ['archived = 0'] : ['1 = 1'];
+    if (columns.has('source')) whereClauses.push("COALESCE(source, '') != 'exec'");
+    if (columns.has('thread_source')) whereClauses.push("COALESCE(thread_source, '') != 'subagent'");
     const sql = `
-      SELECT id, updated_at
+      SELECT ${selectedColumns.join(', ')}
       FROM threads
-      WHERE archived = 0
-        AND source != 'exec'
-      ORDER BY updated_at DESC
+      WHERE ${whereClauses.join('\n        AND ')}
+      ORDER BY ${columns.has('updated_at_ms') ? 'updated_at_ms' : 'updated_at'} DESC
       ${hasLimit ? 'LIMIT ?' : ''}
     `;
     const rows = hasLimit
-      ? db.prepare(sql).all(Math.max(1, Math.floor(limit!))) as Array<{ id?: string; updated_at?: string | number }>
-      : db.prepare(sql).all() as Array<{ id?: string; updated_at?: string | number }>;
+      ? db.prepare(sql).all(Math.max(1, Math.floor(limit!)))
+      : db.prepare(sql).all();
 
     const ids = rows
       .map((row) => {
-        const id = typeof row.id === 'string' ? row.id.trim() : '';
+        if (!row || typeof row !== 'object') return null;
+        const record = row as Record<string, unknown>;
+        const id = typeof record.id === 'string' ? record.id.trim() : '';
         if (!id) return null;
+        if (isSubagentThread(record.source, record.thread_source)) return null;
         return {
           id,
-          updatedAtMs: parseUpdatedAtValue(row.updated_at),
+          updatedAtMs: parseUpdatedAtValue(record.updated_at_ms ?? record.updated_at),
+          ...(typeof record.rollout_path === 'string' && record.rollout_path.trim()
+            ? { rolloutPath: record.rollout_path.trim() }
+            : {}),
+          ...(typeof record.title === 'string' && trimTitle(record.title)
+            ? { title: trimTitle(record.title) }
+            : {}),
+          ...(typeof record.cwd === 'string' ? { cwd: record.cwd } : {}),
+          ...(typeof record.source === 'string' ? { source: record.source } : {}),
+          ...(typeof record.thread_source === 'string' ? { threadSource: record.thread_source } : {}),
         } satisfies VisibleDesktopThreadRow;
       })
       .filter((row): row is VisibleDesktopThreadRow => Boolean(row));
@@ -489,6 +592,7 @@ function parseDesktopSession(
   filePath: string,
   threadIndexEntries: Map<string, ThreadIndexEntry>,
   archivedThreadIds: Set<string>,
+  visibleThread?: VisibleDesktopThreadRow,
 ): DesktopSessionSummary | null {
   const firstLine = readFirstLine(filePath);
   if (!firstLine) return null;
@@ -504,7 +608,8 @@ function parseDesktopSession(
     return null;
   }
 
-  if (archivedThreadIds.has(parsed.payload.id)) {
+  const threadId = visibleThread?.id || parsed.payload.id;
+  if (archivedThreadIds.has(threadId)) {
     return null;
   }
 
@@ -515,21 +620,25 @@ function parseDesktopSession(
     return null;
   }
 
-  const cwd = parsed.payload.cwd || '';
+  const cwd = visibleThread?.cwd || parsed.payload.cwd || '';
   if (isInternalSkillWorkspace(cwd)) {
     return null;
   }
-  const lastEventAt = stat.mtime.toISOString();
+  const lastEventAt = visibleThread?.updatedAtMs
+    ? new Date(visibleThread.updatedAtMs).toISOString()
+    : stat.mtime.toISOString();
   const firstSeenAt = parsed.payload.timestamp || parsed.timestamp || stat.birthtime.toISOString();
-  const threadId = parsed.payload.id;
-  const title = threadIndexEntries.get(threadId)?.title || buildFallbackTitle(threadId, filePath, cwd);
+  const title = visibleThread?.title
+    || threadIndexEntries.get(threadId)?.title
+    || buildFallbackTitle(threadId, filePath, cwd);
 
   return {
     threadId,
     filePath,
     cwd,
     originator: typeof parsed.payload.originator === 'string' ? parsed.payload.originator : 'Codex Desktop',
-    source: typeof parsed.payload.source === 'string' ? parsed.payload.source : undefined,
+    source: visibleThread?.source
+      || (typeof parsed.payload.source === 'string' ? parsed.payload.source : undefined),
     cliVersion: typeof parsed.payload.cli_version === 'string' ? parsed.payload.cli_version : undefined,
     firstSeenAt,
     lastEventAt,
@@ -786,6 +895,7 @@ function isTurnContextLine(line: SessionMessageLine | SessionEventLine | TurnCon
 
 const IGNORED_EVENT_MSG_TYPES = new Set([
   'context_compacted',
+  'sub_agent_activity',
   'thread_settings_applied',
   'thread_goal_updated',
   'thread_name_updated',
@@ -794,12 +904,14 @@ const IGNORED_EVENT_MSG_TYPES = new Set([
 ]);
 
 const IGNORED_RESPONSE_ITEM_TYPES = new Set([
+  'agent_message',
   'image_generation_call',
   'web_search_call',
 ]);
 
 const IGNORED_TOP_LEVEL_TYPES = new Set([
   'compacted',
+  'inter_agent_communication_metadata',
   'session_meta',
   'turn_context',
   'world_state',
@@ -817,6 +929,15 @@ function isTerminalCompletionEventType(value: unknown): boolean {
 
 function getEventTurnId(payload: SessionEventLine['payload']): string {
   return payload?.turn_id || payload?.turnId || '';
+}
+
+function getResponseItemTurnId(payload: SessionMessageLine['payload']): string {
+  const metadata = payload?.internal_chat_message_metadata_passthrough;
+  return extractNormalizedFreeText(metadata?.turn_id ?? metadata?.turnId);
+}
+
+function getResponseItemClientId(payload: SessionMessageLine['payload']): string {
+  return extractNormalizedFreeText(payload?.client_id);
 }
 
 function extractTerminalCompletionText(payload: SessionEventLine['payload']): string {
@@ -879,6 +1000,7 @@ export function listDesktopSessions(limit?: number): DesktopSessionSummary[] {
   const visibleThreadIds = visibleThreads?.map((thread) => thread.id) || null;
   const visibleThreadSet = visibleThreadIds ? new Set(visibleThreadIds) : null;
   const visibleThreadUpdatedAt = new Map(visibleThreads?.map((thread) => [thread.id, thread.updatedAtMs]) || []);
+  const visibleThreadRows = new Map(visibleThreads?.map((thread) => [thread.id, thread]) || []);
   const oldestVisibleUpdatedAtMs = visibleThreads && visibleThreads.length > 0
     ? Math.min(...visibleThreads.map((thread) => thread.updatedAtMs || Number.MAX_SAFE_INTEGER))
     : 0;
@@ -887,8 +1009,27 @@ export function listDesktopSessions(limit?: number): DesktopSessionSummary[] {
   walkSessionFiles(root, files);
 
   const allSessions = new Map<string, DesktopSessionSummary>();
+  for (const thread of visibleThreads || []) {
+    if (!thread.rolloutPath || !fs.existsSync(thread.rolloutPath)) continue;
+    const session = parseDesktopSession(
+      thread.rolloutPath,
+      threadIndexEntries,
+      archivedThreadIds,
+      thread,
+    );
+    if (!session || !isWithinSavedWorkspaceRoots(session.cwd, savedWorkspaceRoots)) continue;
+    allSessions.set(session.threadId, session);
+  }
+
   for (const filePath of files) {
-    const session = parseDesktopSession(filePath, threadIndexEntries, archivedThreadIds);
+    const threadId = extractThreadIdFromRolloutName(path.basename(filePath));
+    if (threadId && allSessions.has(threadId)) continue;
+    const session = parseDesktopSession(
+      filePath,
+      threadIndexEntries,
+      archivedThreadIds,
+      threadId ? visibleThreadRows.get(threadId) : undefined,
+    );
     if (!session) continue;
     if (!isWithinSavedWorkspaceRoots(session.cwd, savedWorkspaceRoots)) continue;
     allSessions.set(session.threadId, session);
@@ -1259,6 +1400,8 @@ function pushDesktopMirrorResponseRecord(
 ): boolean {
   const signature = createDesktopEventSignature(rawLine);
   const timestamp = parsed.timestamp || '';
+  activeTurnId = getResponseItemTurnId(parsed.payload) || activeTurnId;
+  const clientId = getResponseItemClientId(parsed.payload);
 
   if (isIgnoredMirrorLineKind(parsed)) {
     return true;
@@ -1273,6 +1416,7 @@ function pushDesktopMirrorResponseRecord(
       content: text,
       timestamp,
       ...(activeTurnId ? { turnId: activeTurnId } : {}),
+      ...(clientId ? { clientId } : {}),
     });
     return true;
   }
@@ -1287,6 +1431,7 @@ function pushDesktopMirrorResponseRecord(
       content: parsed.payload.phase === 'commentary' ? text.replace(/^\[commentary\]\n/, '') : text,
       timestamp,
       ...(activeTurnId ? { turnId: activeTurnId } : {}),
+      ...(clientId ? { clientId } : {}),
     });
     return true;
   }
@@ -1310,6 +1455,7 @@ function pushDesktopMirrorResponseRecord(
       content: text,
       timestamp,
       ...(activeTurnId ? { turnId: activeTurnId } : {}),
+      ...(clientId ? { clientId } : {}),
     });
     return true;
   }
@@ -1571,16 +1717,77 @@ function parseDesktopMirrorRecordText(
   };
 }
 
-export function readDesktopSessionMessages(threadId: string, limit = 8): BridgeMessage[] {
-  const messages = readDesktopSessionEventStream(threadId).map((event) => ({
+function mapDesktopEventsToMessages(events: DesktopSessionEvent[]): BridgeMessage[] {
+  return events.map((event) => ({
     role: event.role === 'commentary' ? 'assistant' : event.role,
     content: event.role === 'commentary'
       ? `[commentary]\n${event.content}`
       : event.content,
   }));
+}
 
+function readUtf8FileTail(filePath: string, maxBytes: number): { content: string; reachedStart: boolean } {
+  const stat = fs.statSync(filePath);
+  const bytesToRead = Math.min(stat.size, Math.max(1, maxBytes));
+  const startOffset = Math.max(0, stat.size - bytesToRead);
+  const buffer = Buffer.alloc(bytesToRead);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    let totalRead = 0;
+    while (totalRead < bytesToRead) {
+      const bytesRead = fs.readSync(
+        fd,
+        buffer,
+        totalRead,
+        bytesToRead - totalRead,
+        startOffset + totalRead,
+      );
+      if (bytesRead <= 0) break;
+      totalRead += bytesRead;
+    }
+
+    let contentBuffer = buffer.subarray(0, totalRead);
+    if (startOffset > 0) {
+      const firstNewline = contentBuffer.indexOf(0x0a);
+      contentBuffer = firstNewline >= 0
+        ? contentBuffer.subarray(firstNewline + 1)
+        : Buffer.alloc(0);
+    }
+    return {
+      content: contentBuffer.toString('utf-8'),
+      reachedStart: startOffset === 0,
+    };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+export function readDesktopSessionMessagesByFilePath(filePath: string, limit = 8): BridgeMessage[] {
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 8;
-  return messages.slice(-safeLimit);
+  const targetEventCount = safeLimit + 4;
+  let bytesToRead = INITIAL_HISTORY_TAIL_BYTES;
+  let events: DesktopSessionEvent[] = [];
+
+  try {
+    while (bytesToRead <= MAX_HISTORY_TAIL_BYTES) {
+      const tail = readUtf8FileTail(filePath, bytesToRead);
+      events = parseDesktopSessionEventText(tail.content, '', true).events;
+      if (tail.reachedStart || events.length >= targetEventCount) break;
+      if (bytesToRead === MAX_HISTORY_TAIL_BYTES) break;
+      bytesToRead = Math.min(MAX_HISTORY_TAIL_BYTES, bytesToRead * 2);
+    }
+  } catch {
+    return [];
+  }
+
+  return mapDesktopEventsToMessages(events).slice(-safeLimit);
+}
+
+export function readDesktopSessionMessages(threadId: string, limit = 8): BridgeMessage[] {
+  const session = getDesktopSessionByThreadId(threadId);
+  if (!session) return [];
+
+  return readDesktopSessionMessagesByFilePath(session.filePath, limit);
 }
 
 export function readDesktopSessionEventStreamByFilePath(filePath: string): DesktopSessionEvent[] {
