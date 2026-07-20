@@ -1,4 +1,5 @@
 import * as esbuild from 'esbuild';
+import { spawnSync } from 'node:child_process';
 
 const common = {
   bundle: true,
@@ -17,7 +18,9 @@ const common = {
     'stream', 'events', 'url', 'util', 'child_process', 'worker_threads',
     'node:*',
   ],
-  banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" },
+  banner: {
+    js: "import { createRequire as __ctiCreateRequire } from 'module'; const require = __ctiCreateRequire(import.meta.url);",
+  },
 };
 
 async function build(entryPoint, outfile) {
@@ -26,6 +29,15 @@ async function build(entryPoint, outfile) {
     entryPoints: [entryPoint],
     outfile,
   });
+
+  const syntaxCheck = spawnSync(process.execPath, ['--check', outfile], {
+    encoding: 'utf8',
+  });
+  if (syntaxCheck.status !== 0) {
+    throw new Error(
+      `Generated bundle failed syntax validation: ${outfile}\n${syntaxCheck.stderr || syntaxCheck.stdout}`,
+    );
+  }
 }
 
 await build('src/main.ts', 'dist/daemon.mjs');
