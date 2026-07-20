@@ -1493,6 +1493,54 @@ describe('bridge-manager status formatting', () => {
     ]);
   });
 
+  it('keeps IM mirror suppression active across injected environment context', () => {
+    const sessionId = 'session-self-echo-context';
+    _testOnly.beginMirrorSuppression(sessionId, '好的，开始吧');
+
+    const filtered = _testOnly.filterSuppressedMirrorRecords(sessionId, [
+      {
+        signature: 'start',
+        type: 'task_started',
+        content: '',
+        timestamp: '2026-07-20T04:00:00.000Z',
+        turnId: 'turn-context',
+      },
+      {
+        signature: 'synthetic-context',
+        type: 'message',
+        role: 'user',
+        content: '<environment_context>\n  <cwd>D:\\codex\\project</cwd>\n</environment_context>',
+        timestamp: '2026-07-20T04:00:00.001Z',
+        turnId: 'turn-context',
+      },
+      {
+        signature: 'real-user',
+        type: 'message',
+        role: 'user',
+        content: '好的，开始吧',
+        timestamp: '2026-07-20T04:00:00.002Z',
+        turnId: 'turn-context',
+      },
+      {
+        signature: 'assistant',
+        type: 'message',
+        role: 'assistant',
+        content: '已完成',
+        timestamp: '2026-07-20T04:00:01.000Z',
+        turnId: 'turn-context',
+      },
+      {
+        signature: 'complete',
+        type: 'task_complete',
+        content: '已完成',
+        timestamp: '2026-07-20T04:00:02.000Z',
+        turnId: 'turn-context',
+      },
+    ] as never);
+
+    assert.deepEqual(filtered, []);
+  });
+
   it('releases later desktop mirror records after the IM-originated turn completes', () => {
     const sessionId = 'session-self-echo-next-batch';
     _testOnly.beginMirrorSuppression(sessionId, '来自 IM 的问题');

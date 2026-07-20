@@ -1610,6 +1610,16 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
           type: 'session_meta',
           payload: { id: 'thread-1' },
         }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:08.000Z',
+          type: 'world_state',
+          payload: { cwd: 'D:\\codex\\project' },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-14T00:00:09.000Z',
+          type: 'compacted',
+          payload: { replacement_history: [] },
+        }),
       ].join('\n') + '\n',
       'utf-8',
     );
@@ -1651,6 +1661,62 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
     assert.deepEqual(delta.records.map((record) => ({ role: record.role, content: record.content })), [
       { role: 'user', content: userText },
     ]);
+    assert.deepEqual(delta.unknownKinds, []);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('ignores injected environment context before the real desktop user prompt', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(filePath, [
+      JSON.stringify({
+        timestamp: '2026-07-20T04:00:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'task_started', turn_id: 'turn-with-context' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-07-20T04:00:00.001Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: '<environment_context>\n  <cwd>D:\\codex\\project</cwd>\n</environment_context>',
+          }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-07-20T04:00:00.002Z',
+        type: 'world_state',
+        payload: { cwd: 'D:\\codex\\project' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-07-20T04:00:00.003Z',
+        type: 'turn_context',
+        payload: { turn_id: 'turn-with-context' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-07-20T04:00:00.004Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '好的，开始吧' }],
+        },
+      }),
+    ].join('\n') + '\n', 'utf8');
+
+    const delta = readDesktopSessionMirrorRecordDeltaByFilePath(filePath, 0, fs.statSync(filePath).size);
+
+    assert.deepEqual(
+      delta.records.map((record) => ({ type: record.type, role: record.role, content: record.content })),
+      [
+        { type: 'task_started', role: undefined, content: '' },
+        { type: 'message', role: 'user', content: '好的，开始吧' },
+      ],
+    );
     assert.deepEqual(delta.unknownKinds, []);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });

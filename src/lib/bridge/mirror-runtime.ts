@@ -26,6 +26,8 @@ import {
 import { buildMirrorDeliveryPlan } from './mirror-delivery-plan.js';
 import { buildMirrorSubscriptionRegistryPlan } from './mirror-subscription-registry.js';
 import { runMirrorReconcileBatch, type MirrorReconcileStatus } from './mirror-reconcile-batch.js';
+import { buildMirrorStreamKey } from './mirror-formatters.js';
+import type { DesktopRecordRouteResult } from './turns/desktop-terminal-router.js';
 import { getExplicitDesktopThreadId } from './turns/turn-classifier.js';
 
 export interface BridgeMirrorRuntimeState {
@@ -55,7 +57,7 @@ export interface CreateMirrorRuntimeDeps {
     sessionId: string,
     threadId: string,
     records: DesktopMirrorRecord[],
-  ): Promise<{ claimed: DesktopMirrorRecord[]; unclaimed: DesktopMirrorRecord[]; terminalClaimed: boolean }>;
+  ): Promise<DesktopRecordRouteResult>;
   consumeMirrorRecords(subscription: DesktopMirrorSubscription, records: DesktopMirrorRecord[]): FinalizedDesktopMirrorTurn[];
   flushTimedOutMirrorTurn(subscription: DesktopMirrorSubscription): FinalizedDesktopMirrorTurn | null;
   hasPendingMirrorWork(subscription: DesktopMirrorSubscription): boolean;
@@ -81,6 +83,52 @@ export function createMirrorRuntime(
   options: CreateMirrorRuntimeOptions,
   deps: CreateMirrorRuntimeDeps,
 ): MirrorRuntime {
+  function isAtOrBefore(timestamp: string | null | undefined, boundary: string): boolean {
+    if (!timestamp) return true;
+    const timestampMs = Date.parse(timestamp);
+    const boundaryMs = Date.parse(boundary);
+    if (Number.isFinite(timestampMs) && Number.isFinite(boundaryMs)) {
+      return timestampMs <= boundaryMs;
+    }
+    return timestamp <= boundary;
+  }
+
+  function discardClaimedMirrorTurn(
+    subscription: DesktopMirrorSubscription,
+    routeResult: DesktopRecordRouteResult,
+  ): void {
+    if (!routeResult.terminalClaimed) return;
+
+    const claimedTurnId = routeResult.claimedTurnId;
+    if (claimedTurnId) {
+      const claimedStreamKey = buildMirrorStreamKey(subscription.sessionId, claimedTurnId, '');
+      subscription.bufferedRecords = subscription.bufferedRecords.filter(
+        (record) => record.turnId !== claimedTurnId,
+      );
+      subscription.pendingDeliveries = subscription.pendingDeliveries.filter(
+        (turn) => turn.streamKey !== claimedStreamKey,
+      );
+      if (subscription.pendingTurn?.turnId === claimedTurnId) {
+        deps.stopMirrorStreaming(subscription, 'interrupted');
+        subscription.pendingTurn = null;
+      }
+    }
+
+    const claimedAt = routeResult.claimedAt;
+    if (!claimedAt) return;
+    const retainedAtOrBeforeClaim = [
+      ...subscription.bufferedRecords.map((record) => record.timestamp),
+      ...subscription.pendingDeliveries.map((turn) => turn.timestamp),
+      ...routeResult.unclaimed.map((record) => record.timestamp),
+      ...(subscription.pendingTurn ? [subscription.pendingTurn.lastActivityAt] : []),
+    ].some((timestamp) => isAtOrBefore(timestamp, claimedAt));
+    if (retainedAtOrBeforeClaim) return;
+
+    if (!subscription.lastDeliveredAt || !isAtOrBefore(claimedAt, subscription.lastDeliveredAt)) {
+      subscription.lastDeliveredAt = claimedAt;
+    }
+  }
+
   function closeMirrorWatcher(subscription: DesktopMirrorSubscription): void {
     if (subscription.watcher) {
       try {
@@ -294,7 +342,14 @@ export function createMirrorRuntime(
     }
     const routeResult = deliverableRecords.length > 0 && deps.routeDesktopRecords
       ? await deps.routeDesktopRecords(subscription.sessionId, subscription.threadId, deliverableRecords)
-      : { claimed: [], unclaimed: deliverableRecords, terminalClaimed: false };
+      : {
+          claimed: [],
+          unclaimed: deliverableRecords,
+          terminalClaimed: false,
+          claimedTurnId: null,
+          claimedAt: null,
+        };
+    discardClaimedMirrorTurn(subscription, routeResult);
     const mirrorRecords = routeResult.unclaimed;
 
     if (mirrorRecords.length > 0) {

@@ -22,6 +22,7 @@ import type {
 import type { ChannelBinding, ChannelType } from './lib/bridge/types.js';
 import { CTI_HOME, configToSettings, findChannelInstance, loadConfig } from './config.js';
 import { withFileLock, withFileLocks } from './file-lock.js';
+import { atomicWriteFileSync } from './atomic-file.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
@@ -41,13 +42,7 @@ function ensureDir(dir: string): void {
 }
 
 function atomicWrite(filePath: string, data: string): void {
-  const tmp = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    fs.writeFileSync(tmp, data, 'utf-8');
-    fs.renameSync(tmp, filePath);
-  } finally {
-    try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
-  }
+  atomicWriteFileSync(filePath, data);
 }
 
 function dedupTtlMs(key: string): number {

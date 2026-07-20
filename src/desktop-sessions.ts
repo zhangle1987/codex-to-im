@@ -799,8 +799,10 @@ const IGNORED_RESPONSE_ITEM_TYPES = new Set([
 ]);
 
 const IGNORED_TOP_LEVEL_TYPES = new Set([
+  'compacted',
   'session_meta',
   'turn_context',
+  'world_state',
 ]);
 
 const TERMINAL_COMPLETION_EVENT_TYPES = new Set([
@@ -830,6 +832,12 @@ function extractTerminalCompletionText(payload: SessionEventLine['payload']): st
     if (text) return text;
   }
   return '';
+}
+
+export function isSyntheticDesktopUserContext(text: string): boolean {
+  const normalized = text.trim();
+  return normalized.startsWith('<environment_context>')
+    && normalized.endsWith('</environment_context>');
 }
 
 function isIgnoredMirrorLineKind(line: SessionMessageLine | SessionEventLine | TurnContextLine): boolean {
@@ -1215,7 +1223,7 @@ function pushDesktopMirrorEventRecord(
 
   if (parsed.payload?.type === 'user_message') {
     const text = extractNormalizedStructuredText(parsed.payload.message);
-    if (!text) return true;
+    if (!text || isSyntheticDesktopUserContext(text)) return true;
     records.push({
       signature,
       type: 'message',
@@ -1285,7 +1293,7 @@ function pushDesktopMirrorResponseRecord(
 
   if (parsed.payload?.type === 'message' && parsed.payload.role === 'user') {
     const text = extractDesktopMessageText(parsed);
-    if (!text) return true;
+    if (!text || isSyntheticDesktopUserContext(text)) return true;
     const previous = records.at(-1);
     if (
       previous?.type === 'message'
@@ -1303,6 +1311,11 @@ function pushDesktopMirrorResponseRecord(
       timestamp,
       ...(activeTurnId ? { turnId: activeTurnId } : {}),
     });
+    return true;
+  }
+
+  if (parsed.payload?.type === 'message') {
+    // Desktop may persist internal/system message roles that are not user-visible.
     return true;
   }
 

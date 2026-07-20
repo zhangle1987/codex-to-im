@@ -38,6 +38,8 @@ describe('desktop-terminal-router', () => {
     const result = await routeDesktopRecords('session-1', 'desktop-thread-1', records, coordinator);
 
     assert.equal(result.terminalClaimed, true);
+    assert.equal(result.claimedTurnId, 'desktop-turn-1');
+    assert.equal(result.claimedAt, '2026-04-27T00:00:00.000Z');
     assert.deepEqual(result.claimed.map((item) => item.signature), ['message-1', 'terminal-1']);
     assert.deepEqual(result.unclaimed.map((item) => item.signature), ['other-1']);
     assert.deepEqual(claims, ['desktop-thread-1:final']);
@@ -55,6 +57,8 @@ describe('desktop-terminal-router', () => {
     const result = await routeDesktopRecords('session-1', 'desktop-thread-1', records, coordinator);
 
     assert.equal(result.terminalClaimed, false);
+    assert.equal(result.claimedTurnId, null);
+    assert.equal(result.claimedAt, null);
     assert.deepEqual(result.claimed, []);
     assert.deepEqual(result.unclaimed, records);
   });

@@ -10,9 +10,11 @@ import { createMirrorRuntime } from '../lib/bridge/mirror-runtime.js';
 import {
   consumeBufferedMirrorTurns,
   consumeMirrorRecords,
+  createMirrorTurnState,
   flushTimedOutMirrorTurn,
   hasPendingMirrorWork,
 } from '../lib/bridge/mirror-turns.js';
+import { routeDesktopRecords } from '../lib/bridge/turns/desktop-terminal-router.js';
 
 const MIRROR_TEST_BUFFER_TIMEOUT_MS = 10 * 60_000;
 
@@ -286,6 +288,142 @@ describe('mirror-runtime pending deliveries', () => {
     assert.ok(subscriptionAfterReplay);
     assert.equal(subscriptionAfterReplay?.pendingDeliveries.length, 0);
     assert.equal(deliveryCalls.length, 1);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('discards buffered mirror state when an IM turn claims the desktop terminal', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-mirror-runtime-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(filePath, '', 'utf-8');
+
+    const bindings = [{
+      id: 'binding-1',
+      channelType: 'feishu-default',
+      chatId: 'chat-1',
+      codepilotSessionId: 'session-1',
+      sdkSessionId: 'thread-1',
+      active: true,
+    }];
+    const session = {
+      id: 'session-1',
+      sdk_session_id: 'thread-1',
+      desktop_thread_id: 'thread-1',
+      thread_origin: 'desktop',
+      mirror_last_event_at: null,
+    };
+    const store = {
+      listChannelBindings: () => bindings,
+      getSession: (sessionId: string) => (sessionId === session.id ? session : null),
+      updateSdkSessionId: () => {},
+    };
+    initBridgeContext({
+      store: store as never,
+      llm: noopLlm as never,
+      permissions: noopPermissions as never,
+      lifecycle: {},
+    });
+
+    const state = {
+      running: true,
+      adapters: new Map([
+        ['feishu-default', { channelType: 'feishu-default', provider: 'feishu', isRunning: () => false }],
+      ]),
+      mirrorSubscriptions: new Map(),
+      mirrorWakeTimer: null,
+      mirrorSyncInFlight: false,
+      activeTasks: new Map([['session-1', {}]]),
+    };
+    let stoppedStreams = 0;
+    let deliveredTurns = 0;
+
+    runtime = createMirrorRuntime(() => state as never, {
+      watchDebounceMs: 0,
+      danglingThreadRetryLimit: 3,
+      failureSuspendThreshold: 3,
+      failureSuspendMs: 60_000,
+    }, {
+      nowIso: () => '2026-07-20T04:00:00.000Z',
+      describeUnknownError: (error) => (error instanceof Error ? error.message : String(error)),
+      getDesktopSessionByThreadIdSafe: (threadId) => (
+        threadId === 'thread-1' ? { id: threadId, filePath } as never : null
+      ),
+      syncMirrorSessionStateSafe: () => {},
+      filterSuppressedMirrorRecords: (_sessionId, records) => records,
+      observeSessionHealthRecords: () => {},
+      routeDesktopRecords: (sessionId, threadId, records) => routeDesktopRecords(
+        sessionId,
+        threadId,
+        records,
+        { claimDesktopTerminal: async () => ({ claimed: true }) },
+      ),
+      consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
+      flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
+      hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
+      consumeBufferedMirrorTurns: (subscription) => consumeBufferedMirrorTurns(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
+      stopMirrorStreaming: () => { stoppedStreams += 1; },
+      deliverMirrorTurns: async (_subscription, turns) => {
+        deliveredTurns += turns.length;
+        return { deliveredCount: turns.length };
+      },
+    });
+
+    await runtime.reconcileMirrorSubscriptions();
+
+    fs.appendFileSync(filePath, [
+      JSON.stringify({
+        timestamp: '2026-07-20T04:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'task_started', turn_id: 'im-turn' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-07-20T04:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'working' }],
+        },
+      }),
+    ].join('\n') + '\n', 'utf-8');
+
+    await runtime.reconcileMirrorSubscriptions();
+
+    const subscription = state.mirrorSubscriptions.get('binding-1');
+    assert.ok(subscription);
+    assert.equal(subscription.bufferedRecords.length, 2);
+    const pendingTurn = createMirrorTurnState('session-1', '2026-07-20T04:00:01.000Z', 'im-turn');
+    pendingTurn.streamStarted = true;
+    pendingTurn.userText = '好的，开始吧';
+    subscription.pendingTurn = pendingTurn;
+    subscription.pendingDeliveries.push({
+      streamKey: pendingTurn.streamKey,
+      userText: '好的，开始吧',
+      text: 'duplicate',
+      signature: 'duplicate-terminal',
+      timestamp: '2026-07-20T04:00:02.500Z',
+      status: 'completed',
+    });
+    state.activeTasks.clear();
+
+    fs.appendFileSync(filePath, JSON.stringify({
+      timestamp: '2026-07-20T04:00:03.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'task_complete',
+        turn_id: 'im-turn',
+        last_agent_message: 'final answer',
+      },
+    }) + '\n', 'utf-8');
+
+    await runtime.reconcileMirrorSubscriptions();
+
+    assert.equal(subscription.bufferedRecords.length, 0);
+    assert.equal(subscription.pendingTurn, null);
+    assert.equal(subscription.pendingDeliveries.length, 0);
+    assert.equal(subscription.lastDeliveredAt, '2026-07-20T04:00:03.000Z');
+    assert.equal(stoppedStreams, 1);
+    assert.equal(deliveredTurns, 0);
 
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });

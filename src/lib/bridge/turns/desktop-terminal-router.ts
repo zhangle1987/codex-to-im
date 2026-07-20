@@ -6,6 +6,8 @@ export interface DesktopRecordRouteResult {
   claimed: DesktopMirrorRecord[];
   unclaimed: DesktopMirrorRecord[];
   terminalClaimed: boolean;
+  claimedTurnId: string | null;
+  claimedAt: string | null;
 }
 
 function isTerminalRecord(record: DesktopMirrorRecord): boolean {
@@ -45,6 +47,8 @@ export async function routeDesktopRecords(
       claimed: [],
       unclaimed: records,
       terminalClaimed: false,
+      claimedTurnId: null,
+      claimedAt: null,
     };
   }
 
@@ -56,6 +60,8 @@ export async function routeDesktopRecords(
       claimed: [],
       unclaimed: records,
       terminalClaimed: false,
+      claimedTurnId: null,
+      claimedAt: null,
     };
   }
 
@@ -69,5 +75,7 @@ export async function routeDesktopRecords(
     claimed,
     unclaimed: records.filter((record) => !claimedSet.has(record.signature)),
     terminalClaimed: true,
+    claimedTurnId: claimedTurnId || null,
+    claimedAt: terminalRecord.timestamp || null,
   };
 }

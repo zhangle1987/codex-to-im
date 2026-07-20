@@ -1,4 +1,7 @@
-import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
+import {
+  isSyntheticDesktopUserContext,
+  type DesktopMirrorRecord,
+} from '../../desktop-sessions.js';
 
 export interface MirrorSuppressionState {
   id: string;
@@ -243,6 +246,10 @@ export function filterSuppressedMirrorRecords(
         }
 
         if (record.type === 'message' && record.role === 'user') {
+          if (isSyntheticDesktopUserContext(record.content || '')) {
+            handled = true;
+            break;
+          }
           if (suppression.promptText && normalizedContent === suppression.promptText) {
             suppression.awaitingPromptMatch = false;
             suppression.droppingTurn = true;
