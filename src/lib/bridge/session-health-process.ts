@@ -118,3 +118,16 @@ export async function probeCodexThreadProcess(threadId: string): Promise<ThreadP
     };
   }
 }
+
+export async function isCodexThreadProcessDefinitelyGone(
+  threadId: string,
+  probe: (value: string) => Promise<ThreadProcessProbeResult> = probeCodexThreadProcess,
+): Promise<boolean> {
+  const threadProbe = await probe(threadId);
+  if (threadProbe.status !== 'not_found') return false;
+
+  // Codex Desktop app-server command lines do not contain individual thread ids.
+  // Treat the thread as gone only when no Codex app-server host remains either.
+  const hostProbe = await probe('app-server');
+  return hostProbe.status === 'not_found';
+}

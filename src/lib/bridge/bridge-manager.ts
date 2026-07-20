@@ -91,7 +91,10 @@ import {
   createMirrorFeedbackController,
   type MirrorStructuredStreamStatusConfig,
 } from './mirror-feedback-controller.js';
-import { probeCodexThreadProcess } from './session-health-process.js';
+import {
+  isCodexThreadProcessDefinitelyGone,
+  probeCodexThreadProcess,
+} from './session-health-process.js';
 import { createSessionHealthRuntime } from './session-health-runtime.js';
 import { deliverBridgeNotice, deliverResponse } from './feedback-delivery.js';
 import { routeDesktopRecords } from './turns/desktop-terminal-router.js';
@@ -113,6 +116,10 @@ const MIRROR_PROMPT_MATCH_GRACE_MS = 120_000;
 const DESKTOP_TERMINAL_FINALIZATION_TIMEOUT_MS = 30_000;
 const MIRROR_STREAM_STATUS_IDLE_START_MS = 180_000;
 const MIRROR_STREAM_STATUS_HEARTBEAT_MS = 10_000;
+// A structured mirror stream may outlive the Desktop process when Codex exits
+// without writing a terminal event. Require both source inactivity and a
+// missing thread process before closing it as interrupted.
+const MIRROR_STREAM_ORPHAN_TIMEOUT_MS = 30 * 60_000;
 // Timeout after the last desktop event before we flush a buffered mirror turn
 // without seeing task_complete. This is an internal mirror buffer guard, not an
 // IM idle reminder. Active streaming turns never use this fallback timeout.
@@ -459,6 +466,7 @@ const MIRROR_RUNTIME = createMirrorRuntime(getState, {
   danglingThreadRetryLimit: DANGLING_MIRROR_THREAD_RETRY_LIMIT,
   failureSuspendThreshold: MIRROR_FAILURE_SUSPEND_THRESHOLD,
   failureSuspendMs: MIRROR_FAILURE_SUSPEND_MS,
+  streamOrphanTimeoutMs: MIRROR_STREAM_ORPHAN_TIMEOUT_MS,
 }, {
   nowIso,
   describeUnknownError,
@@ -468,6 +476,10 @@ const MIRROR_RUNTIME = createMirrorRuntime(getState, {
   observeSessionHealthRecords: (sessionId, threadId, records) => {
     SESSION_HEALTH_RUNTIME.observeDesktopMirrorRecords(sessionId, threadId, records);
   },
+  recordOrphanedMirrorTurn: (sessionId, detail) => {
+    SESSION_HEALTH_RUNTIME.recordInteractiveEnd(sessionId, 'aborted', detail);
+  },
+  isThreadProcessDefinitelyGone: isCodexThreadProcessDefinitelyGone,
   routeDesktopRecords: (sessionId, threadId, records) => routeDesktopRecords(
     sessionId,
     threadId,

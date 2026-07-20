@@ -121,6 +121,36 @@ describe('session-health-runtime', () => {
     assert.equal(diagnosis?.processProbe?.pid, 31340);
   });
 
+  it('does not reopen a terminal session when its desktop thread process is still alive', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Terminal Alive', 'test-model', undefined, 'D:\\workspace\\health-terminal-alive', 'code');
+    store.updateSession(session.id, {
+      sdk_session_id: '019d861c-0e5b-7792-9303-2aa082a28093',
+      runtime_status: 'idle',
+      health_status: 'completed',
+      health_reason: '任务已完成。',
+      last_progress_at: new Date(Date.now() - (45 * 60 * 1000)).toISOString(),
+      last_progress_type: 'task_completed',
+    });
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => new Date().toISOString(),
+      probeThreadProcess: async (threadId) => ({
+        threadId,
+        status: 'alive',
+        supported: true,
+        checkedAt: new Date().toISOString(),
+        pid: 31340,
+      }),
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+
+    assert.equal(diagnosis?.healthStatus, 'completed');
+    assert.equal(diagnosis?.healthReason, '任务已完成。');
+    assert.equal(diagnosis?.processProbe?.pid, 31340);
+  });
+
   it('marks a session as suspected_stream_ui_stall when progress continues but stream UI stops refreshing', async () => {
     const store = new JsonFileStore(makeSettings());
     const session = store.createSession('Health Stream UI Stall', 'test-model', undefined, 'D:\\workspace\\health-stream-ui', 'code');
@@ -490,6 +520,50 @@ describe('session-health-runtime', () => {
     assert.equal(diagnosis?.healthStatus, 'idle');
     assert.equal(diagnosis?.healthReason, '当前没有运行中的任务。');
     assert.deepEqual(store.getSession(session.id), before);
+  });
+
+  it('keeps an already idle session idle even when historical progress is recent', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Stable Idle', 'test-model', undefined, 'D:\\workspace\\health-stable-idle', 'code');
+    store.updateSession(session.id, {
+      runtime_status: 'idle',
+      health_status: 'idle',
+      health_reason: '当前没有运行中的任务。',
+      last_progress_at: new Date(Date.now() - (15 * 60 * 1000)).toISOString(),
+      last_progress_type: 'tool_complete',
+    });
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => new Date().toISOString(),
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+
+    assert.equal(diagnosis?.healthStatus, 'idle');
+    assert.equal(diagnosis?.healthReason, '当前没有运行中的任务。');
+  });
+
+  it('tracks an active desktop mirror independently from the IM runtime status', async () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('Health Desktop Mirror', 'test-model', undefined, 'D:\\workspace\\health-desktop-mirror', 'code');
+    store.updateSession(session.id, {
+      runtime_status: 'idle',
+      health_status: 'running_active',
+      health_reason: '检测到桌面线程开始执行。',
+      thread_origin: 'desktop',
+      mirror_status: 'watching',
+      last_progress_at: new Date(Date.now() - (15 * 60 * 1000)).toISOString(),
+      last_progress_type: 'reasoning',
+    });
+    const runtime = createSessionHealthRuntime({
+      getStore: () => store,
+      nowIso: () => new Date().toISOString(),
+    });
+
+    const diagnosis = await runtime.diagnoseSessionHealth(session.id);
+
+    assert.equal(diagnosis?.healthStatus, 'slow_observed');
+    assert.match(diagnosis?.healthReason || '', /待观察/);
   });
 
   it('keeps waiting_tool while another active tool is still running', () => {

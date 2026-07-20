@@ -222,8 +222,14 @@ export function computeBaseDiagnosis(
   const sdkSessionId = trimOrNull(session.sdk_session_id);
   const lastProgressMs = parseIsoMs(lastProgressAt || undefined);
   const previousStatus = session.health_status || 'idle';
+  const terminalHealth = previousStatus === 'completed'
+    || previousStatus === 'failed'
+    || previousStatus === 'aborted';
+  const activeDesktopMirror = session.thread_origin === 'desktop'
+    && session.mirror_status === 'watching'
+    && isRunningHealthStatus(previousStatus);
 
-  if (!isRunningRuntimeStatus(runtimeStatus) && isRunningHealthStatus(previousStatus)) {
+  if (!isRunningRuntimeStatus(runtimeStatus) && !terminalHealth && !activeDesktopMirror) {
     return {
       sessionId: session.id,
       checkedAt: null,
@@ -331,6 +337,13 @@ export function applyProcessProbeDiagnosis(
     return {
       ...diagnosis,
       processProbe: null,
+    };
+  }
+
+  if (!isRunningHealthStatus(diagnosis.healthStatus)) {
+    return {
+      ...diagnosis,
+      processProbe,
     };
   }
 

@@ -17,6 +17,7 @@ import {
 import { routeDesktopRecords } from '../lib/bridge/turns/desktop-terminal-router.js';
 
 const MIRROR_TEST_BUFFER_TIMEOUT_MS = 10 * 60_000;
+const MIRROR_TEST_STREAM_ORPHAN_TIMEOUT_MS = 30 * 60_000;
 
 const noopLlm = {
   streamChat() {
@@ -91,6 +92,7 @@ describe('mirror-runtime pending deliveries', () => {
       danglingThreadRetryLimit: 3,
       failureSuspendThreshold: 3,
       failureSuspendMs: 60_000,
+      streamOrphanTimeoutMs: MIRROR_TEST_STREAM_ORPHAN_TIMEOUT_MS,
     }, {
       nowIso: () => '2026-04-21T10:00:00.000Z',
       describeUnknownError: (error) => (error instanceof Error ? error.message : String(error)),
@@ -105,6 +107,8 @@ describe('mirror-runtime pending deliveries', () => {
       syncMirrorSessionStateSafe: () => {},
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
+      recordOrphanedMirrorTurn: () => {},
+      isThreadProcessDefinitelyGone: async () => false,
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
       flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
@@ -218,6 +222,7 @@ describe('mirror-runtime pending deliveries', () => {
       danglingThreadRetryLimit: 3,
       failureSuspendThreshold: 3,
       failureSuspendMs: 60_000,
+      streamOrphanTimeoutMs: MIRROR_TEST_STREAM_ORPHAN_TIMEOUT_MS,
     }, {
       nowIso: () => '2026-04-21T10:00:00.000Z',
       describeUnknownError: (error) => (error instanceof Error ? error.message : String(error)),
@@ -232,6 +237,8 @@ describe('mirror-runtime pending deliveries', () => {
       syncMirrorSessionStateSafe: () => {},
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
+      recordOrphanedMirrorTurn: () => {},
+      isThreadProcessDefinitelyGone: async () => false,
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
       flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
@@ -342,6 +349,7 @@ describe('mirror-runtime pending deliveries', () => {
       danglingThreadRetryLimit: 3,
       failureSuspendThreshold: 3,
       failureSuspendMs: 60_000,
+      streamOrphanTimeoutMs: MIRROR_TEST_STREAM_ORPHAN_TIMEOUT_MS,
     }, {
       nowIso: () => '2026-07-20T04:00:00.000Z',
       describeUnknownError: (error) => (error instanceof Error ? error.message : String(error)),
@@ -351,6 +359,8 @@ describe('mirror-runtime pending deliveries', () => {
       syncMirrorSessionStateSafe: () => {},
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
+      recordOrphanedMirrorTurn: () => {},
+      isThreadProcessDefinitelyGone: async () => false,
       routeDesktopRecords: (sessionId, threadId, records) => routeDesktopRecords(
         sessionId,
         threadId,
@@ -478,6 +488,7 @@ describe('mirror-runtime pending deliveries', () => {
       danglingThreadRetryLimit: 3,
       failureSuspendThreshold: 3,
       failureSuspendMs: 60_000,
+      streamOrphanTimeoutMs: MIRROR_TEST_STREAM_ORPHAN_TIMEOUT_MS,
     }, {
       nowIso: () => '2026-04-21T10:00:00.000Z',
       describeUnknownError: (error) => (error instanceof Error ? error.message : String(error)),
@@ -495,6 +506,8 @@ describe('mirror-runtime pending deliveries', () => {
         return records.filter((record) => record.turnId !== 'echo-turn');
       },
       observeSessionHealthRecords: () => {},
+      recordOrphanedMirrorTurn: () => {},
+      isThreadProcessDefinitelyGone: async () => false,
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
       flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
@@ -602,6 +615,7 @@ describe('mirror-runtime pending deliveries', () => {
       danglingThreadRetryLimit: 3,
       failureSuspendThreshold: 3,
       failureSuspendMs: 60_000,
+      streamOrphanTimeoutMs: MIRROR_TEST_STREAM_ORPHAN_TIMEOUT_MS,
     }, {
       nowIso: () => '2026-04-21T10:00:00.000Z',
       describeUnknownError: (error) => (error instanceof Error ? error.message : String(error)),
@@ -616,6 +630,8 @@ describe('mirror-runtime pending deliveries', () => {
       syncMirrorSessionStateSafe: () => {},
       filterSuppressedMirrorRecords: (_sessionId, records) => records,
       observeSessionHealthRecords: () => {},
+      recordOrphanedMirrorTurn: () => {},
+      isThreadProcessDefinitelyGone: async () => false,
       consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
       flushTimedOutMirrorTurn: (subscription) => flushTimedOutMirrorTurn(subscription, MIRROR_TEST_BUFFER_TIMEOUT_MS, Date.now()),
       hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
@@ -672,5 +688,192 @@ describe('mirror-runtime pending deliveries', () => {
     const approvalStartedWarnings = warnings.filter((line) => line.includes('event_msg:approval_request_started'));
     assert.equal(approvalRequestWarnings.length, 1);
     assert.equal(approvalStartedWarnings.length, 1);
+  });
+
+  it('finalizes a stale streamed turn only after Codex processes definitely disappear and does not replay it', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-mirror-runtime-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    fs.writeFileSync(filePath, '', 'utf-8');
+
+    const bindings = [{
+      id: 'binding-orphan',
+      channelType: 'feishu-default',
+      chatId: 'chat-orphan',
+      codepilotSessionId: 'session-orphan',
+      sdkSessionId: 'thread-orphan',
+      active: true,
+    }];
+    const session: {
+      id: string;
+      sdk_session_id: string;
+      desktop_thread_id: string;
+      thread_origin: 'desktop';
+      runtime_status: 'idle';
+      mirror_last_event_at: string | null;
+    } = {
+      id: 'session-orphan',
+      sdk_session_id: 'thread-orphan',
+      desktop_thread_id: 'thread-orphan',
+      thread_origin: 'desktop',
+      runtime_status: 'idle',
+      mirror_last_event_at: null,
+    };
+    const store = {
+      listChannelBindings: () => bindings,
+      getSession: (sessionId: string) => (sessionId === session.id ? session : null),
+      updateSdkSessionId: () => {},
+    };
+    initBridgeContext({
+      store: store as never,
+      llm: noopLlm as never,
+      permissions: noopPermissions as never,
+      lifecycle: {},
+    });
+
+    const state = {
+      running: true,
+      adapters: new Map([
+        ['feishu-default', { channelType: 'feishu-default', provider: 'feishu', isRunning: () => false }],
+      ]),
+      mirrorSubscriptions: new Map(),
+      mirrorWakeTimer: null,
+      mirrorSyncInFlight: false,
+      activeTasks: new Map(),
+    };
+    const deliveries: Array<Array<{
+      signature: string;
+      status: string;
+      timestamp: string;
+      timedOut?: boolean;
+    }>> = [];
+    const orphanReasons: string[] = [];
+    let processDefinitelyGone = false;
+    let probeCount = 0;
+    let nowMs = Date.parse('2026-07-20T14:30:00.000Z');
+    const originalDateNow = Date.now;
+    Date.now = () => nowMs;
+
+    const createRuntime = () => createMirrorRuntime(() => state as never, {
+      watchDebounceMs: 0,
+      danglingThreadRetryLimit: 3,
+      failureSuspendThreshold: 3,
+      failureSuspendMs: 60_000,
+      streamOrphanTimeoutMs: MIRROR_TEST_STREAM_ORPHAN_TIMEOUT_MS,
+    }, {
+      nowIso: () => new Date(nowMs).toISOString(),
+      describeUnknownError: (error) => (error instanceof Error ? error.message : String(error)),
+      getDesktopSessionByThreadIdSafe: (threadId) => (
+        threadId === 'thread-orphan' ? { id: threadId, filePath } as never : null
+      ),
+      syncMirrorSessionStateSafe: () => {
+        const subscription = state.mirrorSubscriptions.get('binding-orphan');
+        if (subscription?.lastDeliveredAt) {
+          session.mirror_last_event_at = subscription.lastDeliveredAt;
+        }
+      },
+      filterSuppressedMirrorRecords: (_sessionId, records) => records,
+      observeSessionHealthRecords: () => {},
+      recordOrphanedMirrorTurn: (_sessionId, detail) => {
+        orphanReasons.push(detail);
+      },
+      isThreadProcessDefinitelyGone: async () => {
+        probeCount += 1;
+        return processDefinitelyGone;
+      },
+      consumeMirrorRecords: (subscription, records) => consumeMirrorRecords(subscription, records),
+      flushTimedOutMirrorTurn: (subscription) => (
+        subscription.pendingTurn?.streamStarted
+          ? null
+          : flushTimedOutMirrorTurn(
+              subscription,
+              MIRROR_TEST_BUFFER_TIMEOUT_MS,
+              Date.now(),
+            )
+      ),
+      hasPendingMirrorWork: (subscription) => hasPendingMirrorWork(subscription),
+      consumeBufferedMirrorTurns: (subscription) => {
+        const turns = consumeBufferedMirrorTurns(
+          subscription,
+          Number.POSITIVE_INFINITY,
+          Date.now(),
+        );
+        if (subscription.pendingTurn) {
+          subscription.pendingTurn.streamStarted = true;
+        }
+        return turns;
+      },
+      stopMirrorStreaming: () => {},
+      deliverMirrorTurns: async (subscription, turns) => {
+        deliveries.push(turns.map((turn) => ({ ...turn })));
+        const lastTurn = turns.at(-1);
+        if (lastTurn) subscription.lastDeliveredAt = lastTurn.timestamp;
+        return { deliveredCount: turns.length };
+      },
+    });
+
+    try {
+      runtime = createRuntime();
+      await runtime.reconcileMirrorSubscriptions();
+      const initializedSubscription = state.mirrorSubscriptions.get('binding-orphan');
+      initializedSubscription?.watcher?.close();
+      if (initializedSubscription) {
+        initializedSubscription.watcher = null;
+      }
+
+      const taskStartedAt = '2026-07-20T13:40:00.000Z';
+      const lastActivityAt = '2026-07-20T13:49:00.000Z';
+      fs.appendFileSync(filePath, [
+        JSON.stringify({
+          timestamp: taskStartedAt,
+          type: 'event_msg',
+          payload: { type: 'task_started', turn_id: 'turn-orphan' },
+        }),
+        JSON.stringify({
+          timestamp: lastActivityAt,
+          type: 'response_item',
+          payload: {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'partial response' }],
+          },
+        }),
+      ].join('\n') + '\n', 'utf-8');
+      const staleFileTime = new Date(lastActivityAt);
+      fs.utimesSync(filePath, staleFileTime, staleFileTime);
+
+      await runtime.reconcileMirrorSubscriptions();
+
+      const liveSubscription = state.mirrorSubscriptions.get('binding-orphan');
+      assert.ok(liveSubscription?.pendingTurn?.streamStarted);
+      assert.equal(probeCount, 1);
+      assert.equal(deliveries.length, 0);
+      assert.equal(orphanReasons.length, 0);
+
+      processDefinitelyGone = true;
+      nowMs += 61_000;
+      await runtime.reconcileMirrorSubscriptions();
+
+      assert.equal(probeCount, 2);
+      assert.equal(liveSubscription?.pendingTurn, null);
+      assert.equal(deliveries.length, 1);
+      assert.equal(deliveries[0]?.[0]?.status, 'interrupted');
+      assert.equal(deliveries[0]?.[0]?.timedOut, true);
+      assert.match(deliveries[0]?.[0]?.signature || '', /^timeout:/);
+      assert.equal(orphanReasons.length, 1);
+      assert.match(orphanReasons[0] || '', /未找到对应进程/);
+      assert.equal(session.mirror_last_event_at, lastActivityAt);
+
+      await runtime.reconcileMirrorSubscriptions();
+      assert.equal(deliveries.length, 1);
+
+      runtime.clearMirrorSubscriptions();
+      runtime = createRuntime();
+      await runtime.reconcileMirrorSubscriptions();
+      assert.equal(deliveries.length, 1);
+    } finally {
+      Date.now = originalDateNow;
+      runtime?.clearMirrorSubscriptions();
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });

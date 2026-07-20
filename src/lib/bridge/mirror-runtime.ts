@@ -5,11 +5,15 @@ import type { BaseChannelAdapter } from './channel-adapter.js';
 import { getBridgeContext } from './context.js';
 import {
   enqueuePendingMirrorDeliveries,
+  flushTimedOutMirrorTurn as finalizeTimedOutMirrorTurn,
   removePendingMirrorDeliveries,
   selectPendingMirrorDeliveries,
   type FinalizedDesktopMirrorTurn,
 } from './mirror-turns.js';
-import type { DesktopMirrorSubscription } from './mirror-subscription-state.js';
+import type {
+  DesktopMirrorSubscription,
+  MirrorFileSnapshot,
+} from './mirror-subscription-state.js';
 import {
   clearMirrorSubscriptionFailure,
   createMirrorSubscription,
@@ -30,6 +34,8 @@ import { buildMirrorStreamKey } from './mirror-formatters.js';
 import type { DesktopRecordRouteResult } from './turns/desktop-terminal-router.js';
 import { getExplicitDesktopThreadId } from './turns/turn-classifier.js';
 
+const MIRROR_ORPHAN_PROCESS_PROBE_INTERVAL_MS = 60_000;
+
 export interface BridgeMirrorRuntimeState {
   running: boolean;
   adapters: Map<string, BaseChannelAdapter>;
@@ -44,6 +50,7 @@ export interface CreateMirrorRuntimeOptions {
   danglingThreadRetryLimit: number;
   failureSuspendThreshold: number;
   failureSuspendMs: number;
+  streamOrphanTimeoutMs: number;
 }
 
 export interface CreateMirrorRuntimeDeps {
@@ -53,6 +60,8 @@ export interface CreateMirrorRuntimeDeps {
   syncMirrorSessionStateSafe(sessionId: string, context: string): void;
   filterSuppressedMirrorRecords(sessionId: string, records: DesktopMirrorRecord[]): DesktopMirrorRecord[];
   observeSessionHealthRecords(sessionId: string, threadId: string, records: DesktopMirrorRecord[]): void;
+  recordOrphanedMirrorTurn(sessionId: string, detail: string): void;
+  isThreadProcessDefinitelyGone(threadId: string): Promise<boolean>;
   routeDesktopRecords?(
     sessionId: string,
     threadId: string,
@@ -83,6 +92,8 @@ export function createMirrorRuntime(
   options: CreateMirrorRuntimeOptions,
   deps: CreateMirrorRuntimeDeps,
 ): MirrorRuntime {
+  const orphanProbeAt = new Map<string, number>();
+
   function isAtOrBefore(timestamp: string | null | undefined, boundary: string): boolean {
     if (!timestamp) return true;
     const timestampMs = Date.parse(timestamp);
@@ -183,7 +194,50 @@ export function createMirrorRuntime(
     deps.stopMirrorStreaming(existing);
     closeMirrorWatcher(existing);
     state.mirrorSubscriptions.delete(bindingId);
+    orphanProbeAt.delete(bindingId);
     deps.syncMirrorSessionStateSafe(existing.sessionId, 'mirror subscription removal');
+  }
+
+  async function finalizeOrphanedMirrorStream(
+    subscription: DesktopMirrorSubscription,
+    snapshot: MirrorFileSnapshot,
+    blocked: boolean,
+    runtimeBusy: boolean,
+    nowMs: number,
+  ): Promise<FinalizedDesktopMirrorTurn | null> {
+    const pendingTurn = subscription.pendingTurn;
+    if (!pendingTurn?.streamStarted || blocked || runtimeBusy) return null;
+
+    const timeoutMs = options.streamOrphanTimeoutMs;
+    const lastActivityMs = Date.parse(pendingTurn.lastActivityAt);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(lastActivityMs)) {
+      return null;
+    }
+
+    const sourceActivityMs = Math.max(lastActivityMs, snapshot.mtimeMs);
+    if (nowMs - sourceActivityMs < timeoutMs) return null;
+
+    const lastProbeAt = orphanProbeAt.get(subscription.bindingId);
+    if (
+      typeof lastProbeAt === 'number'
+      && nowMs - lastProbeAt < MIRROR_ORPHAN_PROCESS_PROBE_INTERVAL_MS
+    ) {
+      return null;
+    }
+    orphanProbeAt.set(subscription.bindingId, nowMs);
+
+    if (!await deps.isThreadProcessDefinitelyGone(subscription.threadId)) return null;
+
+    const finalized = finalizeTimedOutMirrorTurn(subscription, timeoutMs, nowMs);
+    if (!finalized) return null;
+
+    orphanProbeAt.delete(subscription.bindingId);
+    const detail = '桌面线程长时间没有新记录，且本机未找到对应进程；已结束孤立的流式同步。';
+    deps.recordOrphanedMirrorTurn(subscription.sessionId, detail);
+    console.warn(
+      `[bridge-manager] Finalized orphaned mirror turn ${pendingTurn.turnId || pendingTurn.streamKey} for thread ${subscription.threadId}`,
+    );
+    return finalized;
   }
 
   function clearDanglingMirrorThread(subscription: DesktopMirrorSubscription, reason: string): void {
@@ -248,6 +302,7 @@ export function createMirrorRuntime(
     });
     if (threadChanged || filePathChanged) {
       deps.stopMirrorStreaming(existing);
+      orphanProbeAt.delete(existing.bindingId);
     }
     watchMirrorFile(existing, filePath);
     if (previousSessionId !== binding.codepilotSessionId) {
@@ -362,6 +417,21 @@ export function createMirrorRuntime(
       flushTimedOutTurn: (currentSubscription) => deps.flushTimedOutMirrorTurn(currentSubscription),
       consumeBufferedTurns: (currentSubscription) => deps.consumeBufferedMirrorTurns(currentSubscription),
     });
+
+    const runtimeBusy = session.runtime_status === 'running' || session.runtime_status === 'queued';
+    const orphanedTurn = await finalizeOrphanedMirrorStream(
+      subscription,
+      snapshot,
+      blocked,
+      runtimeBusy,
+      Date.now(),
+    );
+    if (orphanedTurn) {
+      deliveryPlan.finalizedTurns.push(orphanedTurn);
+      deliveryPlan.syncReason = 'mirror reconcile delivered turns';
+    } else if (!subscription.pendingTurn?.streamStarted) {
+      orphanProbeAt.delete(subscription.bindingId);
+    }
 
     if (deliveryPlan.finalizedTurns.length > 0) {
       enqueuePendingMirrorDeliveries(subscription, deliveryPlan.finalizedTurns);
