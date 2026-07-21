@@ -373,7 +373,7 @@ describe('listDesktopSessions', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('uses state db titles and rollout paths while excluding subagent rows', (t) => {
+  it('prefers renamed session index titles while retaining state db fallbacks', (t) => {
     const DatabaseSync = getTestDatabaseSync();
     if (!DatabaseSync) {
       t.skip('node:sqlite is unavailable on this Node version');
@@ -385,6 +385,7 @@ describe('listDesktopSessions', () => {
     fs.mkdirSync(sessionsDir, { recursive: true });
     const userThreadId = '019f7dc8-55df-76f0-8b98-99b548eb6885';
     const subagentThreadId = '019f7dc8-55df-76f0-8b98-99b548eb6886';
+    const fallbackThreadId = '019f7dc8-55df-76f0-8b98-99b548eb6887';
 
     const writeRollout = (threadId: string, source: unknown) => {
       const rolloutPath = path.join(sessionsDir, `rollout-2026-07-20T12-28-34-${threadId}.jsonl`);
@@ -401,6 +402,24 @@ describe('listDesktopSessions', () => {
     };
     const userRolloutPath = writeRollout(userThreadId, 'vscode');
     const subagentRolloutPath = writeRollout(subagentThreadId, { subagent: { parent_thread_id: userThreadId } });
+    const fallbackRolloutPath = writeRollout(fallbackThreadId, 'vscode');
+
+    fs.writeFileSync(
+      path.join(tempRoot, 'session_index.jsonl'),
+      [
+        JSON.stringify({
+          id: userThreadId,
+          thread_name: 'Initial generated title',
+          updated_at: '2026-07-20T04:28:40.000Z',
+        }),
+        JSON.stringify({
+          id: userThreadId,
+          thread_name: 'Renamed desktop title',
+          updated_at: '2026-07-20T08:01:15.000Z',
+        }),
+      ].join('\n'),
+      'utf8',
+    );
 
     const db = new DatabaseSync(path.join(tempRoot, 'state_5.sqlite'));
     db.exec(`
@@ -421,15 +440,18 @@ describe('listDesktopSessions', () => {
         (id, rollout_path, updated_at, updated_at_ms, archived, source, thread_source, title, cwd)
       VALUES (?, ?, 1, ?, 0, 'vscode', ?, ?, 'D:\\codex\\test')
     `);
-    insert.run(userThreadId, userRolloutPath, 2_000, 'user', 'Authoritative title');
+    insert.run(userThreadId, userRolloutPath, 2_000, 'user', 'Legacy first user prompt');
     insert.run(subagentThreadId, subagentRolloutPath, 3_000, 'subagent', 'Hidden subagent');
+    insert.run(fallbackThreadId, fallbackRolloutPath, 1_500, 'user', 'State db fallback title');
     db.close();
 
     try {
       const sessions = listDesktopSessions(10);
-      assert.deepEqual(sessions.map((session) => session.threadId), [userThreadId]);
-      assert.equal(sessions[0]?.title, 'Authoritative title');
+      assert.deepEqual(sessions.map((session) => session.threadId), [userThreadId, fallbackThreadId]);
+      assert.equal(sessions[0]?.title, 'Renamed desktop title');
       assert.equal(sessions[0]?.filePath, userRolloutPath);
+      assert.equal(sessions[1]?.title, 'State db fallback title');
+      assert.equal(sessions[1]?.filePath, fallbackRolloutPath);
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }

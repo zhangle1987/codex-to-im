@@ -628,8 +628,8 @@ function parseDesktopSession(
     ? new Date(visibleThread.updatedAtMs).toISOString()
     : stat.mtime.toISOString();
   const firstSeenAt = parsed.payload.timestamp || parsed.timestamp || stat.birthtime.toISOString();
-  const title = visibleThread?.title
-    || threadIndexEntries.get(threadId)?.title
+  const title = threadIndexEntries.get(threadId)?.title
+    || visibleThread?.title
     || buildFallbackTitle(threadId, filePath, cwd);
 
   return {

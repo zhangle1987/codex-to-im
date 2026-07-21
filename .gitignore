@@ -3,3 +3,5 @@ dist/
 *.tgz
 .env
 config.env
+.codegraph
+.cursor
