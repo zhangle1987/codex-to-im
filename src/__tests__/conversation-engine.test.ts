@@ -211,6 +211,37 @@ describe('processMessage desktop busy retry', () => {
 });
 
 describe('processMessage stream recovery', () => {
+  it('preserves the structured Desktop transport loss code from provider status', async () => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    const store = new JsonFileStore(makeSettings());
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat() {
+          return streamFromSseEvents([
+            sseEvent('status', { error_code: 'desktop_transport_lost' }),
+            sseEvent('error', 'Codex 会话恢复失败，上一轮执行进程未正常退出。'),
+          ]);
+        },
+      },
+      permissions: {
+        resolvePendingPermission: () => false,
+      },
+      lifecycle: {},
+    });
+    const binding = router.createBinding({
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-transport-code',
+      userId: 'user-transport-code',
+    }, 'D:\\workspace\\transport-code');
+
+    const result = await processMessage(binding, 'hello');
+
+    assert.equal(result.hasError, true);
+    assert.equal(result.errorCode, 'desktop_transport_lost');
+  });
+
   it('returns and persists partial text and outbound attachments when the stream fails', async () => {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
     const store = new JsonFileStore(makeSettings());

@@ -105,4 +105,19 @@ describe('turn-coordinator', () => {
     assert.equal(stale.claimed, false);
     assert.equal(expected.claimed, true);
   });
+
+  it('notifies the active IM turn when Desktop accepts its prompt', () => {
+    const associated: string[] = [];
+    const coordinator = createTurnCoordinator();
+    coordinator.registerInteractiveTurn(activeTurn({
+      onDesktopTurnAssociated(turnId) {
+        associated.push(turnId);
+      },
+    }));
+
+    assert.equal(coordinator.associateDesktopTurn('session-1', 'desktop-turn-1'), true);
+    assert.equal(coordinator.associateDesktopTurn('session-1', 'desktop-turn-1'), true);
+
+    assert.deepEqual(associated, ['desktop-turn-1']);
+  });
 });

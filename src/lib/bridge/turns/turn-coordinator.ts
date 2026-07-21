@@ -38,7 +38,11 @@ export function createTurnCoordinator(deps: TurnCoordinatorDeps = {}): TurnCoord
     const normalizedTurnId = turnId.trim();
     if (!turn || turn.kind !== 'im_desktop_reuse' || !normalizedTurnId) return false;
     if (turn.codexTurnId && turn.codexTurnId !== normalizedTurnId) return false;
+    const changed = turn.codexTurnId !== normalizedTurnId;
     turn.codexTurnId = normalizedTurnId;
+    if (changed) {
+      turn.onDesktopTurnAssociated?.(normalizedTurnId);
+    }
     return true;
   }
 

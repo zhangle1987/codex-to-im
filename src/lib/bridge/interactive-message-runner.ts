@@ -203,6 +203,7 @@ export interface RunInteractiveMessageDeps {
   recordInteractiveHealthEnd(sessionId: string, outcome: 'completed' | 'failed' | 'aborted', detail?: string): void;
   beginMirrorSuppression(sessionId: string, promptText: string): string;
   abortMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
+  handoffMirrorSuppression?(sessionId: string, suppressionId?: string | null): void;
   settleMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
   releaseInteractiveTask(sessionId: string, taskId: string): void;
   releaseBridgeTurn?(sessionId: string, taskId: string): void;
@@ -275,6 +276,7 @@ export async function runInteractiveMessage(
   };
   let externalTerminalRequest: ExternalTerminalFinalization | null = null;
   let desktopTerminalFinalExpected = false;
+  let desktopTurnAccepted = false;
   let resolveExternalTerminal: ((request: ExternalTerminalFinalization) => void) | null = null;
   const externalTerminalPromise = new Promise<ExternalTerminalFinalization>((resolve) => {
     resolveExternalTerminal = resolve;
@@ -331,6 +333,9 @@ export async function runInteractiveMessage(
     requestMessageId: msg.messageId,
     streamKey,
     startedAt: taskStartedAt,
+    onDesktopTurnAssociated: () => {
+      desktopTurnAccepted = true;
+    },
   });
   deps.recordInteractiveHealthStart(binding.codepilotSessionId);
 
@@ -772,6 +777,36 @@ export async function runInteractiveMessage(
       hasError: result.hasError,
       errorMessage: result.errorMessage,
     });
+    const shouldHandoffToMirror = Boolean(
+      desktopThreadId
+      && desktopTurnAccepted
+      && !terminalAfterProcess
+      && result.hasError
+      && result.errorCode === 'desktop_transport_lost'
+      && deps.handoffMirrorSuppression,
+    );
+    if (shouldHandoffToMirror) {
+      const handoffText = [
+        'Codex Desktop 已接收本次请求，但 SDK 连接在执行中断开。',
+        '已自动切换为桌面镜像接管；后续回复和附件会继续回传，请不要重复发送同一请求。',
+        '可发送 `//` 查看当前状态；如需保留本次结果，请等待镜像完成。若决定放弃等待并立即继续，可使用 `/t 0` 切换到纯 IM 会话。',
+      ].join('\n\n');
+      if (taskState.mirrorSuppressionId && deps.handoffMirrorSuppression) {
+        deps.handoffMirrorSuppression(
+          binding.codepilotSessionId,
+          taskState.mirrorSuppressionId,
+        );
+        taskState.mirrorSuppressionId = null;
+      }
+      const handoffResponse = assembleSdkFinalResponse({
+        text: handoffText,
+        attachments: result.outboundAttachments,
+      });
+      const cardFinalized = await finalizeStreamUiOnce('interrupted', handoffResponse.text);
+      await deliverFinalPayload(handoffResponse, { skipText: cardFinalized });
+      shouldRecordHealthEnd = false;
+      return;
+    }
     const terminalHasFinalPayload = Boolean(
       terminalResponse && hasFinalResponsePayload(terminalResponse),
     );

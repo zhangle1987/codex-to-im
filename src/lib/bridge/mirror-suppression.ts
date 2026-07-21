@@ -192,6 +192,14 @@ export function abortMirrorSuppression(
   target.until = nowMs + config.suppressionWindowMs;
 }
 
+export function handoffMirrorSuppression(
+  store: MirrorSuppressionStore,
+  sessionId: string,
+  suppressionId?: string | null,
+): void {
+  clearMirrorSuppression(store, sessionId, suppressionId);
+}
+
 export function isMirrorSuppressed(
   store: MirrorSuppressionStore,
   sessionId: string,

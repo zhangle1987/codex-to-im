@@ -533,6 +533,44 @@ describe('bridge-manager resolveCommandAlias', () => {
     const released = _testOnly.filterSuppressedMirrorRecords(sessionId, [newTurnRecord] as never);
     assert.deepEqual(released, [newTurnRecord]);
   });
+
+  it('hands an accepted IM turn back to mirror without ignoring its remaining records', () => {
+    const sessionId = 'session-suppress-handoff';
+    const suppressionId = _testOnly.beginMirrorSuppression(sessionId, 'hello');
+    _testOnly.filterSuppressedMirrorRecords(sessionId, [
+      {
+        type: 'task_started',
+        content: '',
+        signature: 'sig-start-handoff',
+        timestamp: '2026-03-26T06:25:20.000Z',
+        turnId: 'turn-handoff',
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: 'hello',
+        signature: 'sig-user-handoff',
+        timestamp: '2026-03-26T06:25:26.708Z',
+        turnId: 'turn-handoff',
+      },
+    ] as never);
+
+    _testOnly.handoffMirrorSuppression(sessionId, suppressionId);
+
+    const remaining = [{
+      type: 'message',
+      role: 'assistant',
+      content: 'late desktop response',
+      signature: 'sig-assistant-handoff',
+      timestamp: '2026-03-26T06:25:40.000Z',
+      turnId: 'turn-handoff',
+    }];
+    assert.equal(_testOnly.isMirrorSuppressed(sessionId), false);
+    assert.deepEqual(
+      _testOnly.filterSuppressedMirrorRecords(sessionId, remaining as never),
+      remaining,
+    );
+  });
 });
 
 describe('bridge-manager status formatting', () => {

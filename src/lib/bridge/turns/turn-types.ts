@@ -22,6 +22,7 @@ export interface ActiveBridgeTurn {
   requestMessageId?: string;
   streamKey?: string;
   startedAt: number;
+  onDesktopTurnAssociated?(turnId: string): void;
 }
 
 export interface BridgeTurnClassification {

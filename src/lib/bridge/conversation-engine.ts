@@ -58,7 +58,7 @@ export type OnToolEvent = (toolId: string, toolName: string, status: 'running' |
 export type OnTaskEvent = (tasks: TaskProgressInfo[]) => void;
 export type OnStatusNote = (note: string | null) => void;
 
-export type ConversationErrorCode = 'session_busy';
+export type ConversationErrorCode = 'session_busy' | 'desktop_transport_lost';
 
 const MAX_INBOUND_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 const MAX_INBOUND_ATTACHMENTS_TOTAL_BYTES = 120 * 1024 * 1024;
@@ -468,6 +468,7 @@ async function consumeStream(
   let hasError = false;
   let errorMessage = '';
   let errorCode: ConversationErrorCode | undefined;
+  let providerErrorCode: ConversationErrorCode | undefined;
   const seenToolResultIds = new Set<string>();
   const permissionRequests: PermissionRequestInfo[] = [];
   let capturedSdkSessionId: string | null = null;
@@ -610,6 +611,9 @@ async function consumeStream(
             if (typeof statusData.reasoning === 'string' && onStatusNote) {
               try { onStatusNote(statusData.reasoning); } catch { /* non-critical */ }
             }
+            if (statusData.error_code === 'desktop_transport_lost') {
+              providerErrorCode = 'desktop_transport_lost';
+            }
           } catch { /* skip */ }
           break;
         }
@@ -635,6 +639,8 @@ async function consumeStream(
           errorMessage = event.data || 'Unknown error';
           if (isSessionBusyErrorMessage(errorMessage)) {
             errorCode = 'session_busy';
+          } else if (providerErrorCode) {
+            errorCode = providerErrorCode;
           }
           break;
 
@@ -663,7 +669,7 @@ async function consumeStream(
       tokenUsage,
       hasError,
       errorMessage,
-      errorCode,
+      errorCode: errorCode || providerErrorCode,
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
     };
@@ -680,7 +686,9 @@ async function consumeStream(
       tokenUsage,
       hasError: true,
       errorMessage: fallbackErrorMessage,
-      errorCode: isSessionBusyErrorMessage(fallbackErrorMessage) ? 'session_busy' : undefined,
+      errorCode: isSessionBusyErrorMessage(fallbackErrorMessage)
+        ? 'session_busy'
+        : providerErrorCode,
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
     };

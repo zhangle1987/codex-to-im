@@ -151,6 +151,22 @@ function normalizeCodexErrorMessage(message: string | null | undefined): string 
   return trimmed;
 }
 
+function isCodexProcessRecoveryErrorMessage(message: string | null | undefined): boolean {
+  const lower = (message || '').trim().toLowerCase();
+  return lower.includes('timeout waiting for child process to exit')
+    || lower.includes('reconnecting...');
+}
+
+function enqueueCodexError(
+  controller: ReadableStreamDefaultController<string>,
+  message: string,
+): void {
+  if (isCodexProcessRecoveryErrorMessage(message)) {
+    controller.enqueue(sseEvent('status', { error_code: 'desktop_transport_lost' }));
+  }
+  controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(message)));
+}
+
 function getTerminalDrainTimeoutMs(): number {
   const configured = parseInt(process.env.CTI_CODEX_TERMINAL_DRAIN_TIMEOUT_MS || '', 10);
   if (Number.isFinite(configured) && configured >= 10) {
@@ -344,6 +360,11 @@ export class CodexProvider implements LLMProvider {
 
   private clearCachedThreadId(sessionId: string): void {
     this.threadIds.delete(sessionId);
+  }
+
+  private recycleSdkClient(sessionId: string): void {
+    this.clearCachedThreadId(sessionId);
+    this.codex = null;
   }
 
   /**
@@ -581,16 +602,26 @@ export class CodexProvider implements LLMProvider {
 
                     case 'turn.failed': {
                       const error = (event as { error?: { message?: string } }).error?.message;
-                      self.clearCachedThreadId(params.sessionId);
-                      controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(error || 'Turn failed')));
+                      const message = error || 'Turn failed';
+                      if (isCodexProcessRecoveryErrorMessage(message)) {
+                        self.recycleSdkClient(params.sessionId);
+                      } else {
+                        self.clearCachedThreadId(params.sessionId);
+                      }
+                      enqueueCodexError(controller, message);
                       sawTerminalEvent = true;
                       break;
                     }
 
                     case 'error': {
                       const error = (event as { message?: string }).message;
-                      self.clearCachedThreadId(params.sessionId);
-                      controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(error || 'Thread error')));
+                      const message = error || 'Thread error';
+                      if (isCodexProcessRecoveryErrorMessage(message)) {
+                        self.recycleSdkClient(params.sessionId);
+                      } else {
+                        self.clearCachedThreadId(params.sessionId);
+                      }
+                      enqueueCodexError(controller, message);
                       sawTerminalEvent = true;
                       break;
                     }
@@ -631,6 +662,12 @@ export class CodexProvider implements LLMProvider {
                   console.warn('[codex-provider] Suppressed Codex SDK Windows process cleanup parse noise:', message);
                   break;
                 }
+                if (isCodexProcessRecoveryErrorMessage(message)) {
+                  if (!runAbortController.signal.aborted) {
+                    runAbortController.abort();
+                  }
+                  self.recycleSdkClient(params.sessionId);
+                }
                 if (savedThreadId && !retryFresh && !sawAnyEvent && shouldRetryFreshThread(message)) {
                   console.warn('[codex-provider] Resume failed, retrying with a fresh thread:', message);
                   self.clearCachedThreadId(params.sessionId);
@@ -650,9 +687,13 @@ export class CodexProvider implements LLMProvider {
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             console.error('[codex-provider] Error:', err instanceof Error ? err.stack || err.message : err);
-            self.clearCachedThreadId(params.sessionId);
+            if (isCodexProcessRecoveryErrorMessage(message)) {
+              self.recycleSdkClient(params.sessionId);
+            } else {
+              self.clearCachedThreadId(params.sessionId);
+            }
             try {
-              controller.enqueue(sseEvent('error', normalizeCodexErrorMessage(message)));
+              enqueueCodexError(controller, message);
               controller.close();
             } catch {
               // Controller already closed

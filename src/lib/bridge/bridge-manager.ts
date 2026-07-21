@@ -54,6 +54,7 @@ import {
   abortMirrorSuppression as abortMirrorSuppressionBase,
   beginMirrorSuppression as beginMirrorSuppressionBase,
   filterSuppressedMirrorRecords as filterSuppressedMirrorRecordsBase,
+  handoffMirrorSuppression as handoffMirrorSuppressionBase,
   isMirrorSuppressed as isMirrorSuppressedBase,
   settleMirrorSuppression as settleMirrorSuppressionBase,
   type MirrorSuppressionConfig,
@@ -339,6 +340,13 @@ function abortMirrorSuppression(
     MIRROR_SUPPRESSION_CONFIG,
     suppressionId,
   );
+}
+
+function handoffMirrorSuppression(
+  sessionId: string,
+  suppressionId?: string | null,
+): void {
+  handoffMirrorSuppressionBase(getMirrorSuppressionStore(), sessionId, suppressionId);
 }
 
 function settleMirrorSuppression(
@@ -948,6 +956,7 @@ async function handleMessage(
       recordInteractiveHealthEnd: (sessionId, outcome, detail) => SESSION_HEALTH_RUNTIME.recordInteractiveEnd(sessionId, outcome, detail),
       beginMirrorSuppression,
       abortMirrorSuppression,
+      handoffMirrorSuppression,
       settleMirrorSuppression,
       releaseInteractiveTask: (sessionId, taskId) => INTERACTIVE_RUNTIME.releaseInteractiveTask(sessionId, taskId),
       releaseBridgeTurn: (sessionId, taskId) => TURN_COORDINATOR.releaseSessionTurn(sessionId, taskId),
@@ -1091,6 +1100,7 @@ export const _testOnly = {
   reconcileTerminalSessionRuntimeState: () => INTERACTIVE_RUNTIME.reconcileTerminalSessionRuntimeState(),
   beginMirrorSuppression,
   abortMirrorSuppression,
+  handoffMirrorSuppression,
   settleMirrorSuppression,
   persistSdkSessionUpdate,
   resetStateForTests,

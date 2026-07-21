@@ -1231,19 +1231,62 @@ describe('CodexProvider error events', () => {
 
     const chunks = await collectStream(stream);
     const events = parseSSEChunks(chunks);
+    const recoveryStatus = events.find(e => e.type === 'status');
     const errorEvent = events.find(e => e.type === 'error');
+    assert.ok(recoveryStatus);
+    assert.equal(JSON.parse(recoveryStatus!.data).error_code, 'desktop_transport_lost');
     assert.ok(errorEvent);
     assert.match(errorEvent!.data, /会话恢复失败/);
     assert.match(errorEvent!.data, /\/t 0/);
+    assert.equal((provider as any).codex, null);
   });
 
-  it('clears the cached thread id after a failed turn so the next message starts fresh', async () => {
+  it('aborts and recycles the SDK client when child process cleanup times out', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+    let capturedSignal: AbortSignal | undefined;
+
+    const mockThread = {
+      runStreamed: (_input: unknown, options: { signal?: AbortSignal }) => {
+        capturedSignal = options.signal;
+        return {
+          events: (async function* () {
+            throw new Error('timeout waiting for child process to exit');
+          })(),
+        };
+      },
+    };
+    (provider as any).sdk = {
+      Codex: class { constructor() {} },
+    };
+    (provider as any).codex = {
+      startThread: () => mockThread,
+    };
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: 'test',
+      sessionId: 'err-session-child-timeout',
+    }));
+    const events = parseSSEChunks(chunks);
+
+    assert.equal(capturedSignal?.aborted, true);
+    assert.equal((provider as any).codex, null);
+    assert.equal(
+      JSON.parse(events.find(e => e.type === 'status')!.data).error_code,
+      'desktop_transport_lost',
+    );
+    assert.match(events.find(e => e.type === 'error')!.data, /会话恢复失败/);
+  });
+
+  it('recycles the SDK client and starts a fresh thread after a process recovery failure', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
     const provider = new CodexProvider(new PendingPermissions());
 
     let startCount = 0;
     let resumeCount = 0;
+    let clientCount = 1;
 
     const failedThread = {
       runStreamed: () => ({
@@ -1269,10 +1312,7 @@ describe('CodexProvider error events', () => {
       }),
     };
 
-    (provider as any).sdk = {
-      Codex: class { constructor() {} },
-    };
-    (provider as any).codex = {
+    const createClient = () => ({
       startThread: () => {
         startCount += 1;
         return startCount === 1 ? failedThread : freshThread;
@@ -1281,6 +1321,17 @@ describe('CodexProvider error events', () => {
         resumeCount += 1;
         return freshThread;
       },
+    });
+    (provider as any).sdk = {
+      Codex: class { constructor() {} },
+    };
+    (provider as any).codex = createClient();
+    (provider as any).ensureSDK = async () => {
+      if (!(provider as any).codex) {
+        clientCount += 1;
+        (provider as any).codex = createClient();
+      }
+      return { sdk: (provider as any).sdk, codex: (provider as any).codex };
     };
 
     const firstStream = provider.streamChat({
@@ -1300,6 +1351,7 @@ describe('CodexProvider error events', () => {
     const resultEvent = secondEvents.find(e => e.type === 'result');
 
     assert.equal(resumeCount, 0, 'failed in-memory thread id must not be resumed');
+    assert.equal(clientCount, 2, 'process recovery should construct a new SDK client');
     assert.equal(startCount, 2, 'second request should start a fresh thread');
     assert.ok(resultEvent, 'fresh thread should complete successfully');
     assert.equal((provider as any).threadIds.get('err-session-reset'), 'fresh-thread');
