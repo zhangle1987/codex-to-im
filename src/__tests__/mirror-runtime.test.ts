@@ -15,6 +15,7 @@ import {
   hasPendingMirrorWork,
 } from '../lib/bridge/mirror-turns.js';
 import { routeDesktopRecords } from '../lib/bridge/turns/desktop-terminal-router.js';
+import { createMirrorSubscription } from '../lib/bridge/mirror-subscription-state.js';
 
 const MIRROR_TEST_BUFFER_TIMEOUT_MS = 10 * 60_000;
 const MIRROR_TEST_STREAM_ORPHAN_TIMEOUT_MS = 30 * 60_000;
@@ -40,6 +41,86 @@ describe('mirror-runtime pending deliveries', () => {
     runtime?.clearMirrorSubscriptions();
     runtime = null;
     delete (globalThis as Record<string, unknown>).__bridge_context__;
+  });
+
+  it('closes and removes only the mirror turn stopped from IM', () => {
+    const subscription = createMirrorSubscription({
+      bindingId: 'binding-stop',
+      sessionId: 'session-stop',
+      channelType: 'feishu-default',
+      chatId: 'chat-stop',
+      threadId: 'thread-stop',
+      filePath: null,
+      lastDeliveredAt: null,
+    });
+    const pendingTurn = createMirrorTurnState(
+      'session-stop',
+      '2026-07-22T02:40:00.000Z',
+      'turn-stop',
+    );
+    pendingTurn.streamStarted = true;
+    subscription.pendingTurn = pendingTurn;
+    subscription.bufferedRecords = [{
+      signature: 'buffer-stop',
+      type: 'message',
+      role: 'assistant',
+      content: 'partial',
+      timestamp: '2026-07-22T02:40:01.000Z',
+      turnId: 'turn-stop',
+    }, {
+      signature: 'buffer-other',
+      type: 'message',
+      role: 'assistant',
+      content: 'keep',
+      timestamp: '2026-07-22T02:40:02.000Z',
+      turnId: 'turn-other',
+    }];
+    subscription.pendingDeliveries = [{
+      streamKey: pendingTurn.streamKey,
+      userText: null,
+      text: 'partial',
+      signature: 'delivery-stop',
+      timestamp: '2026-07-22T02:40:03.000Z',
+      status: 'interrupted',
+    }];
+    const streamStops: string[] = [];
+    const state = {
+      running: true,
+      adapters: new Map(),
+      mirrorSubscriptions: new Map([[subscription.bindingId, subscription]]),
+      mirrorWakeTimer: null,
+      mirrorSyncInFlight: false,
+      activeTasks: new Map(),
+    };
+
+    runtime = createMirrorRuntime(() => state as never, {
+      watchDebounceMs: 0,
+      danglingThreadRetryLimit: 3,
+      failureSuspendThreshold: 3,
+      failureSuspendMs: 60_000,
+      streamOrphanTimeoutMs: MIRROR_TEST_STREAM_ORPHAN_TIMEOUT_MS,
+    }, {
+      nowIso: () => '2026-07-22T02:41:00.000Z',
+      describeUnknownError: String,
+      getDesktopSessionByThreadIdSafe: () => null,
+      syncMirrorSessionStateSafe: () => {},
+      filterSuppressedMirrorRecords: (_sessionId, records) => records,
+      observeSessionHealthRecords: () => {},
+      recordOrphanedMirrorTurn: () => {},
+      isThreadProcessDefinitelyGone: async () => false,
+      consumeMirrorRecords: () => [],
+      flushTimedOutMirrorTurn: () => null,
+      hasPendingMirrorWork: () => false,
+      consumeBufferedMirrorTurns: () => [],
+      stopMirrorStreaming: (_subscription, status) => streamStops.push(status || ''),
+      deliverMirrorTurns: async () => ({ deliveredCount: 0 }),
+    });
+
+    assert.equal(runtime.interruptMirrorTurn('session-stop', 'thread-stop', 'turn-stop'), true);
+    assert.deepEqual(streamStops, ['interrupted']);
+    assert.equal(subscription.pendingTurn, null);
+    assert.deepEqual(subscription.bufferedRecords.map((record) => record.turnId), ['turn-other']);
+    assert.deepEqual(subscription.pendingDeliveries, []);
   });
 
   it('retries queued finalized turns even when the mirror file has no new bytes', async () => {

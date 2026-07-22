@@ -200,6 +200,22 @@ export function handoffMirrorSuppression(
   clearMirrorSuppression(store, sessionId, suppressionId);
 }
 
+export function ignoreMirrorTurn(
+  store: MirrorSuppressionStore,
+  sessionId: string,
+  config: MirrorSuppressionConfig,
+  turnId: string,
+  nowMs = Date.now(),
+): void {
+  markIgnoredMirrorTurn(
+    store,
+    sessionId,
+    turnId,
+    config.promptMatchGraceMs,
+    nowMs,
+  );
+}
+
 export function isMirrorSuppressed(
   store: MirrorSuppressionStore,
   sessionId: string,
@@ -231,7 +247,7 @@ export function filterSuppressedMirrorRecords(
     while (true) {
       const ignoredTurnIds = cleanupIgnoredMirrorTurns(store, sessionId, nowMs);
       if (record.turnId && ignoredTurnIds.has(record.turnId)) {
-        if (record.type === 'task_complete') {
+        if (record.type === 'task_complete' || record.type === 'task_aborted') {
           clearIgnoredMirrorTurn(store, sessionId, record.turnId, nowMs);
         }
         handled = true;

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import {
   advanceDesktopMirrorCursor,
   filterDuplicateAssistantEvents,
-  reconcileDesktopMirrorCursor,
+  type DesktopMirrorCursor,
 } from '../../desktop-session-mirror.js';
 import { readDesktopSessionMirrorRecordDeltaByFilePath } from '../../desktop-sessions.js';
 import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
@@ -12,6 +12,12 @@ import {
   type DesktopMirrorSubscription,
   type MirrorFileSnapshot,
 } from './mirror-subscription-state.js';
+
+const DEFAULT_MAX_MIRROR_READ_BYTES = 64 * 1024 * 1024;
+
+export interface ReadMirrorDeliverableRecordsOptions {
+  maxReadBytes?: number;
+}
 
 export function statMirrorFile(filePath: string): MirrorFileSnapshot | null {
   try {
@@ -81,16 +87,92 @@ function findLastCompleteLineOffset(filePath: string, fileSize: number): number 
   }
 }
 
+function beginMirrorRecovery(subscription: DesktopMirrorSubscription): void {
+  subscription.recoveryState = {
+    baselineCursor: { ...subscription.cursor },
+    scannedCursor: { initialized: true, lastEventCount: 0 },
+    boundaryFound: false,
+    dedupePending: true,
+    scannedRecordCount: 0,
+  };
+  subscription.trailingText = '';
+  subscription.fileOffset = 0;
+  subscription.activeMirrorTurnId = null;
+  subscription.activeSpecialCallIds.clear();
+}
+
+function findCursorTimestampBoundary(
+  cursor: DesktopMirrorCursor,
+  records: DesktopMirrorRecord[],
+): number {
+  if (!cursor.lastEventTimestamp) return -1;
+  return records.findIndex((record) => (
+    Boolean(record.timestamp) && record.timestamp > cursor.lastEventTimestamp!
+  ));
+}
+
+function selectRecoveredRecords(
+  subscription: DesktopMirrorSubscription,
+  records: DesktopMirrorRecord[],
+): DesktopMirrorRecord[] {
+  const recovery = subscription.recoveryState;
+  if (!recovery || records.length === 0) return [];
+  if (recovery.boundaryFound) return records;
+
+  const baseline = recovery.baselineCursor;
+  if (baseline.lastEventSignature) {
+    for (let index = records.length - 1; index >= 0; index -= 1) {
+      if (records[index]?.signature !== baseline.lastEventSignature) continue;
+      recovery.boundaryFound = true;
+      return records.slice(index + 1);
+    }
+  }
+
+  const timestampBoundary = findCursorTimestampBoundary(baseline, records);
+  if (timestampBoundary >= 0) {
+    recovery.boundaryFound = true;
+    return records.slice(timestampBoundary);
+  }
+
+  if (baseline.lastEventSignature || baseline.lastEventTimestamp) return [];
+  if (baseline.lastEventCount > recovery.scannedRecordCount) {
+    const boundary = baseline.lastEventCount - recovery.scannedRecordCount;
+    if (boundary >= records.length) return [];
+    recovery.boundaryFound = true;
+    return records.slice(boundary);
+  }
+
+  recovery.boundaryFound = true;
+  return records;
+}
+
+function filterFirstRecoveredAssistantDuplicates(
+  subscription: DesktopMirrorSubscription,
+  records: DesktopMirrorRecord[],
+): DesktopMirrorRecord[] {
+  const recovery = subscription.recoveryState;
+  if (!recovery?.dedupePending || records.length === 0) return records;
+  const filtered = filterDuplicateAssistantEvents(recovery.baselineCursor, records);
+  if (filtered.length > 0) {
+    recovery.dedupePending = false;
+  }
+  return filtered;
+}
+
 export function readMirrorDeliverableRecords(
   subscription: DesktopMirrorSubscription,
   snapshot: MirrorFileSnapshot,
+  options: ReadMirrorDeliverableRecordsOptions = {},
 ) {
   let deliverableRecords: DesktopMirrorRecord[] = [];
   let unknownKinds: string[] = [];
+  const previousOffset = subscription.fileOffset;
+  const configuredMaxReadBytes = options.maxReadBytes ?? DEFAULT_MAX_MIRROR_READ_BYTES;
+  const maxReadBytes = Number.isFinite(configuredMaxReadBytes) && configuredMaxReadBytes > 0
+    ? Math.max(1, Math.floor(configuredMaxReadBytes))
+    : DEFAULT_MAX_MIRROR_READ_BYTES;
 
-  const requiresFullRecover = !subscription.cursor.initialized
-    || subscription.fileOffset === 0
-    || (subscription.fileIdentity !== null && subscription.fileIdentity !== snapshot.identity)
+  const sourceChanged = (subscription.fileIdentity !== null && subscription.fileIdentity !== snapshot.identity)
     || (subscription.fileSize !== null && snapshot.size < subscription.fileOffset)
     || (
       subscription.fileSize !== null
@@ -98,9 +180,14 @@ export function readMirrorDeliverableRecords(
       && subscription.fileMtimeMs !== null
       && snapshot.mtimeMs !== subscription.fileMtimeMs
     );
+  const requiresFullRecover = Boolean(subscription.recoveryState)
+    || !subscription.cursor.initialized
+    || subscription.fileOffset === 0
+    || sourceChanged;
 
   if (requiresFullRecover && !subscription.cursor.initialized && !subscription.lastDeliveredAt) {
     subscription.cursor = { initialized: true, lastEventCount: 0 };
+    subscription.recoveryState = null;
     subscription.trailingText = '';
     subscription.fileOffset = findLastCompleteLineOffset(subscription.filePath!, snapshot.size);
     subscription.activeMirrorTurnId = null;
@@ -109,27 +196,39 @@ export function readMirrorDeliverableRecords(
     subscription.fileMtimeMs = snapshot.mtimeMs;
     subscription.fileIdentity = snapshot.identity;
     subscription.dirty = false;
-    return { records: [], unknownKinds: [] };
+    return { records: [], unknownKinds: [], hasMoreData: false };
   }
 
   if (requiresFullRecover) {
-    const previousCursor = subscription.cursor;
-    const fullDelta = readDesktopSessionMirrorRecordDeltaByFilePath(
+    if (!subscription.recoveryState || sourceChanged) {
+      beginMirrorRecovery(subscription);
+    }
+    const recovery = subscription.recoveryState!;
+    const delta = readDesktopSessionMirrorRecordDeltaByFilePath(
       subscription.filePath!,
-      0,
+      subscription.fileOffset,
       snapshot.size,
-      '',
-      null,
-      [],
+      subscription.trailingText,
+      subscription.activeMirrorTurnId,
+      subscription.activeSpecialCallIds,
+      { maxBytes: maxReadBytes },
     );
-    const delta = reconcileDesktopMirrorCursor(subscription.cursor, fullDelta.records);
-    subscription.cursor = delta.nextCursor;
-    deliverableRecords = filterDuplicateAssistantEvents(previousCursor, delta.deliverableRecords);
-    subscription.trailingText = fullDelta.trailingText;
-    subscription.fileOffset = fullDelta.nextOffset;
-    subscription.activeMirrorTurnId = fullDelta.nextTurnId;
-    subscription.activeSpecialCallIds = new Set(fullDelta.nextSpecialCallIds);
-    unknownKinds = fullDelta.unknownKinds;
+    deliverableRecords = filterFirstRecoveredAssistantDuplicates(
+      subscription,
+      selectRecoveredRecords(subscription, delta.records),
+    );
+    recovery.scannedCursor = advanceDesktopMirrorCursor(recovery.scannedCursor, delta.records);
+    recovery.scannedRecordCount += delta.records.length;
+    subscription.trailingText = delta.trailingText;
+    subscription.fileOffset = delta.nextOffset;
+    subscription.activeMirrorTurnId = delta.nextTurnId;
+    subscription.activeSpecialCallIds = new Set(delta.nextSpecialCallIds);
+    unknownKinds = delta.unknownKinds;
+
+    if (subscription.fileOffset >= snapshot.size && !subscription.trailingText) {
+      subscription.cursor = recovery.scannedCursor;
+      subscription.recoveryState = null;
+    }
   } else if (snapshot.size > subscription.fileOffset || subscription.trailingText) {
     const previousCursor = subscription.cursor;
     const delta = readDesktopSessionMirrorRecordDeltaByFilePath(
@@ -139,6 +238,7 @@ export function readMirrorDeliverableRecords(
       subscription.trailingText,
       subscription.activeMirrorTurnId,
       subscription.activeSpecialCallIds,
+      { maxBytes: maxReadBytes },
     );
     deliverableRecords = filterDuplicateAssistantEvents(previousCursor, delta.records);
     subscription.cursor = advanceDesktopMirrorCursor(subscription.cursor, delta.records);
@@ -157,5 +257,7 @@ export function readMirrorDeliverableRecords(
   return {
     records: deliverableRecords,
     unknownKinds,
+    hasMoreData: subscription.fileOffset > previousOffset
+      && subscription.fileOffset < snapshot.size,
   };
 }

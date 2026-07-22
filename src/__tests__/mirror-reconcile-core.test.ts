@@ -75,6 +75,55 @@ describe('mirror-reconcile-core', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('recovers a rollout across bounded reads without replaying records before the persisted cursor', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-mirror-reconcile-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    const lines = Array.from({ length: 12 }, (_, index) => JSON.stringify({
+      timestamp: `2026-04-13T12:00:${String(index).padStart(2, '0')}.000Z`,
+      type: 'event_msg',
+      payload: {
+        type: 'task_complete',
+        turn_id: `turn-${index}`,
+        last_agent_message: `answer-${index}-${'x'.repeat(80)}`,
+      },
+    }));
+    fs.writeFileSync(filePath, `${lines.join('\n')}\n`, 'utf8');
+    const subscription = createMirrorSubscription({
+      bindingId: 'binding-bounded-restart',
+      sessionId: 'session-bounded-restart',
+      channelType: 'feishu-default',
+      chatId: 'chat-bounded-restart',
+      threadId: 'thread-bounded-restart',
+      filePath,
+      lastDeliveredAt: '2026-04-13T12:00:07.500Z',
+    });
+    const snapshot = statMirrorFile(filePath);
+    assert.ok(snapshot);
+
+    const recovered: string[] = [];
+    let reads = 0;
+    do {
+      const before = subscription.fileOffset;
+      const result = readMirrorDeliverableRecords(subscription, snapshot, { maxReadBytes: 320 });
+      recovered.push(...result.records.map((record) => record.content));
+      reads += 1;
+      assert.ok(subscription.fileOffset > before, 'bounded recovery must advance its file offset');
+      assert.equal(result.hasMoreData, subscription.fileOffset < snapshot.size);
+      if (subscription.fileOffset < snapshot.size) {
+        assert.ok(subscription.recoveryState, 'recovery state must survive between bounded reads');
+      }
+    } while (subscription.fileOffset < snapshot.size);
+
+    assert.ok(reads > 1);
+    assert.deepEqual(
+      recovered.map((content) => content.slice(0, 'answer-00'.length)),
+      ['answer-8-', 'answer-9-', 'answer-10', 'answer-11'],
+    );
+    assert.equal(subscription.recoveryState, null);
+    assert.equal(subscription.cursor.lastEventTimestamp, '2026-04-13T12:00:11.000Z');
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('refreshes the mirror source path and resets read state only when the file changes', () => {
     const subscription = createMirrorSubscription({
       bindingId: 'binding-1',

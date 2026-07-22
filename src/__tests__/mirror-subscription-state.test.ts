@@ -45,6 +45,7 @@ describe('mirror-subscription-state', () => {
       trailingText: '',
       activeMirrorTurnId: null,
       activeSpecialCallIds: new Set(),
+      recoveryState: null,
       bufferedRecords: [],
       pendingTurn: null,
       pendingDeliveries: [],

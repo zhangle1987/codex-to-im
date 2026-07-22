@@ -55,6 +55,10 @@ export interface DesktopMirrorRecordDelta {
   unknownKinds: string[];
 }
 
+export interface DesktopMirrorRecordReadOptions {
+  maxBytes?: number;
+}
+
 interface SessionMetaLine {
   timestamp?: string;
   type?: string;
@@ -851,31 +855,64 @@ function readCompleteUtf8LineRange(
   filePath: string,
   startOffset: number,
   endOffset: number,
+  maxBytes?: number,
 ): CompleteUtf8LineRange {
   const safeStart = Math.max(0, startOffset);
   const safeEnd = Math.max(safeStart, endOffset);
-  const bytesToRead = safeEnd - safeStart;
-  if (bytesToRead <= 0) return { content: '', nextOffset: safeStart };
+  const availableBytes = safeEnd - safeStart;
+  if (availableBytes <= 0) return { content: '', nextOffset: safeStart };
+  const boundedBytes = typeof maxBytes === 'number' && Number.isFinite(maxBytes)
+    ? Math.max(1, Math.min(availableBytes, Math.floor(maxBytes)))
+    : availableBytes;
 
   const fd = fs.openSync(filePath, 'r');
   try {
-    const buffer = Buffer.alloc(bytesToRead);
-    let totalRead = 0;
-    while (totalRead < bytesToRead) {
-      const bytesRead = fs.readSync(fd, buffer, totalRead, bytesToRead - totalRead, safeStart + totalRead);
-      if (bytesRead <= 0) break;
-      totalRead += bytesRead;
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let position = safeStart;
+    let firstChunk = true;
+
+    while (position < safeEnd) {
+      const requestedBytes = Math.min(boundedBytes, safeEnd - position);
+      const buffer = Buffer.allocUnsafe(requestedBytes);
+      let totalRead = 0;
+      while (totalRead < requestedBytes) {
+        const bytesRead = fs.readSync(
+          fd,
+          buffer,
+          totalRead,
+          requestedBytes - totalRead,
+          position + totalRead,
+        );
+        if (bytesRead <= 0) break;
+        totalRead += bytesRead;
+      }
+      if (totalRead <= 0) break;
+
+      const readBuffer = buffer.subarray(0, totalRead);
+      const newlineIndex = firstChunk
+        ? readBuffer.lastIndexOf(0x0a)
+        : readBuffer.indexOf(0x0a);
+      if (newlineIndex >= 0) {
+        const completeChunk = readBuffer.subarray(0, newlineIndex + 1);
+        chunks.push(completeChunk);
+        totalBytes += completeChunk.length;
+        const completeBuffer = chunks.length === 1
+          ? chunks[0]!
+          : Buffer.concat(chunks, totalBytes);
+        return {
+          content: completeBuffer.toString('utf-8'),
+          nextOffset: safeStart + totalBytes,
+        };
+      }
+
+      chunks.push(readBuffer);
+      totalBytes += totalRead;
+      position += totalRead;
+      firstChunk = false;
+      if (totalRead < requestedBytes) break;
     }
-    const readBuffer = buffer.subarray(0, totalRead);
-    const lastNewlineIndex = readBuffer.lastIndexOf(0x0a);
-    if (lastNewlineIndex < 0) {
-      return { content: '', nextOffset: safeStart };
-    }
-    const consumedBytes = lastNewlineIndex + 1;
-    return {
-      content: readBuffer.subarray(0, consumedBytes).toString('utf-8'),
-      nextOffset: safeStart + consumedBytes,
-    };
+    return { content: '', nextOffset: safeStart };
   } finally {
     fs.closeSync(fd);
   }
@@ -1844,10 +1881,11 @@ export function readDesktopSessionMirrorRecordDeltaByFilePath(
   trailingText = '',
   currentTurnId: string | null = null,
   currentSpecialCallIds: Iterable<string> = [],
+  options: DesktopMirrorRecordReadOptions = {},
 ): DesktopMirrorRecordDelta {
   let range: CompleteUtf8LineRange;
   try {
-    range = readCompleteUtf8LineRange(filePath, startOffset, endOffset);
+    range = readCompleteUtf8LineRange(filePath, startOffset, endOffset, options.maxBytes);
   } catch {
     return {
       records: [],

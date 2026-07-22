@@ -28,6 +28,7 @@ import {
 } from './stream-feedback-controller.js';
 import { getExplicitDesktopThreadId } from './turns/turn-classifier.js';
 import type { ActiveBridgeTurn } from './turns/turn-types.js';
+import type { DesktopHandoffTaskRegistration } from './desktop-handoff-control.js';
 import {
   deliverFinalResponse,
   finalizeStreamingUi,
@@ -205,6 +206,9 @@ export interface RunInteractiveMessageDeps {
   abortMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
   handoffMirrorSuppression?(sessionId: string, suppressionId?: string | null): void;
   settleMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
+  prepareDesktopHandoffTask?(task: DesktopHandoffTaskRegistration): Promise<boolean>;
+  activateDesktopHandoffTask?(sessionId: string, taskId: string): boolean;
+  releaseDesktopHandoffTask?(sessionId: string, taskId: string): void;
   releaseInteractiveTask(sessionId: string, taskId: string): void;
   releaseBridgeTurn?(sessionId: string, taskId: string): void;
   deliverResponse(
@@ -277,6 +281,11 @@ export async function runInteractiveMessage(
   let externalTerminalRequest: ExternalTerminalFinalization | null = null;
   let desktopTerminalFinalExpected = false;
   let desktopTurnAccepted = false;
+  let desktopTurnId: string | null = null;
+  let desktopHandoffPreparation: Promise<boolean> | null = null;
+  let desktopHandoffStopReady = false;
+  let desktopHandoffTaskActivated = false;
+  let retainDesktopHandoffTask = false;
   let resolveExternalTerminal: ((request: ExternalTerminalFinalization) => void) | null = null;
   const externalTerminalPromise = new Promise<ExternalTerminalFinalization>((resolve) => {
     resolveExternalTerminal = resolve;
@@ -333,8 +342,23 @@ export async function runInteractiveMessage(
     requestMessageId: msg.messageId,
     streamKey,
     startedAt: taskStartedAt,
-    onDesktopTurnAssociated: () => {
+    onDesktopTurnAssociated: (turnId) => {
       desktopTurnAccepted = true;
+      desktopTurnId = turnId;
+      if (desktopThreadId && deps.prepareDesktopHandoffTask && !desktopHandoffPreparation) {
+        desktopHandoffPreparation = deps.prepareDesktopHandoffTask({
+          sessionId: binding.codepilotSessionId,
+          taskId,
+          threadId: desktopThreadId,
+          turnId,
+        }).catch((error) => {
+          console.warn(
+            `[interactive-message-runner] Failed to prepare Desktop handoff stop control for ${desktopThreadId}:`,
+            error instanceof Error ? error.message : error,
+          );
+          return false;
+        });
+      }
     },
   });
   deps.recordInteractiveHealthStart(binding.codepilotSessionId);
@@ -767,7 +791,38 @@ export async function runInteractiveMessage(
       return;
     }
 
+    const desktopTransportLost = Boolean(
+      desktopThreadId
+      && desktopTurnAccepted
+      && result.hasError
+      && result.errorCode === 'desktop_transport_lost',
+    );
+    if (
+      desktopTransportLost
+      && desktopHandoffPreparation
+      && deps.activateDesktopHandoffTask
+    ) {
+      desktopHandoffStopReady = await desktopHandoffPreparation;
+      if (deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) {
+        desktopHandoffTaskActivated = deps.activateDesktopHandoffTask(
+          binding.codepilotSessionId,
+          taskId,
+        );
+      }
+    }
+    if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) {
+      shouldRecordHealthEnd = false;
+      return;
+    }
+
     const terminalAfterProcess = await waitForDesktopTerminalFinalization();
+    if (!deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) {
+      shouldRecordHealthEnd = false;
+      return;
+    }
+    if (taskAbort.signal.aborted && !externalTerminalRequest) {
+      return;
+    }
     const terminalResponse = terminalAfterProcess?.outcome === 'completed'
       ? assembleDesktopFinalResponse({ text: terminalAfterProcess.finalText || '' })
       : null;
@@ -786,10 +841,14 @@ export async function runInteractiveMessage(
       && deps.handoffMirrorSuppression,
     );
     if (shouldHandoffToMirror) {
+      const canStopFromIm = desktopHandoffTaskActivated && desktopHandoffStopReady;
+      retainDesktopHandoffTask = Boolean(desktopHandoffTaskActivated && desktopTurnId);
       const handoffText = [
         'Codex Desktop 已接收本次请求，但 SDK 连接在执行中断开。',
         '已自动切换为桌面镜像接管；后续回复和附件会继续回传，请不要重复发送同一请求。',
-        '可发送 `//` 查看当前状态；如需保留本次结果，请等待镜像完成。若决定放弃等待并立即继续，可使用 `/t 0` 切换到纯 IM 会话。',
+        canStopFromIm
+          ? '可发送 `//` 查看当前状态；若要放弃本次桌面任务，请发送 `/stop`。`/t 0` 只切换会话，不会停止原任务。'
+          : '可发送 `//` 查看当前状态；也可发送 `/stop` 尝试安全停止。若无法验证 bridge 自有进程，系统不会误停 Desktop App。',
       ].join('\n\n');
       if (taskState.mirrorSuppressionId && deps.handoffMirrorSuppression) {
         deps.handoffMirrorSuppression(
@@ -884,6 +943,9 @@ export async function runInteractiveMessage(
         finalOutcomeDetail = finalOutcomeDetail || '任务已收到停止请求。';
       }
       deps.recordInteractiveHealthEnd(binding.codepilotSessionId, finalOutcome, finalOutcomeDetail);
+    }
+    if (!retainDesktopHandoffTask) {
+      deps.releaseDesktopHandoffTask?.(binding.codepilotSessionId, taskId);
     }
     deps.releaseInteractiveTask(binding.codepilotSessionId, taskId);
     deps.releaseBridgeTurn?.(binding.codepilotSessionId, taskId);

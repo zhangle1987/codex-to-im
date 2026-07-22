@@ -120,6 +120,15 @@ export interface BridgeSession {
   stream_ui_consecutive_failures?: number;
   mirror_status?: 'inactive' | 'watching' | 'stale';
   mirror_last_event_at?: string;
+  desktop_handoff_task_id?: string;
+  desktop_handoff_thread_id?: string;
+  desktop_handoff_turn_id?: string;
+  desktop_handoff_owner_pid?: number;
+  desktop_handoff_process_pid?: number;
+  desktop_handoff_process_parent_pid?: number;
+  desktop_handoff_process_created_at?: string;
+  desktop_handoff_registered_at?: string;
+  desktop_handoff_active?: boolean;
   created_at?: string;
   updated_at?: string;
 }

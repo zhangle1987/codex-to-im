@@ -55,6 +55,7 @@ import {
   beginMirrorSuppression as beginMirrorSuppressionBase,
   filterSuppressedMirrorRecords as filterSuppressedMirrorRecordsBase,
   handoffMirrorSuppression as handoffMirrorSuppressionBase,
+  ignoreMirrorTurn as ignoreMirrorTurnBase,
   isMirrorSuppressed as isMirrorSuppressedBase,
   settleMirrorSuppression as settleMirrorSuppressionBase,
   type MirrorSuppressionConfig,
@@ -80,7 +81,10 @@ import {
   resolveNewWorkingDirectory,
   resolveNewSessionWorkingDirectory,
 } from './bridge-session-support.js';
-import { handleBridgeCommand } from './command-dispatch.js';
+import {
+  handleBridgeCommand,
+  type ForceStopSessionResult,
+} from './command-dispatch.js';
 import {
   runInteractiveMessage,
 } from './interactive-message-runner.js';
@@ -103,6 +107,7 @@ import { deliverBridgeNotice, deliverResponse } from './feedback-delivery.js';
 import { routeDesktopRecords } from './turns/desktop-terminal-router.js';
 import { createTurnCoordinator } from './turns/turn-coordinator.js';
 import type { BridgeTurnTerminalRecord } from './turns/turn-types.js';
+import { createDesktopHandoffControl } from './desktop-handoff-control.js';
 
 const GLOBAL_KEY = '__bridge_manager__';
 const DANGLING_MIRROR_THREAD_RETRY_LIMIT = 3;
@@ -246,6 +251,11 @@ const INTERACTIVE_RUNTIME = createInteractiveRuntime(getState, {
   nowIso,
 });
 
+const DESKTOP_HANDOFF_CONTROL = createDesktopHandoffControl({
+  getStore: () => getBridgeContext().store,
+  nowIso,
+});
+
 function formatDesktopTerminalDetail(terminal: BridgeTurnTerminalRecord): string {
   if (terminal.outcome === 'aborted') {
     return '检测到桌面线程已停止当前任务。';
@@ -347,6 +357,15 @@ function handoffMirrorSuppression(
   suppressionId?: string | null,
 ): void {
   handoffMirrorSuppressionBase(getMirrorSuppressionStore(), sessionId, suppressionId);
+}
+
+function ignoreMirrorTurn(sessionId: string, turnId: string): void {
+  ignoreMirrorTurnBase(
+    getMirrorSuppressionStore(),
+    sessionId,
+    MIRROR_SUPPRESSION_CONFIG,
+    turnId,
+  );
 }
 
 function settleMirrorSuppression(
@@ -545,6 +564,7 @@ const MIRROR_RUNTIME = createMirrorRuntime(getState, {
   syncMirrorSessionStateSafe,
   filterSuppressedMirrorRecords,
   observeSessionHealthRecords: (sessionId, threadId, records) => {
+    DESKTOP_HANDOFF_CONTROL.observeRecords(sessionId, threadId, records);
     SESSION_HEALTH_RUNTIME.observeDesktopMirrorRecords(sessionId, threadId, records);
   },
   recordOrphanedMirrorTurn: (sessionId, detail) => {
@@ -579,6 +599,59 @@ async function reconcileMirrorSubscriptions(): Promise<void> {
 
 function clearMirrorSubscriptions(): void {
   MIRROR_RUNTIME.clearMirrorSubscriptions();
+}
+
+async function forceStopBridgeSession(
+  sessionId: string,
+  detail?: string,
+): Promise<ForceStopSessionResult> {
+  const activeTask = INTERACTIVE_RUNTIME.getActiveTask(sessionId);
+  const hadQueuedWork = INTERACTIVE_RUNTIME.getQueuedCount(sessionId) > 0;
+  const handoffResult = DESKTOP_HANDOFF_CONTROL.hasTask(sessionId)
+    ? await DESKTOP_HANDOFF_CONTROL.stopTask(sessionId)
+    : null;
+  let interactiveHandled = false;
+  if (activeTask || hadQueuedWork) {
+    interactiveHandled = await INTERACTIVE_RUNTIME.forceStopSession(sessionId, detail);
+    if (activeTask && !handoffResult) {
+      DESKTOP_HANDOFF_CONTROL.releaseTask(sessionId, activeTask.id);
+    }
+  }
+
+  if (handoffResult) {
+    if (handoffResult.status === 'stopped') {
+      ignoreMirrorTurn(sessionId, handoffResult.task.turnId);
+      MIRROR_RUNTIME.interruptMirrorTurn(
+        sessionId,
+        handoffResult.task.threadId,
+        handoffResult.task.turnId,
+      );
+      return { status: 'stopped' };
+    }
+    if (handoffResult.status === 'unavailable') {
+      return {
+        status: 'unavailable',
+        detail: `${interactiveHandled ? '当前 IM 请求已停止，但此前的 Desktop 任务仍无法确认。 ' : ''}${handoffResult.error}`,
+      };
+    }
+    if (handoffResult.status === 'failed') {
+      return {
+        status: 'failed',
+        detail: `${interactiveHandled ? '当前 IM 请求已停止；此前的 Desktop 任务停止失败。 ' : ''}${handoffResult.error}`,
+      };
+    }
+    if (!interactiveHandled) {
+      return {
+        status: 'not_running',
+        detail: '记录中的 Desktop 任务进程已经结束；如有尚未投递的结果，mirror 会继续完成收尾。',
+      };
+    }
+  }
+
+  if (interactiveHandled) {
+    return activeTask ? { status: 'stop_requested' } : { status: 'stopped' };
+  }
+  return { status: 'not_running' };
 }
 
 const ADAPTER_RUNTIME = createAdapterRuntime(getState, {
@@ -958,6 +1031,9 @@ async function handleMessage(
       abortMirrorSuppression,
       handoffMirrorSuppression,
       settleMirrorSuppression,
+      prepareDesktopHandoffTask: (task) => DESKTOP_HANDOFF_CONTROL.prepareTask(task),
+      activateDesktopHandoffTask: (sessionId, taskId) => DESKTOP_HANDOFF_CONTROL.activateTask(sessionId, taskId),
+      releaseDesktopHandoffTask: (sessionId, taskId) => DESKTOP_HANDOFF_CONTROL.releaseTask(sessionId, taskId),
       releaseInteractiveTask: (sessionId, taskId) => INTERACTIVE_RUNTIME.releaseInteractiveTask(sessionId, taskId),
       releaseBridgeTurn: (sessionId, taskId) => TURN_COORDINATOR.releaseSessionTurn(sessionId, taskId),
       deliverResponse,
@@ -977,7 +1053,7 @@ async function handleCommand(
 ): Promise<void> {
   await handleBridgeCommand(adapter, msg, text, {
     getActiveTask: (sessionId) => INTERACTIVE_RUNTIME.getActiveTask(sessionId),
-    forceStopSession: (sessionId, detail) => INTERACTIVE_RUNTIME.forceStopSession(sessionId, detail),
+    forceStopSession: forceStopBridgeSession,
     recordInteractiveHealthEnd: (sessionId, outcome, detail) => SESSION_HEALTH_RUNTIME.recordInteractiveEnd(sessionId, outcome, detail),
     diagnoseSessionHealth: (sessionId) => SESSION_HEALTH_RUNTIME.diagnoseSessionHealth(sessionId),
     diagnoseAllActiveSessions: () => SESSION_HEALTH_RUNTIME.diagnoseAllActiveSessions(),

@@ -777,6 +777,9 @@ describe('interactive-message-runner', () => {
     const settled: string[] = [];
     const aborted: string[] = [];
     const healthEnds: string[] = [];
+    const preparedHandoffs: Array<{ sessionId: string; taskId: string; threadId: string; turnId: string }> = [];
+    const activatedHandoffs: string[] = [];
+    const releasedHandoffs: string[] = [];
     let bridgeTurn: ActiveBridgeTurn | undefined;
 
     await runInteractiveMessage(
@@ -816,6 +819,17 @@ describe('interactive-message-runner', () => {
         },
         settleMirrorSuppression(_sessionId, suppressionId) {
           settled.push(suppressionId || '');
+        },
+        async prepareDesktopHandoffTask(task) {
+          preparedHandoffs.push(task);
+          return true;
+        },
+        activateDesktopHandoffTask(_sessionId, taskId) {
+          activatedHandoffs.push(taskId);
+          return true;
+        },
+        releaseDesktopHandoffTask(_sessionId, taskId) {
+          releasedHandoffs.push(taskId);
         },
         releaseInteractiveTask(sessionId, taskId) {
           if (taskStateMap.get(sessionId)?.id === taskId) {
@@ -857,9 +871,217 @@ describe('interactive-message-runner', () => {
     assert.deepEqual(settled, []);
     assert.deepEqual(aborted, []);
     assert.deepEqual(healthEnds, []);
+    assert.equal(preparedHandoffs.length, 1);
+    assert.equal(preparedHandoffs[0]?.threadId, 'desktop-thread-transport-handoff');
+    assert.equal(preparedHandoffs[0]?.turnId, 'desktop-turn-transport-handoff');
+    assert.equal(activatedHandoffs.length, 1);
+    assert.deepEqual(releasedHandoffs, []);
     assert.equal(adapter.streamEnds.length, 1);
     assert.equal(adapter.streamEnds[0]?.status, 'interrupted');
     assert.match(adapter.streamEnds[0]?.text || '', /已自动切换为桌面镜像接管/);
+    assert.match(adapter.streamEnds[0]?.text || '', /发送 \/stop/);
+    assert.equal(taskStateMap.size, 0);
+  });
+
+  it('does not hand off to mirror when the Desktop transport-loss wait is stopped from IM', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    adapter.streamEndResult = true;
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-desktop-transport-stop',
+      userId: 'user-desktop-transport-stop',
+    } as const;
+    router.bindToSdkSession(address, 'desktop-thread-transport-stop', {
+      workingDirectory: 'D:\\workspace\\transport-stop',
+      displayName: 'Desktop transport stop',
+    });
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const handedOff: string[] = [];
+    const aborted: string[] = [];
+    const releasedHandoffs: string[] = [];
+    let bridgeTurn: ActiveBridgeTurn | undefined;
+    let stopPromise: Promise<boolean> | null = null;
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-transport-stop-1',
+        address,
+        text: 'continue then stop',
+        timestamp: Date.now(),
+      },
+      'continue then stop',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        registerBridgeTurn(turn) {
+          bridgeTurn = turn;
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask() {},
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-transport-stop'; },
+        abortMirrorSuppression(_sessionId, suppressionId) {
+          aborted.push(suppressionId || '');
+        },
+        handoffMirrorSuppression(_sessionId, suppressionId) {
+          handedOff.push(suppressionId || '');
+        },
+        settleMirrorSuppression() {},
+        async prepareDesktopHandoffTask() { return true; },
+        activateDesktopHandoffTask() { return true; },
+        releaseDesktopHandoffTask(_sessionId, taskId) {
+          releasedHandoffs.push(taskId);
+        },
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse() {},
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (
+          _binding,
+          _text,
+          _onPermission,
+          _abortSignal,
+          _files,
+          _onPartialText,
+          _onToolEvent,
+          _onTaskEvent,
+          _onStatusNote,
+          onPromptPrepared,
+        ) => {
+          onPromptPrepared?.('continue then stop');
+          bridgeTurn?.onDesktopTurnAssociated?.('desktop-turn-transport-stop');
+          setTimeout(() => {
+            const task = [...taskStateMap.values()][0];
+            stopPromise = task?.forceStop?.('用户执行 /stop，请求停止当前任务。') || null;
+          }, 0);
+          return {
+            responseText: '',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: true,
+            errorMessage: 'Codex 会话恢复失败，上一轮执行进程未正常退出。',
+            errorCode: 'desktop_transport_lost',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+        desktopTerminalFinalizationTimeoutMs: 100,
+      },
+    );
+
+    await stopPromise;
+    assert.deepEqual(handedOff, []);
+    assert.deepEqual(aborted, ['suppression-transport-stop']);
+    assert.equal(releasedHandoffs.length, 1);
+    assert.equal(adapter.streamEnds.length, 1);
+    assert.equal(adapter.streamEnds[0]?.status, 'interrupted');
+    assert.doesNotMatch(adapter.streamEnds[0]?.text || '', /已自动切换为桌面镜像接管/);
+    assert.equal(taskStateMap.size, 0);
+  });
+
+  it('releases provisional Desktop stop control after a normal SDK completion', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-desktop-stop-control-release',
+      userId: 'user-desktop-stop-control-release',
+    } as const;
+    router.bindToSdkSession(address, 'desktop-thread-stop-control-release', {
+      workingDirectory: 'D:\\workspace\\stop-control-release',
+      displayName: 'Desktop stop control release',
+    });
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const releasedHandoffs: string[] = [];
+    const activatedHandoffs: string[] = [];
+    let bridgeTurn: ActiveBridgeTurn | undefined;
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-stop-control-release',
+        address,
+        text: 'normal completion',
+        timestamp: Date.now(),
+      },
+      'normal completion',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        registerBridgeTurn(turn) {
+          bridgeTurn = turn;
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask() {},
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd() {},
+        beginMirrorSuppression() { return 'suppression-normal-release'; },
+        abortMirrorSuppression() {},
+        settleMirrorSuppression() {},
+        async prepareDesktopHandoffTask() { return true; },
+        activateDesktopHandoffTask(_sessionId, taskId) {
+          activatedHandoffs.push(taskId);
+          return true;
+        },
+        releaseDesktopHandoffTask(_sessionId, taskId) {
+          releasedHandoffs.push(taskId);
+        },
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) taskStateMap.delete(sessionId);
+        },
+        async deliverResponse() {},
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (
+          _binding,
+          _text,
+          _onPermission,
+          _abortSignal,
+          _files,
+          _onPartialText,
+          _onToolEvent,
+          _onTaskEvent,
+          _onStatusNote,
+          onPromptPrepared,
+        ) => {
+          onPromptPrepared?.('normal completion');
+          bridgeTurn?.onDesktopTurnAssociated?.('desktop-turn-stop-control-release');
+          return {
+            responseText: 'done',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: false,
+            errorMessage: '',
+            permissionRequests: [],
+            sdkSessionId: 'desktop-thread-stop-control-release',
+          };
+        },
+      },
+    );
+
+    assert.deepEqual(activatedHandoffs, []);
+    assert.equal(releasedHandoffs.length, 1);
     assert.equal(taskStateMap.size, 0);
   });
 

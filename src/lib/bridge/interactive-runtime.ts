@@ -128,7 +128,7 @@ export function createInteractiveRuntime(
   async function forceStopSession(sessionId: string, detail?: string): Promise<boolean> {
     const state = getState();
     const task = state.activeTasks.get(sessionId);
-    let handled = false;
+    let handled = getQueuedCount(sessionId) > 0;
     if (task?.forceStop) {
       handled = await task.forceStop(detail);
     } else if (task) {

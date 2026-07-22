@@ -407,7 +407,7 @@ describe('command-dispatch', () => {
     )));
   });
 
-  it('force-stops a stale running session even when no active task remains in memory', async () => {
+  it('reports a confirmed stop for a recoverable session without an in-memory task', async () => {
     const store = initTestContext();
     const sent: string[] = [];
     const forcedStops: Array<{ sessionId: string; detail?: string }> = [];
@@ -439,7 +439,7 @@ describe('command-dispatch', () => {
         getActiveTask: () => undefined,
         forceStopSession: async (sessionId, detail) => {
           forcedStops.push({ sessionId, detail });
-          return false;
+          return { status: 'stopped' };
         },
         recordInteractiveHealthEnd: (sessionId, outcome, detail) => {
           healthEnds.push({ sessionId, outcome, detail });
@@ -451,14 +451,53 @@ describe('command-dispatch', () => {
 
     assert.deepEqual(forcedStops, [{
       sessionId: binding.codepilotSessionId,
-      detail: '用户执行 /stop，已停止当前任务。',
+      detail: '用户执行 /stop，请求停止当前任务。',
     }]);
     assert.deepEqual(healthEnds, [{
       sessionId: binding.codepilotSessionId,
       outcome: 'aborted',
-      detail: '用户执行 /stop，已停止当前任务。',
+      detail: '用户执行 /stop，请求停止当前任务。',
     }]);
     assert.match(sent[0] || '', /旧会话「Bridge: chat-stop-stale」任务已停止/);
+  });
+
+  it('does not claim a Desktop task stopped when ownership cannot be verified', async () => {
+    const store = initTestContext();
+    const sent: string[] = [];
+    const healthEnds: string[] = [];
+    const adapter: any = {
+      channelType: 'feishu',
+      send: async (message: { text: string }) => {
+        sent.push(message.text);
+        return { ok: true, messageId: 'reply-stop-unavailable' };
+      },
+    };
+    const address = { channelType: 'feishu', chatId: 'chat-stop-unavailable' } as const;
+    router.createBinding(address, 'D:\\workspace\\stop-unavailable');
+
+    await handleBridgeCommand(
+      adapter,
+      {
+        address,
+        text: '/stop',
+        messageId: 'incoming-stop-unavailable',
+      } as any,
+      '/stop',
+      {
+        getActiveTask: () => undefined,
+        forceStopSession: async () => ({
+          status: 'unavailable',
+          detail: '未找到可验证为 bridge 自有的 Codex exec 进程。',
+        }),
+        recordInteractiveHealthEnd: (_sessionId, outcome) => healthEnds.push(outcome),
+        diagnoseSessionHealth: async () => null,
+        diagnoseAllActiveSessions: async () => [],
+      },
+    );
+
+    assert.deepEqual(healthEnds, []);
+    assert.match(sent[0] || '', /无法从 IM 安全停止/);
+    assert.match(sent[0] || '', /未终止 Codex Desktop App/);
   });
 
   it('removes the current binding on /unbind', async () => {

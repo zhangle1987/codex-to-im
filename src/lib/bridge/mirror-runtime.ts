@@ -83,6 +83,7 @@ export interface CreateMirrorRuntimeDeps {
 
 export interface MirrorRuntime {
   resetMirrorSessionForInteractiveRun(sessionId: string): void;
+  interruptMirrorTurn(sessionId: string, threadId: string, turnId: string): boolean;
   reconcileMirrorSubscriptions(): Promise<void>;
   clearMirrorSubscriptions(): void;
 }
@@ -387,6 +388,9 @@ export function createMirrorRuntime(
     }
 
     const readResult = readMirrorDeliverableRecords(subscription, snapshot);
+    if (readResult.hasMoreData) {
+      scheduleMirrorWake();
+    }
     const deliverableRecords = readResult.records;
     for (const kind of readResult.unknownKinds) {
       if (subscription.unknownMirrorKindsSeen.has(kind)) continue;
@@ -528,8 +532,46 @@ export function createMirrorRuntime(
     }
   }
 
+  function interruptMirrorTurn(sessionId: string, threadId: string, turnId: string): boolean {
+    const normalizedTurnId = turnId.trim();
+    if (!normalizedTurnId) return false;
+    const streamKey = buildMirrorStreamKey(sessionId, normalizedTurnId, '');
+    let interrupted = false;
+
+    for (const subscription of getState().mirrorSubscriptions.values()) {
+      if (subscription.sessionId !== sessionId || subscription.threadId !== threadId) continue;
+      let subscriptionInterrupted = false;
+      const bufferedCount = subscription.bufferedRecords.length;
+      const deliveryCount = subscription.pendingDeliveries.length;
+      subscription.bufferedRecords = subscription.bufferedRecords.filter(
+        (record) => record.turnId !== normalizedTurnId,
+      );
+      subscription.pendingDeliveries = subscription.pendingDeliveries.filter(
+        (turn) => turn.streamKey !== streamKey,
+      );
+      if (subscription.pendingTurn?.turnId === normalizedTurnId) {
+        deps.stopMirrorStreaming(subscription, 'interrupted');
+        subscription.pendingTurn = null;
+        subscriptionInterrupted = true;
+      }
+      if (
+        subscription.bufferedRecords.length !== bufferedCount
+        || subscription.pendingDeliveries.length !== deliveryCount
+      ) {
+        subscriptionInterrupted = true;
+      }
+      if (subscriptionInterrupted) {
+        interrupted = true;
+        orphanProbeAt.delete(subscription.bindingId);
+        deps.syncMirrorSessionStateSafe(sessionId, 'mirror turn interrupted from IM');
+      }
+    }
+    return interrupted;
+  }
+
   return {
     resetMirrorSessionForInteractiveRun,
+    interruptMirrorTurn,
     reconcileMirrorSubscriptions,
     clearMirrorSubscriptions,
   };

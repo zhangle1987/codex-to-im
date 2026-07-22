@@ -67,6 +67,10 @@ All host dependencies are abstracted through interfaces in `host.ts` and accesse
 - **IM Desktop reuse**: the bridge sends through the SDK and correlates Desktop rollout records by exact turn metadata before a JSONL terminal record can finalize the IM task.
 - **Desktop mirror**: Desktop-originated turns are observed from rollout JSONL and delivered to IM without re-execution.
 
+For an IM Desktop-reuse turn, the bridge captures the identity of its direct `codex exec ... resume <threadId>` child after the Desktop turn is associated. If the SDK transport is lost, that identity is retained in session runtime metadata while mirror takes over delivery. A later IM `/stop` revalidates PID, parent PID, creation time, executable name, and command line before terminating that process tree. It never terminates the Desktop-owned `app-server`; an unverifiable process returns a safe failure instead of a false “stopped” result.
+
+Mirror rollout recovery is byte-offset based and bounded per read. After a bridge restart, large Desktop JSONL files are scanned in chunks while the persisted delivery timestamp remains the recovery boundary; the live cursor is replaced only after the scan catches up. This prevents oversized histories from exceeding Node's string limit and prevents pre-cursor records from being replayed as new output.
+
 The bridge never attaches to ChatGPT Remote's private relay. Codex CLI daemon/listen support does not make the separately launched Desktop stdio process attachable. `CTI_CODEX_TRANSPORT=sdk` is the operational rollback; `app-server` affects IM-owned sessions only and is ignored for Desktop-backed sessions.
 
 ### Outbound (LLM → IM)

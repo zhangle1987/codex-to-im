@@ -1850,7 +1850,7 @@ describe('bridge-manager stop handling', () => {
 
     assert.equal(abortController.signal.aborted, true);
     assert.equal(state.activeTasks.has(binding.codepilotSessionId), false);
-    assert.match(sent[0] || '', /旧会话「Bridge: chat-stop」任务已停止/);
+    assert.match(sent[0] || '', /已向旧会话「Bridge: chat-stop」发送停止请求/);
   });
 });
 

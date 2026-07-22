@@ -24,6 +24,7 @@ export interface DesktopMirrorSubscription {
   trailingText: string;
   activeMirrorTurnId: string | null;
   activeSpecialCallIds: Set<string>;
+  recoveryState: DesktopMirrorRecoveryState | null;
   bufferedRecords: DesktopMirrorRecord[];
   pendingTurn: DesktopMirrorTurnState | null;
   pendingDeliveries: FinalizedDesktopMirrorTurn[];
@@ -31,6 +32,14 @@ export interface DesktopMirrorSubscription {
   missingThreadPolls: number;
   consecutiveFailures: number;
   suspendedUntil: number | null;
+}
+
+export interface DesktopMirrorRecoveryState {
+  baselineCursor: DesktopMirrorCursor;
+  scannedCursor: DesktopMirrorCursor;
+  boundaryFound: boolean;
+  dedupePending: boolean;
+  scannedRecordCount: number;
 }
 
 export interface MirrorFileSnapshot {
@@ -72,6 +81,7 @@ export function resetMirrorReadState(subscription: DesktopMirrorSubscription): v
   subscription.trailingText = '';
   subscription.activeMirrorTurnId = null;
   subscription.activeSpecialCallIds.clear();
+  subscription.recoveryState = null;
   subscription.bufferedRecords = [];
 }
 
@@ -101,6 +111,7 @@ export function createMirrorSubscription(
     trailingText: '',
     activeMirrorTurnId: null,
     activeSpecialCallIds: new Set<string>(),
+    recoveryState: null,
     bufferedRecords: [],
     pendingTurn: null,
     pendingDeliveries: [],

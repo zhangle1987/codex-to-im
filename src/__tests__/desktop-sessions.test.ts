@@ -1951,6 +1951,56 @@ describe('readDesktopSessionMirrorRecordStreamByFilePath', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('advances past a JSONL record larger than the configured mirror read chunk', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
+    const filePath = path.join(tempRoot, 'rollout.jsonl');
+    const largeLine = JSON.stringify({
+      timestamp: '2026-03-25T00:00:00.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call_output',
+        call_id: 'large-output',
+        output: 'x'.repeat(4_000),
+      },
+    });
+    const finalLine = JSON.stringify({
+      timestamp: '2026-03-25T00:00:01.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'task_complete',
+        turn_id: 'turn-large-output',
+        last_agent_message: 'done',
+      },
+    });
+    fs.writeFileSync(filePath, `${largeLine}\n${finalLine}\n`, 'utf8');
+
+    const first = readDesktopSessionMirrorRecordDeltaByFilePath(
+      filePath,
+      0,
+      fs.statSync(filePath).size,
+      '',
+      null,
+      [],
+      { maxBytes: 128 },
+    );
+    assert.ok(first.nextOffset > 128);
+    assert.equal(first.records[0]?.type, 'tool_finished');
+    assert.ok(first.nextOffset < fs.statSync(filePath).size);
+
+    const second = readDesktopSessionMirrorRecordDeltaByFilePath(
+      filePath,
+      first.nextOffset,
+      fs.statSync(filePath).size,
+      first.trailingText,
+      first.nextTurnId,
+      first.nextSpecialCallIds,
+      { maxBytes: 128 },
+    );
+    assert.equal(second.records.at(-1)?.content, 'done');
+    assert.equal(second.nextOffset, fs.statSync(filePath).size);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('does not corrupt a multibyte character split across incremental reads', () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-desktop-mirror-'));
     const filePath = path.join(tempRoot, 'rollout.jsonl');

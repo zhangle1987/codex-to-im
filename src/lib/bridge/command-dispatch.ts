@@ -116,11 +116,18 @@ function auditCommandBindingChange(
 
 export interface BridgeCommandDispatchDeps {
   getActiveTask(sessionId: string): { abortController: AbortController } | undefined;
-  forceStopSession?(sessionId: string, detail?: string): Promise<boolean>;
+  forceStopSession?(sessionId: string, detail?: string): Promise<ForceStopSessionResult>;
   recordInteractiveHealthEnd?(sessionId: string, outcome: 'completed' | 'failed' | 'aborted', detail?: string): void;
   diagnoseSessionHealth(sessionId: string): Promise<import('./session-health-runtime.js').SessionHealthDiagnosis | null>;
   diagnoseAllActiveSessions(): Promise<import('./session-health-runtime.js').SessionHealthDiagnosis[]>;
 }
+
+export type ForceStopSessionResult =
+  | { status: 'stopped'; detail?: string }
+  | { status: 'stop_requested'; detail?: string }
+  | { status: 'not_running'; detail?: string }
+  | { status: 'unavailable'; detail: string }
+  | { status: 'failed'; detail: string };
 
 export async function handleBridgeCommand(
   adapter: BaseChannelAdapter,
@@ -736,16 +743,31 @@ export async function handleBridgeCommand(
       const looksRunning = session?.runtime_status === 'running'
         || session?.runtime_status === 'queued'
         || runningHealthStatuses.has(session?.health_status || '');
-      if (task || looksRunning) {
-        const taskName = getSessionDisplayName(session, binding.workingDirectory);
-        const detail = '用户执行 /stop，已停止当前任务。';
-        if (deps.forceStopSession) {
-          await deps.forceStopSession(binding.codepilotSessionId, detail);
-        } else if (task) {
-          task.abortController.abort();
+      const taskName = getSessionDisplayName(session, binding.workingDirectory);
+      const stopDetail = '用户执行 /stop，请求停止当前任务。';
+      if (deps.forceStopSession) {
+        const result = await deps.forceStopSession(binding.codepilotSessionId, stopDetail);
+        if (result.status === 'stopped') {
+          deps.recordInteractiveHealthEnd?.(binding.codepilotSessionId, 'aborted', stopDetail);
+          response = `旧会话「${taskName}」任务已停止，可继续发送消息恢复该线程。`;
+        } else if (result.status === 'stop_requested') {
+          deps.recordInteractiveHealthEnd?.(binding.codepilotSessionId, 'aborted', stopDetail);
+          response = `已向旧会话「${taskName}」发送停止请求。可发送 \`//\` 确认最终状态。`;
+        } else if (result.status === 'not_running') {
+          response = result.detail || '当前没有正在运行的任务。';
+        } else if (result.status === 'unavailable') {
+          response = `无法从 IM 安全停止旧会话「${taskName}」：${result.detail}\n\n未终止 Codex Desktop App 或其他无法确认归属的进程。`;
+        } else {
+          response = `停止旧会话「${taskName}」失败：${result.detail}\n\n可稍后重试 \`/stop\`，或发送 \`//\` 查看任务是否仍在运行。`;
         }
-        deps.recordInteractiveHealthEnd?.(binding.codepilotSessionId, 'aborted', detail);
-        response = `旧会话「${taskName}」任务已停止，可继续发送消息恢复该线程。`;
+      } else if (task || looksRunning) {
+        if (task) {
+          task.abortController.abort();
+          deps.recordInteractiveHealthEnd?.(binding.codepilotSessionId, 'aborted', stopDetail);
+          response = `已向旧会话「${taskName}」发送停止请求。可发送 \`//\` 确认最终状态。`;
+        } else {
+          response = '当前任务看起来仍在运行，但当前运行时不支持从 IM 安全停止。';
+        }
       } else {
         response = '当前没有正在运行的任务。';
       }
