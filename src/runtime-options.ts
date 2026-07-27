@@ -5,8 +5,6 @@ export const RUNTIME_REASONING_EFFORTS = [
   'medium',
   'high',
   'xhigh',
-  'max',
-  'ultra',
 ] as const;
 export type RuntimeReasoningEffort = typeof RUNTIME_REASONING_EFFORTS[number];
 
@@ -29,8 +27,12 @@ export function normalizeSandboxMode(
 }
 
 export function parseReasoningEffort(value: string | null | undefined): RuntimeReasoningEffort | undefined {
-  return RUNTIME_REASONING_EFFORTS.includes(value as RuntimeReasoningEffort)
-    ? value as RuntimeReasoningEffort
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'max' || normalized === 'ultra') {
+    return 'xhigh';
+  }
+  return RUNTIME_REASONING_EFFORTS.includes(normalized as RuntimeReasoningEffort)
+    ? normalized as RuntimeReasoningEffort
     : undefined;
 }
 

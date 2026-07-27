@@ -603,6 +603,10 @@ export class CodexProvider implements LLMProvider {
                     case 'turn.failed': {
                       const error = (event as { error?: { message?: string } }).error?.message;
                       const message = error || 'Turn failed';
+                      console.error(
+                        `[codex-provider] SDK turn.failed for session=${params.sessionId} thread=${savedThreadId || 'new'}:`,
+                        message,
+                      );
                       if (isCodexProcessRecoveryErrorMessage(message)) {
                         self.recycleSdkClient(params.sessionId);
                       } else {
@@ -616,6 +620,10 @@ export class CodexProvider implements LLMProvider {
                     case 'error': {
                       const error = (event as { message?: string }).message;
                       const message = error || 'Thread error';
+                      console.error(
+                        `[codex-provider] SDK error event for session=${params.sessionId} thread=${savedThreadId || 'new'}:`,
+                        message,
+                      );
                       if (isCodexProcessRecoveryErrorMessage(message)) {
                         self.recycleSdkClient(params.sessionId);
                       } else {

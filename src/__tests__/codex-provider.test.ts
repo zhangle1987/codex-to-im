@@ -1134,7 +1134,7 @@ describe('CodexProvider image input', () => {
     }
   });
 
-  it('passes sandboxMode and reasoning effort to the Codex thread', async () => {
+  it('passes sandboxMode and normalizes legacy reasoning effort for the Codex thread', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
     const provider = new CodexProvider(new PendingPermissions());
@@ -1159,7 +1159,7 @@ describe('CodexProvider image input', () => {
       prompt: 'hello',
       sessionId: 'sandbox-reasoning-session',
       sandboxMode: 'danger-full-access',
-      modelReasoningEffort: 'xhigh',
+      modelReasoningEffort: 'max' as never,
     });
     await collectStream(stream);
 

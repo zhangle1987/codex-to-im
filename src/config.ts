@@ -402,7 +402,7 @@ function expandConfig(v2: ConfigV2File): Config {
     streamStatusCheckIntervalSeconds: v2.runtime.streamStatusCheckIntervalSeconds ?? DEFAULT_STREAM_STATUS_CHECK_INTERVAL_SECONDS,
     codexSkipGitRepoCheck: v2.runtime.codexSkipGitRepoCheck ?? true,
     codexSandboxMode: v2.runtime.codexSandboxMode ?? 'workspace-write',
-    codexReasoningEffort: v2.runtime.codexReasoningEffort ?? 'medium',
+    codexReasoningEffort: parseReasoningEffort(v2.runtime.codexReasoningEffort) ?? 'medium',
     uiAllowLan: v2.runtime.uiAllowLan === true,
     uiAccessToken: v2.runtime.uiAccessToken || undefined,
   };

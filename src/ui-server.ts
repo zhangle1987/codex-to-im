@@ -105,8 +105,9 @@ function getSupportedReasoningEfforts(
   const metadata = getCodexModelMetadata(modelSlug, models);
   const levels = metadata?.supportedReasoningLevels
     .map((level) => parseReasoningEffort(level.effort))
-    .filter((level): level is RuntimeReasoningEffort => Boolean(level)) || [];
-  return levels.length > 0 ? levels : FALLBACK_REASONING_EFFORTS;
+    .filter((level): level is RuntimeReasoningEffort => Boolean(level) && level !== 'minimal') || [];
+  const uniqueLevels = Array.from(new Set(levels));
+  return uniqueLevels.length > 0 ? uniqueLevels : FALLBACK_REASONING_EFFORTS;
 }
 
 function getDefaultReasoningEffort(
@@ -2468,7 +2469,7 @@ function renderHtml(): string {
                 <div class="command-list">
                   <div class="command-list-head"><div>命令</div><div>原始命令</div><div>说明</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/m</code></div><div class="command-col-original"><code>/mode</code></div><div class="command-col-desc">查看当前模式；可选 <code>code</code>、<code>plan</code>、<code>ask</code>。</div></div>
-                  <div class="command-item"><div class="command-col-command"><code>/r</code></div><div class="command-col-original"><code>/reasoning</code></div><div class="command-col-desc">查看当前思考级别；可选 <code>low</code>、<code>medium</code>、<code>high</code>、<code>xhigh</code>，部分新模型还支持 <code>max</code>、<code>ultra</code>。</div></div>
+                  <div class="command-item"><div class="command-col-command"><code>/r</code></div><div class="command-col-original"><code>/reasoning</code></div><div class="command-col-desc">查看当前思考级别；可选 <code>low</code>、<code>medium</code>、<code>high</code>、<code>xhigh</code>。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/model [slug|default]</code></div><div class="command-col-original"><code>/model [slug|default]</code></div><div class="command-col-desc">查看或切换当前 IM 会话使用的模型；CLI only 模型会标注“仅 IM / CLI”，共享桌面线程只允许查看不允许切换。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0</code></div><div class="command-col-original"><code>/thread 0</code></div><div class="command-col-desc">切换到当前聊天的临时草稿线程。</div></div>
                   <div class="command-item"><div class="command-col-command"><code>/t 0 reset</code></div><div class="command-col-original"><code>/thread 0 reset</code></div><div class="command-col-desc">丢弃当前草稿上下文并重建一条新的草稿线程。</div></div>

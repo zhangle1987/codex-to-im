@@ -49,9 +49,8 @@ export function formatReasoningEffort(reasoning: string): string {
     case 'xhigh':
       return 'xhigh (5)';
     case 'max':
-      return 'max (6)';
     case 'ultra':
-      return 'ultra (7)';
+      return 'xhigh (5, 兼容旧值)';
     default:
       return reasoning;
   }

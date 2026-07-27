@@ -874,12 +874,128 @@ describe('interactive-message-runner', () => {
     assert.equal(preparedHandoffs.length, 1);
     assert.equal(preparedHandoffs[0]?.threadId, 'desktop-thread-transport-handoff');
     assert.equal(preparedHandoffs[0]?.turnId, 'desktop-turn-transport-handoff');
-    assert.equal(activatedHandoffs.length, 1);
+    assert.equal(activatedHandoffs.length, 2);
     assert.deepEqual(releasedHandoffs, []);
     assert.equal(adapter.streamEnds.length, 1);
     assert.equal(adapter.streamEnds[0]?.status, 'interrupted');
     assert.match(adapter.streamEnds[0]?.text || '', /已自动切换为桌面镜像接管/);
     assert.match(adapter.streamEnds[0]?.text || '', /发送 \/stop/);
+    assert.equal(taskStateMap.size, 0);
+  });
+
+  it('fails closed when the Desktop exec process exits before mirror handoff', async () => {
+    const adapter = new FakeFeishuStreamingAdapter();
+    adapter.streamEndResult = true;
+    const address = {
+      channelType: 'feishu-default',
+      channelProvider: 'feishu',
+      chatId: 'chat-desktop-transport-exited',
+      userId: 'user-desktop-transport-exited',
+    } as const;
+    router.bindToSdkSession(address, 'desktop-thread-transport-exited', {
+      workingDirectory: 'D:\\workspace\\transport-exited',
+      displayName: 'Desktop transport exited',
+    });
+
+    const taskStateMap = new Map<string, InteractiveTaskState>();
+    const handedOff: string[] = [];
+    const settled: string[] = [];
+    const healthEnds: string[] = [];
+    const releasedHandoffs: string[] = [];
+    const delivered: string[] = [];
+    let activationCount = 0;
+    let bridgeTurn: ActiveBridgeTurn | undefined;
+
+    await runInteractiveMessage(
+      adapter,
+      {
+        messageId: 'incoming-transport-exited-1',
+        address,
+        text: 'continue desktop task',
+        timestamp: Date.now(),
+      },
+      'continue desktop task',
+      undefined,
+      {
+        registerInteractiveTask(task) {
+          taskStateMap.set(task.sessionId, task);
+        },
+        registerBridgeTurn(turn) {
+          bridgeTurn = turn;
+        },
+        resetMirrorSessionForInteractiveRun() {},
+        isCurrentInteractiveTask(sessionId, taskId) {
+          return taskStateMap.get(sessionId)?.id === taskId;
+        },
+        touchInteractiveTask() {},
+        recordInteractiveHealthStart() {},
+        recordInteractiveHealthProgress() {},
+        recordInteractiveHealthTool() {},
+        recordInteractiveHealthEnd(_sessionId, outcome) {
+          healthEnds.push(outcome);
+        },
+        beginMirrorSuppression() { return 'suppression-transport-exited'; },
+        abortMirrorSuppression() {},
+        handoffMirrorSuppression(_sessionId, suppressionId) {
+          handedOff.push(suppressionId || '');
+        },
+        settleMirrorSuppression(_sessionId, suppressionId) {
+          settled.push(suppressionId || '');
+        },
+        async prepareDesktopHandoffTask() { return true; },
+        activateDesktopHandoffTask() {
+          activationCount += 1;
+          return activationCount === 1;
+        },
+        releaseDesktopHandoffTask(_sessionId, taskId) {
+          releasedHandoffs.push(taskId);
+        },
+        releaseInteractiveTask(sessionId, taskId) {
+          if (taskStateMap.get(sessionId)?.id === taskId) {
+            taskStateMap.delete(sessionId);
+          }
+        },
+        async deliverResponse(_adapter, _address, responseText) {
+          delivered.push(responseText);
+        },
+        persistSdkSessionUpdate() {},
+        processMessageImpl: async (
+          _binding,
+          _text,
+          _onPermission,
+          _abortSignal,
+          _files,
+          _onPartialText,
+          _onToolEvent,
+          _onTaskEvent,
+          _onStatusNote,
+          onPromptPrepared,
+        ) => {
+          onPromptPrepared?.('continue desktop task');
+          bridgeTurn?.onDesktopTurnAssociated?.('desktop-turn-transport-exited');
+          return {
+            responseText: '',
+            outboundAttachments: [],
+            tokenUsage: null,
+            hasError: true,
+            errorMessage: 'Codex 会话恢复失败，上一轮执行进程未正常退出。',
+            errorCode: 'desktop_transport_lost',
+            permissionRequests: [],
+            sdkSessionId: null,
+          };
+        },
+        desktopTerminalFinalizationTimeoutMs: 1,
+      },
+    );
+
+    assert.equal(activationCount, 2);
+    assert.deepEqual(handedOff, []);
+    assert.deepEqual(settled, ['suppression-transport-exited']);
+    assert.deepEqual(healthEnds, ['failed']);
+    assert.equal(releasedHandoffs.length, 1);
+    assert.equal(adapter.streamEnds[0]?.status, 'error');
+    assert.doesNotMatch(adapter.streamEnds[0]?.text || '', /已自动切换为桌面镜像接管/);
+    assert.ok(delivered.some((text) => text.includes('Codex 会话恢复失败')));
     assert.equal(taskStateMap.size, 0);
   });
 

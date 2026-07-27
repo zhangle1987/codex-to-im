@@ -27,8 +27,9 @@ describe('runtime-options', () => {
     assert.equal(parseReasoningEffort('medium'), 'medium');
     assert.equal(parseReasoningEffort('high'), 'high');
     assert.equal(parseReasoningEffort('xhigh'), 'xhigh');
-    assert.equal(parseReasoningEffort('max'), 'max');
-    assert.equal(parseReasoningEffort('ultra'), 'ultra');
+    assert.equal(parseReasoningEffort('max'), 'xhigh');
+    assert.equal(parseReasoningEffort('ultra'), 'xhigh');
+    assert.equal(parseReasoningEffort(' XHIGH '), 'xhigh');
     assert.equal(parseReasoningEffort('invalid'), undefined);
     assert.equal(normalizeReasoningEffort('invalid'), 'medium');
     assert.equal(normalizeReasoningEffort(undefined, 'low'), 'low');

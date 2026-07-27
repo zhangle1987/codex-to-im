@@ -2,8 +2,11 @@ import type { DesktopMirrorRecord } from '../../desktop-sessions.js';
 import type { BridgeSession, BridgeStore } from './host.js';
 import {
   captureManagedCodexExecProcess,
+  inspectManagedCodexProcess,
+  isManagedCodexExecProcess,
   stopManagedCodexExecProcess,
   type ManagedCodexExecProcessIdentity,
+  type ManagedCodexProcessInspection,
   type ManagedCodexProcessStopResult,
 } from './managed-codex-process.js';
 
@@ -29,16 +32,18 @@ export type DesktopHandoffTaskStopResult =
 
 export interface DesktopHandoffControl {
   prepareTask(task: DesktopHandoffTaskRegistration): Promise<boolean>;
-  activateTask(sessionId: string, taskId: string): boolean;
+  activateTask(sessionId: string, taskId: string): Promise<boolean>;
   releaseTask(sessionId: string, taskId?: string): void;
   hasTask(sessionId: string): boolean;
+  reconcilePersistedTasks(): Promise<number>;
   stopTask(sessionId: string): Promise<DesktopHandoffTaskStopResult>;
   observeRecords(sessionId: string, threadId: string, records: DesktopMirrorRecord[]): void;
 }
 
 export interface CreateDesktopHandoffControlDeps {
-  getStore(): Pick<BridgeStore, 'getSession' | 'updateSession'>;
+  getStore(): Pick<BridgeStore, 'getSession' | 'listSessions' | 'updateSession'>;
   captureProcess?(threadId: string, ownerPid: number): Promise<ManagedCodexExecProcessIdentity | null>;
+  inspectProcess?(pid: number): Promise<ManagedCodexProcessInspection>;
   stopProcess?(identity: ManagedCodexExecProcessIdentity): Promise<ManagedCodexProcessStopResult>;
   nowIso?(): string;
   ownerPid?: number;
@@ -102,6 +107,7 @@ export function createDesktopHandoffControl(
   deps: CreateDesktopHandoffControlDeps,
 ): DesktopHandoffControl {
   const captureProcess = deps.captureProcess ?? captureManagedCodexExecProcess;
+  const inspectProcess = deps.inspectProcess ?? inspectManagedCodexProcess;
   const stopProcess = deps.stopProcess ?? stopManagedCodexExecProcess;
   const nowIso = deps.nowIso ?? (() => new Date().toISOString());
   const ownerPid = deps.ownerPid ?? process.pid;
@@ -154,12 +160,74 @@ export function createDesktopHandoffControl(
     return readTask(deps.getStore().getSession(sessionId))?.active === true;
   }
 
-  function activateTask(sessionId: string, taskId: string): boolean {
+  async function inspectTaskProcess(
+    task: DesktopHandoffTaskDescriptor,
+  ): Promise<'running' | 'gone' | 'unknown'> {
+    const identity = task.processIdentity;
+    if (!identity) return 'gone';
+
+    let inspection: ManagedCodexProcessInspection;
+    try {
+      inspection = await inspectProcess(identity.pid);
+    } catch (error) {
+      console.warn(
+        `[desktop-handoff] Failed to inspect Codex exec process ${identity.pid}:`,
+        error instanceof Error ? error.message : error,
+      );
+      return 'unknown';
+    }
+    if (inspection.status === 'not_found') return 'gone';
+    if (inspection.status !== 'found') {
+      console.warn(
+        `[desktop-handoff] Codex exec process ${identity.pid} inspection was inconclusive:`,
+        inspection.error,
+      );
+      return 'unknown';
+    }
+    if (
+      inspection.process.createdAt !== identity.createdAt
+      || !isManagedCodexExecProcess(inspection.process, identity)
+    ) {
+      return 'gone';
+    }
+    return 'running';
+  }
+
+  async function activateTask(sessionId: string, taskId: string): Promise<boolean> {
     const store = deps.getStore();
     const current = readTask(store.getSession(sessionId));
     if (!current || current.taskId !== taskId) return false;
+    const processStatus = await inspectTaskProcess(current);
+    if (processStatus !== 'running') {
+      releaseTask(sessionId, taskId);
+      console.warn(
+        `[desktop-handoff] Refused handoff for ${current.threadId}/${current.turnId}: `
+        + `bridge-owned Codex exec process is ${processStatus}.`,
+      );
+      return false;
+    }
     store.updateSession(sessionId, { desktop_handoff_active: true }, { touch: false });
     return true;
+  }
+
+  async function reconcilePersistedTasks(): Promise<number> {
+    const store = deps.getStore();
+    let released = 0;
+    for (const session of store.listSessions()) {
+      const task = readTask(session);
+      if (!task) continue;
+      if (!task.active || !task.processIdentity) {
+        releaseTask(task.sessionId, task.taskId);
+        released += 1;
+        continue;
+      }
+      const processStatus = await inspectTaskProcess(task);
+      if (processStatus === 'gone') {
+        releaseTask(task.sessionId, task.taskId);
+        released += 1;
+      }
+    }
+    return released;
   }
 
   async function stopTask(sessionId: string): Promise<DesktopHandoffTaskStopResult> {
@@ -247,6 +315,7 @@ export function createDesktopHandoffControl(
     activateTask,
     releaseTask,
     hasTask,
+    reconcilePersistedTasks,
     stopTask,
     observeRecords,
   };

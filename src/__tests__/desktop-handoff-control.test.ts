@@ -22,6 +22,14 @@ const processIdentity: ManagedCodexExecProcessIdentity = {
   createdAt: '2026-07-22T02:41:18.440405+08:00',
 };
 
+const runningProcess = {
+  pid: processIdentity.pid,
+  parentPid: processIdentity.parentPid,
+  createdAt: processIdentity.createdAt,
+  name: 'codex.exe',
+  commandLine: `codex.exe exec --json resume ${registration.threadId}`,
+};
+
 function createStore() {
   const session: BridgeSession = {
     id: registration.sessionId,
@@ -36,6 +44,9 @@ function createStore() {
     store: {
       getSession(sessionId: string) {
         return sessionId === session.id ? session : null;
+      },
+      listSessions() {
+        return [session];
       },
       updateSession(
         sessionId: string,
@@ -58,6 +69,7 @@ describe('desktop handoff control', () => {
       ownerPid: 4321,
       nowIso: () => '2026-07-22T02:42:00.000Z',
       captureProcess: async () => processIdentity,
+      inspectProcess: async () => ({ status: 'found', process: runningProcess }),
     });
 
     assert.equal(await control.prepareTask(registration), true);
@@ -65,7 +77,7 @@ describe('desktop handoff control', () => {
     assert.equal(fixture.session.desktop_handoff_turn_id, registration.turnId);
     assert.equal(fixture.session.desktop_handoff_process_pid, processIdentity.pid);
     assert.equal(control.hasTask(registration.sessionId), false);
-    assert.equal(control.activateTask(registration.sessionId, registration.taskId), true);
+    assert.equal(await control.activateTask(registration.sessionId, registration.taskId), true);
     assert.equal(control.hasTask(registration.sessionId), true);
     assert.ok(fixture.touchOptions.every((options) => options?.touch === false));
   });
@@ -77,10 +89,11 @@ describe('desktop handoff control', () => {
       getStore: () => fixture.store,
       ownerPid: 4321,
       captureProcess: async () => processIdentity,
+      inspectProcess: async () => ({ status: 'found', process: runningProcess }),
     });
 
     await control.prepareTask(registration);
-    control.activateTask(registration.sessionId, registration.taskId);
+    await control.activateTask(registration.sessionId, registration.taskId);
     const recoveredControl = createDesktopHandoffControl({
       getStore: () => fixture.store,
       ownerPid: 9999,
@@ -120,7 +133,7 @@ describe('desktop handoff control', () => {
     assert.equal(control.hasTask(registration.sessionId), false);
   });
 
-  it('keeps the task recoverable when safe process ownership cannot be verified', async () => {
+  it('refuses handoff when safe process ownership cannot be verified', async () => {
     const fixture = createStore();
     const control = createDesktopHandoffControl({
       getStore: () => fixture.store,
@@ -129,10 +142,51 @@ describe('desktop handoff control', () => {
     });
 
     assert.equal(await control.prepareTask(registration), false);
-    control.activateTask(registration.sessionId, registration.taskId);
+    assert.equal(await control.activateTask(registration.sessionId, registration.taskId), false);
     const result = await control.stopTask(registration.sessionId);
 
-    assert.equal(result.status, 'unavailable');
-    assert.equal(control.hasTask(registration.sessionId), true);
+    assert.equal(result.status, 'not_running');
+    assert.equal(control.hasTask(registration.sessionId), false);
+  });
+
+  it('revalidates process liveness and clears a handoff whose process exited', async () => {
+    const fixture = createStore();
+    let inspections = 0;
+    const control = createDesktopHandoffControl({
+      getStore: () => fixture.store,
+      ownerPid: 4321,
+      captureProcess: async () => processIdentity,
+      inspectProcess: async () => {
+        inspections += 1;
+        return inspections === 1
+          ? { status: 'found' as const, process: runningProcess }
+          : { status: 'not_found' as const };
+      },
+    });
+
+    await control.prepareTask(registration);
+    assert.equal(await control.activateTask(registration.sessionId, registration.taskId), true);
+    assert.equal(await control.activateTask(registration.sessionId, registration.taskId), false);
+    assert.equal(control.hasTask(registration.sessionId), false);
+    assert.equal(fixture.session.desktop_handoff_task_id, undefined);
+  });
+
+  it('releases stale persisted handoffs during startup reconciliation', async () => {
+    const fixture = createStore();
+    const activeControl = createDesktopHandoffControl({
+      getStore: () => fixture.store,
+      ownerPid: 4321,
+      captureProcess: async () => processIdentity,
+      inspectProcess: async () => ({ status: 'found', process: runningProcess }),
+    });
+    await activeControl.prepareTask(registration);
+    await activeControl.activateTask(registration.sessionId, registration.taskId);
+
+    const recoveredControl = createDesktopHandoffControl({
+      getStore: () => fixture.store,
+      inspectProcess: async () => ({ status: 'not_found' }),
+    });
+    assert.equal(await recoveredControl.reconcilePersistedTasks(), 1);
+    assert.equal(recoveredControl.hasTask(registration.sessionId), false);
   });
 });

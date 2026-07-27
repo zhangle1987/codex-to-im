@@ -54,7 +54,7 @@ import { readDesktopSessionMessages } from '../../desktop-sessions.js';
 import { getExplicitDesktopThreadId } from './turns/turn-classifier.js';
 
 const MODE_OPTIONS_TEXT = '可选：`code`（直接执行，默认） `plan`（先分析再行动） `ask`（轻对话 / 草稿）';
-const REASONING_OPTIONS_TEXT = '可选：`low` `medium` `high` `xhigh`，部分新模型还支持 `max`、`ultra`；数字兼容：`1=minimal` `2=low` `3=medium` `4=high` `5=xhigh` `6=max` `7=ultra`';
+const REASONING_OPTIONS_TEXT = '可选：`low` `medium` `high` `xhigh`；数字兼容：`1=minimal` `2=low` `3=medium` `4=high` `5=xhigh`，旧值 `6`、`7` 会按 `xhigh` 处理';
 
 function parseForceFlag(args: string): { args: string; force: boolean } {
   const forcePattern = /(^|\s)--force(?=\s|$)/;
@@ -446,7 +446,7 @@ export async function handleBridgeCommand(
       if (!reasoning) {
         response = buildCommandFields(
           '思考级别用法',
-          [['命令', '`/reasoning low|medium|high|xhigh|max|ultra`']],
+          [['命令', '`/reasoning low|medium|high|xhigh`']],
           ['也支持兼容数字：`/reasoning 1|2|3|4|5|6|7`', REASONING_OPTIONS_TEXT],
           responseParseMode === 'Markdown',
         );

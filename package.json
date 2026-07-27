@@ -1,6 +1,6 @@
 {
   "name": "codex-to-im",
-  "version": "1.0.66",
+  "version": "1.0.67",
   "description": "Installable Codex-to-IM bridge with local setup UI and background service",
   "license": "MIT",
   "homepage": "https://github.com/zhangle1987/codex-to-im#readme",
@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.71.1",
-    "@openai/codex-sdk": "0.144.6",
+    "@openai/codex-sdk": "0.145.0",
     "markdown-it": "^14.3.0",
     "qrcode": "^1.5.4",
     "ws": "^8.21.1"

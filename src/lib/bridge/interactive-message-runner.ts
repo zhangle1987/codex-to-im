@@ -207,7 +207,7 @@ export interface RunInteractiveMessageDeps {
   handoffMirrorSuppression?(sessionId: string, suppressionId?: string | null): void;
   settleMirrorSuppression(sessionId: string, suppressionId?: string | null): void;
   prepareDesktopHandoffTask?(task: DesktopHandoffTaskRegistration): Promise<boolean>;
-  activateDesktopHandoffTask?(sessionId: string, taskId: string): boolean;
+  activateDesktopHandoffTask?(sessionId: string, taskId: string): boolean | Promise<boolean>;
   releaseDesktopHandoffTask?(sessionId: string, taskId: string): void;
   releaseInteractiveTask(sessionId: string, taskId: string): void;
   releaseBridgeTurn?(sessionId: string, taskId: string): void;
@@ -804,7 +804,7 @@ export async function runInteractiveMessage(
     ) {
       desktopHandoffStopReady = await desktopHandoffPreparation;
       if (deps.isCurrentInteractiveTask(binding.codepilotSessionId, taskId)) {
-        desktopHandoffTaskActivated = deps.activateDesktopHandoffTask(
+        desktopHandoffTaskActivated = await deps.activateDesktopHandoffTask(
           binding.codepilotSessionId,
           taskId,
         );
@@ -832,12 +832,24 @@ export async function runInteractiveMessage(
       hasError: result.hasError,
       errorMessage: result.errorMessage,
     });
+    if (
+      desktopTransportLost
+      && desktopHandoffTaskActivated
+      && !terminalAfterProcess
+      && deps.activateDesktopHandoffTask
+    ) {
+      desktopHandoffTaskActivated = await deps.activateDesktopHandoffTask(
+        binding.codepilotSessionId,
+        taskId,
+      );
+    }
     const shouldHandoffToMirror = Boolean(
       desktopThreadId
       && desktopTurnAccepted
       && !terminalAfterProcess
       && result.hasError
       && result.errorCode === 'desktop_transport_lost'
+      && desktopHandoffTaskActivated
       && deps.handoffMirrorSuppression,
     );
     if (shouldHandoffToMirror) {

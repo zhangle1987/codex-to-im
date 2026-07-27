@@ -236,7 +236,7 @@ Web 工作台现在只展示自动启动状态；真正的启用和关闭请使�
 - 另外，当前 `codex` runtime 下正文通常不是逐字流式输出；更常见的效果是先显示 `Thinking / Tool Progress`，正文在回答完成时一次性落到卡片里。
 - IM 里发送 `/history` 可以查看当前会话最近 N 条消息，N 由“基础配置”中的返回条数控制。
 - IM 里发送 `/history` 默认返回整理后的摘要；发送 `/history raw` 才会查看最近 N 条原始消息。
-- IM 里发送 `/reasoning high`、`/reasoning max` 或 `/reasoning 4` 之类命令，可以只对当前会话覆盖思考级别；具体可用档位取决于当前模型。
+- IM 里发送 `/reasoning high` 或 `/reasoning 4` 之类命令，可以只对当前会话覆盖思考级别；可用档位为 `low|medium|high|xhigh`，历史 `max`、`ultra` 会按 `xhigh` 处理。
 - IM 里发送 `/thread 0` 会进入临时草稿线程，适合短讨论或临时想法。
 - “通道”页现在管理的是多个通道实例，而不是固定的一组飞书/微信配置。
 - 每个实例都可以有自己的别名；别名只用于区分不同聊天入口，不会改变 Codex 会话语义。
@@ -251,7 +251,7 @@ Web 工作台现在只展示自动启动状态；真正的启用和关闭请使�
 - `/n` / `/new` 在当前正式会话目录下新建线程；这类线程当前只保证在 IM 中可继续，不会自动出现在 Codex Desktop 会话列表中
 - `/n proj1` / `/new proj1` 新建项目会话
 - `/m` / `/mode` 查看或切换模式，可选 `code` / `plan` / `ask`
-- `/r` / `/reasoning` 查看或切换思考级别，支持 `low|medium|high|xhigh|max|ultra`，数字 `1|2|3|4|5|6|7` 作为兼容别名
+- `/r` / `/reasoning` 查看或切换思考级别，支持 `low|medium|high|xhigh`；数字 `1|2|3|4|5` 作为兼容别名，旧数字 `6|7` 会按 `xhigh` 处理
 - `/his` / `/history` 历史摘要，`/his raw` / `/history raw` 原始记录
 - `/t 0` / `/thread 0` 临时草稿线程
 - 如果 `测试 Codex` 失败，优先检查当前 Windows 用户下是否已经存在可用的 Codex 登录态或 API Key。

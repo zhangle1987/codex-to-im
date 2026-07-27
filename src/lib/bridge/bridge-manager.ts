@@ -682,6 +682,14 @@ export async function start(): Promise<void> {
   }
 
   INTERACTIVE_RUNTIME.resetPersistedInteractiveRuntimeState();
+  try {
+    const releasedHandoffs = await DESKTOP_HANDOFF_CONTROL.reconcilePersistedTasks();
+    if (releasedHandoffs > 0) {
+      console.warn(`[bridge-manager] Released ${releasedHandoffs} stale Desktop handoff task(s) during startup.`);
+    }
+  } catch (err) {
+    console.error('[bridge-manager] Desktop handoff startup reconcile failed:', describeUnknownError(err));
+  }
   await ADAPTER_RUNTIME.syncConfiguredAdapters({ startLoops: false });
   const startedCount = state.adapters.size;
 

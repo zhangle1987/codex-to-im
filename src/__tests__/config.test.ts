@@ -334,6 +334,26 @@ describe('loadConfig/saveConfig round-trip', () => {
     assert.deepEqual(loaded.enabledChannels, ['feishu']);
   });
 
+  it('normalizes legacy reasoning effort from config.v2.json on load', () => {
+    fs.mkdirSync(path.dirname(CONFIG_V2_PATH), { recursive: true });
+    fs.writeFileSync(
+      CONFIG_V2_PATH,
+      JSON.stringify({
+        schemaVersion: 2,
+        runtime: {
+          provider: 'codex',
+          defaultMode: 'code',
+          codexReasoningEffort: 'max',
+        },
+        channels: [],
+      }, null, 2),
+    );
+
+    const loaded = loadConfig();
+    assert.equal(loaded.codexReasoningEffort, 'xhigh');
+    assert.equal(configToSettings(loaded).get('bridge_codex_reasoning_effort'), 'xhigh');
+  });
+
   it('preserves custom v2 channel instances when saving runtime settings', () => {
     fs.mkdirSync(path.dirname(CONFIG_V2_PATH), { recursive: true });
     fs.writeFileSync(

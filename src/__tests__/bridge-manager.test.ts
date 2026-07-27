@@ -317,11 +317,11 @@ describe('bridge-manager resolveCommandAlias', () => {
     assert.equal(_testOnly.normalizeReasoningEffort('3'), 'medium');
     assert.equal(_testOnly.normalizeReasoningEffort('4'), 'high');
     assert.equal(_testOnly.normalizeReasoningEffort('5'), 'xhigh');
-    assert.equal(_testOnly.normalizeReasoningEffort('6'), 'max');
-    assert.equal(_testOnly.normalizeReasoningEffort('7'), 'ultra');
+    assert.equal(_testOnly.normalizeReasoningEffort('6'), 'xhigh');
+    assert.equal(_testOnly.normalizeReasoningEffort('7'), 'xhigh');
     assert.equal(_testOnly.normalizeReasoningEffort('xhigh'), 'xhigh');
-    assert.equal(_testOnly.normalizeReasoningEffort('max'), 'max');
-    assert.equal(_testOnly.normalizeReasoningEffort('ultra'), 'ultra');
+    assert.equal(_testOnly.normalizeReasoningEffort('max'), 'xhigh');
+    assert.equal(_testOnly.normalizeReasoningEffort('ultra'), 'xhigh');
     assert.equal(_testOnly.normalizeReasoningEffort('9'), null);
   });
 

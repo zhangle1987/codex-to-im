@@ -3,7 +3,7 @@ import {
   type RuntimeReasoningEffort,
 } from '../../runtime-options.js';
 
-export const REASONING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+export const REASONING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 export const DEFAULT_DESKTOP_THREAD_LIST_LIMIT = 10;
 export const MAX_DESKTOP_THREAD_LIST_LIMIT = 200;
 
@@ -76,9 +76,8 @@ export function normalizeReasoningEffort(raw: string): RuntimeReasoningEffort | 
     case '5':
       return 'xhigh';
     case '6':
-      return 'max';
     case '7':
-      return 'ultra';
+      return 'xhigh';
     default:
       return null;
   }
